@@ -96,3 +96,4 @@ li.ok .mk{background:rgba(34,197,94,.15);color:var(--green)}li.bad .mk{backgroun
 .toggle.on{background:rgba(34,197,94,.25)}.toggle.on::after{left:21px;background:var(--green)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 canvas.ring{width:56px;height:56px;flex:none}#disc{width:220px!important;height:220px}
+.row .s.wrap{white-space:normal}

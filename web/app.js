@@ -144,12 +144,14 @@
     return null;
   }
 
-  function hbClass(a) { if (!a) return "down"; if (a.paused) return "paused"; return a.heartbeatAgeS == null || a.heartbeatAgeS > 120 ? "down" : ""; }
+  // heartbeat age as of now: published age + time since that publish (so an offline desk ages out to "down")
+  function hbAge(a) { const st = F("state.json"); if (!a || a.heartbeatAgeS == null || !st) return null; return a.heartbeatAgeS + Math.max(0, (Date.now() - new Date(st.ts)) / 1000); }
+  function hbClass(a) { if (!a) return "down"; if (a.paused) return "paused"; const g = hbAge(a); return g == null || g > 120 ? "down" : ""; }
 
   function agentCard(name, full) {
     const st = F("state.json"), ag = F(`agents/${name}.json`), hb = st?.agents?.[name];
     const title = name[0].toUpperCase() + name.slice(1);
-    const head = `<div class="hd"><div class="nm"><span class="hb ${hbClass(hb)}"></span>${title}</div><div class="sub">${hb?.paused ? "paused" : "♥ " + ago(hb?.heartbeatAgeS)}</div></div>`;
+    const head = `<div class="hd"><div class="nm"><span class="hb ${hbClass(hb)}"></span>${title}</div><div class="sub">${hb?.paused ? "paused" : "♥ " + ago(hbAge(hb))}</div></div>`;
     if (!ag) return `<div class="card agent">${head}<div class="sub">No data published yet</div></div>`;
     let body = "";
     if (name === "scanner") {
@@ -305,7 +307,7 @@
       <div class="row"><div class="grow"><div class="t">${a.mode === "PAPER" ? "PAPER balance" : "LIVE stack"}</div><div class="s">Change in Telegram: stack 1240</div></div><div class="r">${money(a.stack)}</div></div>
       <a class="row" href="${esc(a.profile_url)}" target="_blank" rel="noopener"><div class="grow"><div class="t">FOMO profile</div><div class="s">@${esc(a.fomoHandle)}</div></div><div class="r cyan">Open ›</div></a>
       <button class="row" id="invite" style="width:100%;text-align:left"><div class="grow"><div class="t">Invite a friend</div><div class="s">10% off FOMO fees through your link</div></div><div class="r cyan">Share ›</div></button>
-      <div class="row"><div class="grow"><div class="t">Notifications</div><div class="s">Notifications come through Telegram (@Denarpobot)</div></div></div>
+      <div class="row"><div class="grow"><div class="t">Notifications</div><div class="s wrap">Notifications come through Telegram (@Denarpobot)</div></div></div>
     </div>`;
     h += `<h1>Agents</h1><div class="card list">${AGENTS.map(n => { const hb = st?.agents?.[n]; return `<div class="row"><div class="grow"><div class="t">${n[0].toUpperCase() + n.slice(1)}</div><div class="s">${hb?.paused ? "paused · resume " : "running · pause "}${n[0].toUpperCase() + n.slice(1)}</div></div><span class="toggle ${hb?.paused ? "" : "on"}" aria-disabled="true"></span></div>`; }).join("")}</div>`;
     const by = {};

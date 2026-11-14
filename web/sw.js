@@ -1,5 +1,5 @@
 // App shell cache so Chrome offers Install. Data (/d/...) is never cached here.
-const V = "desk-shell-v1";
+const V = "desk-shell-v2";
 const SHELL = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
