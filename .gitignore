@@ -1,0 +1,9 @@
+.secrets/
+.venv/
+logs/
+*.db
+*.db-*
+data/
+_site/
+__pycache__/
+*.pyc
