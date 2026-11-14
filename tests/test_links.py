@@ -42,6 +42,8 @@ def test_grep_repo():
                 bad.append((str(f.relative_to(ROOT)), u))
         if SHORT.search(t):
             bad.append((str(f.relative_to(ROOT)), "shortener"))
+        if f.suffix in (".js", ".html") and "web" in f.parts and "fomo.family" in t:
+            builders.append(str(f.relative_to(ROOT)))   # the app must only use coin_url/link/profile_url/SIGNUP_URL from data
         if f.suffix == ".py" and f.name != "links.py" and "tests" not in f.parts and "fomo.family" in t:
             builders.append(str(f.relative_to(ROOT)))
     assert not bad, bad

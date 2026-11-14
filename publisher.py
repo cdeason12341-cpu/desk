@@ -170,7 +170,7 @@ class Builder:
                 marks.append({"t": iso(p["exit_pushed_at"] or p["closed_at"] or time.time()), "price": p["exit_price"], "kind": "sell", "label": lbl})
         openp = [p for p in ps if p["status"] in ("open", "exiting")]
         return {"v": 1, "ts": iso(), "mint": mint, "name": co.get("name"), "symbol": co.get("symbol"), "pool": co.get("pool"),
-                "priceUsd": co.get("price"), "holders": co.get("holders"), "status": co.get("status"), "reason": co.get("reason"),
+                "priceUsd": (c.db.one("SELECT price FROM prices WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,)) or {"price": co.get("price")})["price"], "holders": co.get("holders"), "status": co.get("status"), "reason": co.get("reason"),
                 "migratedAt": iso(co["migrated_at"]) if co.get("migrated_at") else None,
                 "coin_url": links.coin_url(mint, "solana"), "link": links.coin_url(mint, "solana"), "candles": self.candles(mint),
                 "audit": json.loads(au["json"]) if au else None, "analyst": json.loads(an["json"]) if an else None,
