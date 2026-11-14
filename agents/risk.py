@@ -159,7 +159,17 @@ class Risk:
     async def on_sold(self, mint):
         p = self.c.db.one("SELECT * FROM positions WHERE mint=? AND status='exiting' ORDER BY id DESC LIMIT 1", (mint,))
         if not p:
-            return "no exiting position for that coin"
+            o = self.c.db.one("SELECT * FROM positions WHERE mint=? AND status='open' ORDER BY id DESC LIMIT 1", (mint,))
+            if not o:
+                return "no open position for that coin"
+            price = o["last_price"] or o["entry_price"]          # manual sell: last polled price, never invented
+            pnl_usd, pct, f = pnl(self.c.s, o, price)
+            self.c.db.x("UPDATE positions SET status='closed', exit_price=?, exit_reason='manual', pnl_usd=?, pct=?, fees_usd=?, closed_at=? WHERE id=?",
+                        (price, pnl_usd, pct, f, self.c.clock(), o["id"]))
+            sign = "+" if pnl_usd >= 0 else "-"
+            self.c.activity("sell", f"Sold {o['name']}", "Risk · sold by you", f"{sign}${abs(pnl_usd):,.2f}", f"{pct:+.1f}%", mint, "risk", "green" if pnl_usd >= 0 else "red")
+            self.c.record_balance(); self.c.event("exit", mint)
+            return f"Closed {o['name']} at the last polled price · {pct:+.1f}%"
         self.c.db.x("UPDATE positions SET status='closed', closed_at=? WHERE id=?", (self.c.clock(), p["id"]))
         self.c.record_balance()
         self.c.event("exit", mint)

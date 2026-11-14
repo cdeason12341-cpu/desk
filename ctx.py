@@ -95,6 +95,8 @@ class Ctx:
         self.db.x("INSERT INTO skips(ts,mint,agent,reason,night) VALUES(?,?,?,?,?)", (self.clock(), mint, agent, reason, self.night))
 
     def error(self, agent, kind, note):
+        import secrets_store
+        note = secrets_store.redact(str(note))
         self.db.x("INSERT INTO errors(ts,agent,kind,note,night) VALUES(?,?,?,?,?)", (self.clock(), agent, kind, note, self.night))
 
     def hb(self, agent, note=""):

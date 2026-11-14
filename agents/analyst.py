@@ -94,7 +94,8 @@ class Analyst:
             try:
                 res = await self.run(item["scan"], item["audit"])
                 if res and res["passed"] and self.c.bus:
-                    self.c.bus.executor.put_nowait({"scan": item["scan"], "audit": item["audit"], "analyst": res})
+                    self.c.bus.executor.put_nowait({"scan": item["scan"], "audit": item["audit"], "analyst": res,
+                                                    "ref_price": res.get("_priceUsd")})
             except Exception as e:
                 self.c.error("analyst", "run", f"{item['scan'].get('mint')} {str(e)[:300]}")
 
@@ -127,11 +128,14 @@ class Analyst:
             score, passed, failed = gate(s, answers)
         else:
             score, passed, failed = 0, False, [fail_reason]
+        ref = fields.get(pair, "priceUsd") if pair else None
         out = {"agent": "analyst", "mint": mint,
                "answers": {k: (round(v, 4) if isinstance(v, (int, float)) else v) for k, v in (answers or {}).items()},
                "score": score, "passed": passed, "failed": failed, "model": model, "inputTokens": itok}
+        out_db = dict(out)
+        out["_priceUsd"] = float(ref) if ref else None
         c.db.x("INSERT INTO analyses(ts,mint,passed,failed,score,model,input_tokens,output_tokens,json,night) VALUES(?,?,?,?,?,?,?,?,?,?)",
-               (c.clock(), mint, 1 if passed else 0, json.dumps(failed), score, model, itok, otok, json.dumps(out), c.night))
+               (c.clock(), mint, 1 if passed else 0, json.dumps(failed), score, model, itok, otok, json.dumps(out_db), c.night))
         h = hashlib.sha256(state.encode()).hexdigest()[:12]
         a = answers or {}
         self.log.info(f"{iso()}\t{mint}\tstate={h}\t" + "\t".join(f"{k}={a.get(k)}" for k in NAMES)
