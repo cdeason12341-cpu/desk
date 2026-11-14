@@ -1,9 +1,10 @@
-.secrets/
-.venv/
-logs/
 *.db
 *.db-*
-data/
-_site/
-__pycache__/
 *.pyc
+.secrets/
+.venv/
+__pycache__/
+_site/
+data/
+logs/
+shots/
