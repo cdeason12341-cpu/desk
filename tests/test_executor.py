@@ -32,12 +32,12 @@ def test_paper_start_skip_warns(tmp_path):
     import main
     d = main.Desk(db_path=str(tmp_path / "e.db"), log_files=False, with_telegram=False)
     d.settings.set("below min", "skip")
-    run(d.night_start())
+    run(d.night_start(force=True))
     msgs = [m["text"] for m in d.ctx.notifier.sent]
     assert any(m.startswith("PAPER · every coin will be skipped, stack under $593.75") for m in msgs), msgs
     d.settings.set("below min", "bump")
     d.ctx.notifier.sent.clear()
-    run(d.night_start())
+    run(d.night_start(force=True))
     assert d.ctx.notifier.sent[0]["text"] == "PAPER · tickets bumped to $47.50 = 23.75% of stack"
 
 
@@ -48,8 +48,12 @@ def test_executor_paper_fill_and_skip():
     out = run(ex.run({"scan": {"mint": M, "name": "EXC", "liquidityUsd": 60000}, "analyst": {"score": 77}, "ref_price": 2.0}))
     assert out["status"] == "bought" and out["sizeUsd"] == 47.5 and out["stackPct"] == 23.75 and "r=savipww" in out["link"]
     push = c.notifier.sent[-1]
-    assert push["text"] == "PAPER · Buy EXC · $47.50 · 23.75% of stack · score 77"
-    assert push["buttons"][0][0]["text"] == "Buy on FOMO"
+    assert push["text"] == "PAPER · Buy EXC · $47.50 · 23.75% of stack\nAuditor 8/8 · Analyst 77 · stop -6% · trail 12%"
+    import links
+    assert push["buttons"] == [[{"text": "Buy on FOMO", "url": links.coin_url(M, "solana")}],
+                               [{"text": "Bought", "callback_data": f"bought:{M}"}, {"text": "Skip", "callback_data": f"skip:{M}"}]]
+    sig = c.db.one("SELECT * FROM signals WHERE mint=?", (M,))
+    assert sig["price"] == 2.0 and sig["status"] == "bought"
     act = c.db.one("SELECT * FROM activity WHERE kind='buy'")
     assert act["title"] == "Bought EXC" and act["right1"] == "$47.50" and act["right2"] == "23.75% of stack"
     assert run(ex.run({"scan": {"mint": M, "name": "EXC", "liquidityUsd": 60000}, "analyst": {"score": 77}})) is None  # 1 push per night

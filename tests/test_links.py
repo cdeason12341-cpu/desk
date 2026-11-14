@@ -4,7 +4,7 @@ import links, crypto, secrets_store
 from tests.helpers import make_ctx, pair, run
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FOMO = re.compile(r"https?://(?:www\.)?fomo\.family[^\s\"'<>)\]]*")
+FOMO = re.compile(r"https?://(?:www\.)?fomo\.family[^\s\"'<>`]*")
 SHORT = re.compile(r"https?://(bit\.ly|t\.co|tinyurl\.com|goo\.gl|ow\.ly|is\.gd|buff\.ly|rebrand\.ly|cutt\.ly|lnkd\.in)/", re.I)
 MINT = "DFev755KT1b6nkfAFNj1fyRQMwoVzNywsSBEBamepump"
 
@@ -14,14 +14,15 @@ def ok_url(u):
 
 
 def test_links_module():
-    assert links.SIGNUP_URL == "https://fomo.family/r/savipww"
-    u = links.coin_url(MINT, "solana")
-    assert u == f"https://fomo.family/tokens/solana/{MINT}?r=savipww"
-    for ch in ("base", "bnb", "robinhood"):
-        assert "r=savipww" in links.coin_url("0xabc", ch)
+    assert links.SIGNUP_URL == "https://fomo.family/r/savipww" and "/r/savipww" in links.SIGNUP_URL
+    assert links.CHAIN_ID == {"solana": 1399811149, "robinhood": 4663, "base": 8453, "bnb": 56}
+    assert links.coin_url(MINT, "solana") == f"https://fomo.family/coin?address={MINT}&chainId=1399811149&r=savipww&source=share_link"
+    assert links.coin_url(MINT) == links.coin_url(MINT, "solana")
+    for ch, cid in (("robinhood", 4663), ("base", 8453), ("bnb", 56)):
+        assert links.coin_url("0xabc", ch) == f"https://fomo.family/coin?address=0xabc&chainId={cid}&r=savipww&source=share_link"
     assert links.coin_url(MINT, "dogechain") == links.SIGNUP_URL
-    assert links.coin_url("", "solana") == links.SIGNUP_URL
     assert links.profile_url("cd12345") == "https://fomo.family/profile/cd12345?source=share_link&r=savipww"
+    assert links.profile_url("@cd12345") == "https://fomo.family/profile/cd12345?source=share_link&r=savipww"
 
 
 def repo_files():
@@ -37,10 +38,6 @@ def test_grep_repo():
         except Exception:
             continue
         for u in FOMO.findall(t):
-            if "{" in u:      # template in docs, e.g. /tokens/{chain}/{address}
-                continue
-            if f.name in ("links.py", "test_links.py") and u == "https://fomo.family":
-                continue      # links.BASE origin constant; every URL links.py returns is checked above
             if not ok_url(u):
                 bad.append((str(f.relative_to(ROOT)), u))
         if SHORT.search(t):
@@ -58,7 +55,7 @@ def test_rendered_pushes_and_buttons():
         for b in buy_buttons(MINT, mode) + sell_buttons(MINT, mode):
             for btn in b:
                 if "url" in btn:
-                    assert ok_url(btn["url"]) and "/tokens/solana/" in btn["url"], btn
+                    assert btn["url"] == links.coin_url(MINT, "solana"), btn
     from telegram import Telegram
     html = Telegram.linkify("PAPER · Buy USPR · $47.50", [("USPR", MINT)])
     for u in re.findall(r'href="([^"]+)"', html):
@@ -86,4 +83,6 @@ def test_published_files_decrypt_and_links(tmp_path):
             assert ok_url(u), (rel, u)
     assert seen > 0
     acct = files["account.json"]
-    assert acct["signupUrl"] == links.SIGNUP_URL and ok_url(acct["profileUrl"])
+    assert acct["SIGNUP_URL"] == links.SIGNUP_URL and acct["profile_url"] == links.profile_url("cd12345")
+    assert acct["mode"] == "PAPER" and acct["stack"] == 200.0
+    assert files[f"coin/{MINT}.json"]["coin_url"] == links.coin_url(MINT, "solana")

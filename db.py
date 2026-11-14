@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, ver
 CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, passed INTEGER, reason TEXT, layer INTEGER, json TEXT, night TEXT);
 CREATE TABLE IF NOT EXISTS analyses(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, passed INTEGER, failed TEXT, score INTEGER,
   model TEXT, input_tokens INTEGER, output_tokens INTEGER, json TEXT, night TEXT);
+CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, price REAL, size_usd REAL, stack_pct REAL, mode TEXT, status TEXT, reason TEXT, night TEXT);
 CREATE TABLE IF NOT EXISTS executions(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, status TEXT, reason TEXT, size_usd REAL, json TEXT, night TEXT);
 CREATE TABLE IF NOT EXISTS positions(
   id INTEGER PRIMARY KEY, mint TEXT, name TEXT, symbol TEXT, mode TEXT, entry_price REAL, size_usd REAL, peak REAL,

@@ -41,20 +41,18 @@ def pnl(s, pos, exit_price):
 
 def exit_text(prefix, reason, name, pos, pnl_usd, pct, s):
     if reason == "trail":
-        sign = "+" if pnl_usd >= 0 else "-"
-        return f"{prefix}Sold {name} · {sign}${abs(pnl_usd):,.2f} ({pct:+.1f}%)"
+        sign = "+" if pnl_usd >= 0 else "-"          # spec: "+${pnl} (+{pct}%)"; sign flips only if fees made it negative
+        return f"{prefix}Sold {name} · {sign}${abs(pnl_usd):,.2f} ({sign}{abs(pct):.1f}%)"
     if reason == "stop":
         return f"{prefix}{name} hit the -{pos['stop_pct']:g}% stop · -${abs(pnl_usd):,.2f}"
     if reason == "timeout":
-        return f"{prefix}Sell {name}, dead money · {pct:+.1f}% in {s['risk.timeout_h']:g}h"
+        return f"{prefix}Sell {name}, dead money · {pct:.1f}% in {s['risk.timeout_h']:g}h"
     return f"{prefix}Sell {name} now, liquidity pulled · {pct:+.1f}%"
 
 
-def sell_buttons(mint, mode):
-    b = [[{"text": "Sell on FOMO", "url": links.coin_url(mint, "solana")}]]
-    if mode == "LIVE":
-        b.append([{"text": "Sold", "callback_data": f"sold:{mint}"}])
-    return b
+def sell_buttons(mint, mode=None):
+    return [[{"text": "Sell on FOMO", "url": links.coin_url(mint, "solana")}],
+            [{"text": "Sold", "callback_data": f"sold:{mint}"}]]
 
 
 class Risk:
@@ -161,6 +159,8 @@ class Risk:
         if not p:
             o = self.c.db.one("SELECT * FROM positions WHERE mint=? AND status='open' ORDER BY id DESC LIMIT 1", (mint,))
             if not o:
+                if self.c.db.one("SELECT id FROM positions WHERE mint=? AND mode='PAPER' AND status='closed'", (mint,)):
+                    return "PAPER already closed this at the exit price"
                 return "no open position for that coin"
             price = o["last_price"] or o["entry_price"]          # manual sell: last polled price, never invented
             pnl_usd, pct, f = pnl(self.c.s, o, price)

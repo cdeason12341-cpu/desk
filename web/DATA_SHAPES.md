@@ -41,7 +41,7 @@ Position:
 {"id":1,"mint":"…pump","name":"USPR","symbol":"USPR","mode":"PAPER","status":"open|exiting|closed",
  "entryPrice":0.1,"lastPrice":0.105,"peakPrice":0.11,"sizeUsd":47.5,"pct":5.0,"stopPct":6,"stopLine":0.094,
  "trailActive":false,"trailLine":null,"exitLine":0.094,"openedAt":"…Z","exitReason":null,"exitPrice":null,"pnlUsd":null,
- "link":"https://fomo.family/tokens/solana/…?r=savipww"}
+ "link":"https://fomo.family/coin?address=…&chainId=1399811149&r=savipww&source=share_link"}
 ```
 A heartbeat older than 120 s = agent shown as down.
 
@@ -72,14 +72,14 @@ AuditJSON: `{"v":1,"agent":"auditor","mint","ts","passed":false,"running":false,
 cyan beam on the first layer with `pass:null`. (Plan B: no SSE; layers arrive per publish, so the app replays them.)
 
 ## coin/{mint}.json (Coin screen)
-`{"v":1,"ts","mint","name","symbol","pool","priceUsd","holders","status":"room|passed|killed|dropped","reason","migratedAt","link",
+`{"v":1,"ts","mint","name","symbol","pool","priceUsd","holders","status":"room|passed|killed|dropped","reason","migratedAt","coin_url","link",
  "candles":[{"t","o","h","l","c","volM5"}] (1-minute buckets from Scanner 60 s / Risk 15 s polls),
  "audit":AuditJSON|null,"analyst":AnalystJSON|null,"executor":ExecutorJSON|null,"position":Position|null,
  "riskLine":{"label":"Risk trailing stop","price":0.094,"style":"orange-dashed"}|null,
  "marks":[{"t","price","kind":"buy|sell","label":"Bought|-8%|Trailed out|Timeout|Pulled|Sold"}]}`
 
-## account.json (Account tab)
-`{"v":1,"ts","mode","fomoHandle":"cd12345","profileUrl":"https://fomo.family/profile/cd12345?source=share_link&r=savipww",
+## account.json (Account tab; = spec GET /api/account: mode, stack, profile_url, SIGNUP_URL)
+`{"v":1,"ts","mode","stack":200.0,"profile_url":"https://fomo.family/profile/cd12345?source=share_link&r=savipww","SIGNUP_URL":"https://fomo.family/r/savipww","fomoHandle":"cd12345","profileUrl":"https://fomo.family/profile/cd12345?source=share_link&r=savipww",
  "signupUrl":"https://fomo.family/r/savipww","telegramBot":"@Denarpobot","editVia":"telegram",
  "settings":[{"key":"risk.stop_pct","value":6,"default":6,"min":1,"max":50,"kind":"float|int|bool|choice|time|str","choices":[],"display":"-6%","aliases":["stop","stop loss","sl"]}],
  "changeLog":[{"t","key","old","new","source"}]}`

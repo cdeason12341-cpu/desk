@@ -220,7 +220,8 @@ class Telegram:
             j = json.loads(ex["json"])
             an = c.db.one("SELECT score FROM analyses WHERE mint=? AND night=?", (mint, c.night)) or {}
             from agents.executor import buy_text, buy_buttons
-            txt = buy_text(c.prefix(), c.label(mint), j["sizeUsd"], j["stackPct"], an.get("score"))
+            txt = buy_text(c.prefix(), c.label(mint), j["sizeUsd"], j["stackPct"], an.get("score"),
+                           c.s["risk.stop_pct"], c.s["risk.trail_pct"])
             return txt, buy_buttons(mint, j["mode"]), [mint]
         res = await self.d.auditor.run(mint, None, record=False)
         lines = [f"Auditor on {c.label(mint)}: {'8/8 clean' if res['passed'] else 'RED · ' + str(res['reason'])}"]
@@ -235,7 +236,7 @@ class Telegram:
         if not p:
             return f"No open position in {self.c.label(mint)}.", [[{"text": "Open on FOMO", "url": links.coin_url(mint)}]], [mint]
         from agents.risk import sell_buttons
-        b = sell_buttons(mint, "LIVE")       # Sold button lets you close it on the desk
+        b = sell_buttons(mint)
         return f"{self.c.prefix() if p['mode']=='PAPER' else ''}Sell {p['name']} · ${p['size_usd']:,.2f} open", b, [mint]
 
     async def cmd_why(self, mint, known=True):

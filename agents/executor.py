@@ -28,15 +28,14 @@ def size_ticket(s, stack: float, free: float, pool_liq: float | None) -> dict:
     return {"size": round(size, 2), "raw": round(raw, 2), "cap": cap, "status": "ok", "reason": None}
 
 
-def buy_text(prefix, name, size, pct, score):
-    return f"{prefix}Buy {name} · ${size:,.2f} · {pct:.2f}% of stack · score {score}"
+def buy_text(prefix, name, size, pct, score, stop_pct, trail_pct):
+    return (f"{prefix}Buy {name} · ${size:,.2f} · {pct:.2f}% of stack\n"
+            f"Auditor 8/8 · Analyst {score} · stop -{stop_pct:g}% · trail {trail_pct:g}%")
 
 
-def buy_buttons(mint, mode):
-    b = [[{"text": "Buy on FOMO", "url": links.coin_url(mint, "solana")}]]
-    if mode == "LIVE":
-        b.append([{"text": "Bought", "callback_data": f"bought:{mint}"}, {"text": "Skip", "callback_data": f"skip:{mint}"}])
-    return b
+def buy_buttons(mint, mode=None):
+    return [[{"text": "Buy on FOMO", "url": links.coin_url(mint, "solana")}],
+            [{"text": "Bought", "callback_data": f"bought:{mint}"}, {"text": "Skip", "callback_data": f"skip:{mint}"}]]
 
 
 class Executor:
@@ -116,19 +115,23 @@ class Executor:
         size = sz["size"]
         pct = 100.0 * size / stack if stack else 0
         name = scan.get("name") or c.label(mint)
-        text = buy_text(c.prefix(), name, size, pct, an.get("score"))
+        text = buy_text(c.prefix(), name, size, pct, an.get("score"), s["risk.stop_pct"], s["risk.trail_pct"])
         ok = await self.push(text, buy_buttons(mint, mode), mint)
         out = dict(base, signalPrice=price, sizeUsd=size, stackPct=round(pct, 2), status="sent")
+        c.db.x("INSERT INTO signals(ts,mint,price,size_usd,stack_pct,mode,status,reason,night) VALUES(?,?,?,?,?,?,?,?,?)",
+               (c.clock(), mint, price, size, round(pct, 2), mode, "sent", None if ok else "push failed", c.night))
         if mode == "PAPER":
             out["status"] = "bought"                         # paper fills at the signal price when the push goes out
             if not ok:
                 out["reason"] = "push failed"
+            c.db.x("UPDATE signals SET status='bought' WHERE mint=? AND night=? AND status='sent'", (mint, c.night))
             self._record(out, stack, sz)
             self.bar[mint] = {"pct": 100, "ts": c.clock()}
             self.open_position(mint, name, scan.get("symbol"), price, size, pct, liq)
             return out
         if not ok:
             out.update(status="skipped", reason="push failed")
+            c.db.x("UPDATE signals SET status='skipped' WHERE mint=? AND night=? AND status='sent'", (mint, c.night))
             self._record(out, stack, sz); c.skip(mint, "executor", "push failed")
             return out
         self.pending[mint] = {"out": out, "name": name, "symbol": scan.get("symbol"), "since": c.clock(), "liq": liq, "pct": pct}
@@ -155,20 +158,27 @@ class Executor:
         c.record_balance()
         c.event("fill", mint)
 
+    def _paper_note(self, mint):
+        if self.c.db.one("SELECT id FROM positions WHERE mint=? AND mode='PAPER' AND night=?", (mint, self.c.night)):
+            return "PAPER already filled this at the signal price"
+        return "nothing pending for that coin"
+
     async def on_bought(self, mint):
         p = self.pending.pop(mint, None)
         if not p:
-            return "nothing pending for that coin"
+            return self._paper_note(mint)
         out = p["out"]
         self.open_position(mint, p["name"], p["symbol"], out["signalPrice"], out["sizeUsd"], p["pct"], p["liq"])
         self.c.db.x("UPDATE executions SET status='bought' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
+        self.c.db.x("UPDATE signals SET status='bought' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
         return f"Position open: {p['name']} ${out['sizeUsd']:,.2f}"
 
     async def on_skip(self, mint):
         p = self.pending.pop(mint, None)
         if not p:
-            return "nothing pending for that coin"
+            return self._paper_note(mint)
         self.c.db.x("UPDATE executions SET status='skipped', reason='skipped by you' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
+        self.c.db.x("UPDATE signals SET status='skipped', reason='skipped by you' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
         self.c.skip(mint, "executor", "skipped by you")
         return f"Skipped {p['name']}"
 
@@ -178,4 +188,5 @@ class Executor:
             if self.c.clock() - p["since"] > win:
                 self.pending.pop(mint, None)
                 self.c.db.x("UPDATE executions SET status='missed', reason='no tap' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
+                self.c.db.x("UPDATE signals SET status='missed', reason='no tap' WHERE mint=? AND night=? AND status='sent'", (mint, self.c.night))
                 self.c.skip(mint, "executor", "missed (no tap)")

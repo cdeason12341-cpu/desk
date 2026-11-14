@@ -26,11 +26,11 @@
     Token-2022), grouped by owner, excluding pool, bonding-curve PDA (derived, verified vs RugCheck) and RugCheck AMM accounts.
 11. Name/symbol from DexScreener; creator from RugCheck `creator` (not creatorBalance); creator balance via RPC
     getTokenAccountsByOwner at migration and again at audit ("sold 0" = never dropped).
-12. FOMO coin URL = https://fomo.family/tokens/{solana|base|bnb|robinhood}/{address}?r=savipww (FOMO's token route);
-    unknown chain -> SIGNUP_URL. Profile = /profile/{handle}?source=share_link&r=savipww.
-13. Inferred where PART 1-2 / the truncated Executor text were not available to the builder: buy push text
-    "Buy {name} · ${size} · {pct}% of stack · score {score}"; Executor rechecks liquidity (-20% vs Scanner) and
-    price (+15% vs Analyst read) before the push; size is capped to free balance; LIVE no tap in 5 min = "missed".
-    A "night" starts when the desk starts and rolls over at report_time; a full PAPER night = one rolled over in PAPER.
+12. FOMO URLs exactly per spec (links.py; @ stripped from handle): coin_url = https://fomo.family/coin?address={address}&chainId={CHAIN_ID[chain]}&r=savipww&source=share_link
+    with CHAIN_ID solana 1399811149, robinhood 4663, base 8453, bnb 56; unknown chain -> logged, SIGNUP_URL.
+    profile_url = https://fomo.family/profile/{handle}?source=share_link&r=savipww. Buy push / Risk pushes verbatim from spec.
+13. Inferred (PART 1-2 not seen by the builder): a "night" starts when the desk starts and rolls over at report_time;
+    a full PAPER night = one rolled over in PAPER. Trail push shows "-$" only if fees turned a trail exit negative.
 14. Copycat containment match needs >= 3 letters on both sides (avoids 1-2 letter names matching everything).
 15. Missing DexScreener priceChange keys are treated as "no value" (never kill on them; rules mode uses 0).
+16. scanner.min_liquidity_usd 40000 -> 10000 (owner via Grok Bot app, 2026-11-14 ~4:56 PM CST). Auditor liquidity rules unchanged.

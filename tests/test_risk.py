@@ -58,6 +58,9 @@ def test_stop_setting_never_loosens_open_and_applies_to_new():
     run(risk.poll_once())
     sell = [x for x in c.notifier.sent if x["kind"] == "sell"]
     assert len(sell) == 1 and sell[0]["text"].startswith("PAPER · NEWC hit the -8% stop · -$"), sell
+    import links
+    assert sell[0]["buttons"] == [[{"text": "Sell on FOMO", "url": links.coin_url(m_new, "solana")}],
+                                  [{"text": "Sold", "callback_data": f"sold:{m_new}"}]]
     act = c.db.one("SELECT * FROM activity WHERE mint=? AND kind='stop'", (m_new,))
     assert act["title"] == "Stopped NEWC" and act["sub"] == "Risk · -8% stop" and act["right1"].startswith("-$")
     import main
@@ -84,3 +87,12 @@ def test_paper_pnl_minus_fees():
     net, pct, f = pnl(c.s, p, 1.2)
     # entry fee 47.50*2%*0.9 = 0.855 ; exit 57.00 -> flat 0.95*0.9 = 0.855 ; gross 9.50
     assert abs(f - 1.71) < 1e-9 and net == round(9.5 - 1.71, 2)
+
+
+def test_exit_texts_exact():
+    from agents.risk import exit_text
+    c, _ = make_ctx()
+    p = {"stop_pct": 6}
+    assert exit_text("", "trail", "USPR", p, 9.5, 20.0, c.s) == "Sold USPR · +$9.50 (+20.0%)"
+    assert exit_text("PAPER · ", "stop", "USPR", p, -3.71, -7.8, c.s) == "PAPER · USPR hit the -6% stop · -$3.71"
+    assert exit_text("", "timeout", "USPR", p, 1.2, 4.0, c.s) == "Sell USPR, dead money · 4.0% in 3h"

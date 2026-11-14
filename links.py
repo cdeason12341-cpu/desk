@@ -1,22 +1,18 @@
 """The ONLY place FOMO URLs are built. Every URL carries the referral r=savipww."""
-from urllib.parse import quote
+import logging
 
-REF = "savipww"
-BASE = "https://fomo.family"
-SIGNUP_URL = f"{BASE}/r/{REF}"
-# Chain slugs from FOMO's token route /tokens/{chain}/{address}
-CHAINS = {"solana": "solana", "sol": "solana", "base": "base", "bnb": "bnb", "bsc": "bnb",
-          "robinhood": "robinhood"}
+CHAIN_ID = {"solana": 1399811149, "robinhood": 4663, "base": 8453, "bnb": 56}
+SIGNUP_URL = "https://fomo.family/r/savipww"
+_log = logging.getLogger("desk.links")
 
 
-def coin_url(mint: str, chain: str = "solana") -> str:
-    slug = CHAINS.get((chain or "").lower())
-    if not slug or not mint:
+def coin_url(address, chain="solana"):
+    if chain not in CHAIN_ID:
+        _log.warning(f"coin_url: unknown chain {chain!r} for {address!r}, returning SIGNUP_URL")
         return SIGNUP_URL
-    return f"{BASE}/tokens/{slug}/{quote(mint, safe='')}?r={REF}"
+    return f"https://fomo.family/coin?address={address}&chainId={CHAIN_ID[chain]}&r=savipww&source=share_link"
 
 
-def profile_url(handle: str) -> str:
-    if not handle:
-        return SIGNUP_URL
-    return f"{BASE}/profile/{quote(handle, safe='')}?source=share_link&r={REF}"
+def profile_url(handle):
+    h = handle.lstrip("@")
+    return f"https://fomo.family/profile/{h}?source=share_link&r=savipww"

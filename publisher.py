@@ -172,7 +172,7 @@ class Builder:
         return {"v": 1, "ts": iso(), "mint": mint, "name": co.get("name"), "symbol": co.get("symbol"), "pool": co.get("pool"),
                 "priceUsd": co.get("price"), "holders": co.get("holders"), "status": co.get("status"), "reason": co.get("reason"),
                 "migratedAt": iso(co["migrated_at"]) if co.get("migrated_at") else None,
-                "link": links.coin_url(mint), "candles": self.candles(mint),
+                "coin_url": links.coin_url(mint, "solana"), "link": links.coin_url(mint, "solana"), "candles": self.candles(mint),
                 "audit": json.loads(au["json"]) if au else None, "analyst": json.loads(an["json"]) if an else None,
                 "executor": json.loads(ex["json"]) if ex else None,
                 "position": self.position_view(openp[-1]) if openp else (self.position_view(ps[-1]) if ps else None),
@@ -188,12 +188,14 @@ class Builder:
         r = self.c.db.one("SELECT json FROM audits WHERE mint=? ORDER BY id DESC LIMIT 1", (mint,))
         if not r:
             return None
-        return dict(json.loads(r["json"]), v=1, running=False, link=links.coin_url(mint))
+        return dict(json.loads(r["json"]), v=1, running=False, link=links.coin_url(mint), coin_url=links.coin_url(mint))
 
     def account(self):
         c, s = self.c, self.c.s
         ch = c.db.rows("SELECT * FROM change_log ORDER BY id DESC LIMIT 50")
-        return {"v": 1, "ts": iso(), "mode": c.mode(), "fomoHandle": s["desk.fomo_handle"],
+        return {"v": 1, "ts": iso(), "mode": c.mode(), "stack": round(c.balance(), 2),
+                "profile_url": links.profile_url(s["desk.fomo_handle"]), "SIGNUP_URL": links.SIGNUP_URL,
+                "fomoHandle": s["desk.fomo_handle"],
                 "profileUrl": links.profile_url(s["desk.fomo_handle"]), "signupUrl": links.SIGNUP_URL,
                 "settings": c.s.specs_public(),
                 "changeLog": [{"t": iso(r["ts"]), "key": r["key"], "old": json.loads(r["old"]), "new": json.loads(r["new"]), "source": r["source"]} for r in ch],

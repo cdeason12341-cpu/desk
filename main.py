@@ -46,10 +46,11 @@ class Desk:
     def after_setting(self, key):
         return self.ticket_msg() if key in TICKET_KEYS else None
 
-    async def night_start(self):
+    async def night_start(self, force=False):
         msg = self.ticket_msg()
-        if msg:
+        if msg and (force or self.db.meta("ticket_msg_night") != self.ctx.night):   # once per night, not per restart
             await self.ctx.notifier.push(msg, kind="ticket")
+            self.db.set_meta("ticket_msg_night", self.ctx.night)
         self.log.info(f"{iso()}\tnight\t{self.ctx.night}\tticket={self.ticket()}")
 
     # ---- loops
