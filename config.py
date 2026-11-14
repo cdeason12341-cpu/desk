@@ -92,13 +92,29 @@ SPECS: list[Spec] = [
     _s("desk.fees_ref_discount", 0.10, 0, 0.5, aliases=("ref discount",), fmt="{v:.0%}"),
     _s("desk.fomo_handle", "cd12345", kind="str", aliases=("fomo handle", "handle")),
     _s("desk.publish_heartbeat_s", 180, 60, 3600, aliases=("publish heartbeat",), fmt="{v}s"),
+    # gmgn hands-off mode (GMGN Agent API, main wallet only). mode/caps/gate are PROTECTED: see PROTECTED below.
+    _s("gmgn.enabled", True, aliases=("gmgn", "hands off")),
+    _s("gmgn.mode", "PAPER", kind="choice", choices=("PAPER", "LIVE"), aliases=("gmgn mode",)),
+    _s("gmgn.cap_trade_usd", 47.50, 5, 10000, aliases=("gmgn cap", "cap trade"), fmt="${v:,.2f}"),
+    _s("gmgn.max_tickets_night", 4, 1, 50, aliases=("gmgn tickets", "cap tickets"), fmt="{v}"),
+    _s("gmgn.live_gate_h", 2.0, 0.5, 48, aliases=("gmgn gate",), fmt="{v:g}h"),
+    _s("gmgn.slippage_pct", 15, 1, 50, aliases=("gmgn slippage", "slippage"), fmt="{v:g}%"),
+    _s("gmgn.priority_fee_sol", 0.0002, 0, 0.01, aliases=("gmgn priority fee", "priority fee"), fmt="{v:g} SOL"),
+    _s("gmgn.tip_fee_sol", 0.001, 0, 0.01, aliases=("gmgn tip", "tip fee"), fmt="{v:g} SOL"),
+    _s("gmgn.sol_reserve", 0.02, 0.005, 1, aliases=("gmgn reserve", "sol reserve"), fmt="{v:g} SOL"),
+    _s("gmgn.fee_pct", 1.0, 0, 5, aliases=("gmgn fee",), fmt="{v:g}%"),
+    _s("gmgn.watch_s", 60, 15, 600, aliases=("gmgn watch",), fmt="{v}s"),
 ]
+# Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
+# Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.
+PROTECTED = {"desk.mode", "gmgn.mode", "gmgn.cap_trade_usd", "gmgn.max_tickets_night", "gmgn.live_gate_h"}
 BY_KEY = {s.key: s for s in SPECS}
 ALIASES: dict[str, str] = {}
 for _sp in SPECS:
     ALIASES[_sp.key] = _sp.key
-    ALIASES[_sp.key.split(".", 1)[1].replace("_", " ")] = _sp.key
-    ALIASES[_sp.key.split(".", 1)[1]] = _sp.key
+    _put = ALIASES.setdefault if _sp.key.startswith("gmgn.") else ALIASES.__setitem__   # gmgn never steals a bare name
+    _put(_sp.key.split(".", 1)[1].replace("_", " "), _sp.key)
+    _put(_sp.key.split(".", 1)[1], _sp.key)
     for a in _sp.aliases:
         ALIASES[a] = _sp.key
 
@@ -190,6 +206,10 @@ class Settings:
         old = self._cache[spec.key]
         if spec.key == "desk.mode" and not force:
             raise SettingError("use 'paper' or 'live' to switch mode")
+        if spec.key in ("gmgn.cap_trade_usd", "gmgn.max_tickets_night") and not force:
+            raise SettingError("caps change only with 'cap trade N' / 'cap tickets N' + CONFIRM CAP in Telegram")
+        if spec.key in PROTECTED and not force:
+            raise SettingError(f"{spec.key} can't be changed with set")
         self.db.x("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (spec.key, json.dumps(new)))
         self.db.x("INSERT INTO change_log(ts,key,old,new,source) VALUES(?,?,?,?,?)",

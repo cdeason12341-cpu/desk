@@ -11,6 +11,8 @@ HELP = ("Commands:\n"
         "pause Scanner / resume Scanner (any agent; Risk not while a position is open)\n"
         "set stop to -8% (any setting by name or alias)\n"
         "stack 1240 · status · paper | live · invite · report\n"
+        "GMGN hands-off: gmgn · gmgn live (then GMGN LIVE) · gmgn paper · /halt · /unhalt\n"
+        "caps · cap trade 60 · cap tickets 6 (then CONFIRM CAP)\n"
         "X = name, symbol or mint.")
 AGENT_NAMES = {"scanner": "scanner", "auditor": "auditor", "analyst": "analyst", "executor": "executor", "risk": "risk"}
 
@@ -33,6 +35,9 @@ class Telegram:
         self.log = self.c.logs["telegram"]
         self.offset = int(self.c.db.meta("tg_offset", 0) or 0)
         self.awaiting_live = False
+        self.from_owner = False          # True only while handling an owner's Telegram message
+        self.pending_cap = None          # (key, value, expires_at)
+        self.gmgn_live_asked = 0.0
 
     async def api(self, method, **payload):
         url = f"https://api.telegram.org/bot{self.token}/{method}"
@@ -128,7 +133,11 @@ class Telegram:
             return
         text = (m.get("text") or "").strip()
         self.log.info(f"{iso()}\tcmd\t{text[:80]}")
-        out = await self.command(text)
+        self.from_owner = True
+        try:
+            out = await self.command(text)
+        finally:
+            self.from_owner = False
         if out:
             msg, buttons, mints = out
             await self.reply(msg, buttons, mints)
@@ -165,6 +174,9 @@ class Telegram:
         low = t.lower().lstrip("/")
         if low in ("start", "help", "?", ""):
             return HELP, None, []
+        g = await self.cmd_gmgn(t, low)
+        if g is not None:
+            return g
         m = re.match(r"^(buy|sell|why)\s+(.+)$", low)
         if m:
             verb, x = m.group(1), t.lstrip("/").split(None, 1)[1]
@@ -284,6 +296,8 @@ class Telegram:
     def cmd_status(self):
         c = self.c
         lines = [f"Mode {c.mode()} · balance ${c.balance():,.2f} · free ${c.free():,.2f}"]
+        if getattr(self.d, "gmgn", None) is not None:
+            lines.append(self.d.gmgn.status_line())
         if c.paused:
             lines.append("Paused: " + ", ".join(sorted(c.paused)))
         pos = self.d.risk.open_positions()
@@ -310,3 +324,75 @@ class Telegram:
             return "Set your LIVE stack first, e.g. 'stack 1240'.", None, []
         s.set("desk.mode", "LIVE", force=True)
         return "Mode PAPER -> LIVE.\n" + (self.d.ticket_msg() or ""), None, []
+
+    # ---------- GMGN hands-off mode (owner Telegram messages only)
+    async def cmd_gmgn(self, t, low):
+        g = getattr(self.d, "gmgn", None)
+        if g is None:
+            return None
+        s = self.c.s
+        if low in ("halt", "unhalt", "gmgn", "gmgn status", "caps", "gmgn live", "gmgn paper", "confirm cap") or t == "GMGN LIVE" \
+                or re.match(r"^cap\s+(trade|tickets)\s+", low):
+            if not self.from_owner:
+                return "That command only works from the owner's Telegram chat.", None, []
+        else:
+            return None
+        if low == "halt":
+            g.halt(True, "telegram owner /halt")
+            return "GMGN HALTED. No new GMGN buys. Server-side exits on open positions stay on. /unhalt to resume.", None, []
+        if low == "unhalt":
+            g.halt(False, "telegram owner /unhalt")
+            return f"GMGN resumed ({g.mode()}).", None, []
+        if low in ("gmgn", "gmgn status"):
+            return g.status_line(), None, []
+        if low == "caps":
+            cap, n = s["gmgn.cap_trade_usd"], s["gmgn.max_tickets_night"]
+            return f"GMGN caps: ${cap:,.2f} per trade · {n} tickets per night · ${cap * n:,.2f} per night", None, []
+        m = re.match(r"^cap\s+(trade|tickets)\s+\$?([\d,.]+)$", low)
+        if m:
+            key = "gmgn.cap_trade_usd" if m.group(1) == "trade" else "gmgn.max_tickets_night"
+            try:
+                val = config.parse_value(config.BY_KEY[key], m.group(2))
+            except config.SettingError as e:
+                return f"Refused: {e}", None, []
+            self.pending_cap = (key, val, time.time() + 120)
+            cap = val if key == "gmgn.cap_trade_usd" else s["gmgn.cap_trade_usd"]
+            n = val if key == "gmgn.max_tickets_night" else s["gmgn.max_tickets_night"]
+            old = config.display(config.BY_KEY[key], s[key]); new = config.display(config.BY_KEY[key], val)
+            return (f"{'Per-trade cap' if key.endswith('usd') else 'Tickets per night'} {old} -> {new} "
+                    f"(night cap ${cap * n:,.2f}). Type CONFIRM CAP within 2 minutes to apply."), None, []
+        if low == "confirm cap":
+            pc, self.pending_cap = self.pending_cap, None
+            if t != "CONFIRM CAP":
+                self.pending_cap = pc
+                return "Type CONFIRM CAP in capitals.", None, []
+            if not pc or time.time() > pc[2]:
+                return "Nothing to confirm (or it expired). Send the cap command again.", None, []
+            msg = s.set(pc[0], pc[1], source="telegram owner CONFIRM CAP", force=True)
+            return f"GMGN {msg}", None, []
+        if low == "gmgn paper":
+            if s["gmgn.mode"] == "PAPER":
+                return "GMGN is already PAPER.", None, []
+            s.set("gmgn.mode", "PAPER", source="telegram owner", force=True)
+            self.c.db.set_meta("gmgn_paper_since", self.c.clock())
+            return "GMGN LIVE -> PAPER. Open positions keep their server-side exits.", None, []
+        if t == "GMGN LIVE":
+            if time.time() - self.gmgn_live_asked > 300:
+                return "Send 'gmgn live' first, then type GMGN LIVE within 5 minutes.", None, []
+            why = await g.live_check()
+            if why:
+                return why, None, []
+            self.gmgn_live_asked = 0.0
+            s.set("gmgn.mode", "LIVE", source="telegram owner GMGN LIVE", force=True)
+            cap, n = s["gmgn.cap_trade_usd"], s["gmgn.max_tickets_night"]
+            return (f"GMGN PAPER -> LIVE. Real buys from your main wallet, ${cap:,.2f} per trade, max {n} per night "
+                    f"(${cap * n:,.2f}). /halt stops buys instantly."), None, []
+        if low == "gmgn live":
+            why = await g.live_check()
+            if why:
+                return why, None, []
+            self.gmgn_live_asked = time.time()
+            cap, n = s["gmgn.cap_trade_usd"], s["gmgn.max_tickets_night"]
+            return (f"Ready. GMGN LIVE spends real SOL from your main wallet: ${cap:,.2f} per trade, max {n} per night. "
+                    f"Type GMGN LIVE (capitals) to switch."), None, []
+        return None

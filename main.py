@@ -25,6 +25,12 @@ class Desk:
         self.ctx.net = Net(self.settings)
         self.scanner, self.auditor, self.analyst = Scanner(self.ctx), Auditor(self.ctx), Analyst(self.ctx)
         self.executor, self.risk = Executor(self.ctx), Risk(self.ctx)
+        from agents.gmgn_trader import GmgnTrader
+        import gmgn as gmgn_api
+        client = gmgn_api.Gmgn() if with_telegram else None        # tests build the Desk without network clients
+        self.gmgn = GmgnTrader(self.ctx, client if (client and client.configured) else None)
+        self.ctx.gmgn = self.gmgn if self.gmgn.client else None
+        self.gmgn.record_gate_rule()
         self.tg = None
         if with_telegram:
             from telegram import Telegram
@@ -94,13 +100,16 @@ class Desk:
                 await asyncio.sleep(5)
 
     async def run(self):
-        self.log.info(f"{iso()}\tdesk start\tpid={os.getpid()}\tmode={self.ctx.mode()}")
+        self.log.info(f"{iso()}\tdesk start\tpid={os.getpid()}\tmode={self.ctx.mode()}\tgmgn={self.settings['gmgn.mode']}"
+                      f"{'' if self.ctx.gmgn else ' (no client)'}\tgmgn_paper_since={iso(self.gmgn.paper_since())}")
         self.ctx.record_balance()
         await self.night_start()
         jobs = {"ws": self.scanner.ws_loop, "scanner": self.scanner.poll_loop, "auditor": self.auditor.loop,
                 "analyst": self.analyst.loop, "executor": self.executor.loop, "risk": self.risk.loop,
                 "events": self.events_loop, "heartbeat": self.heartbeat_loop, "night": self.night_loop,
                 "publisher": self.publisher.loop}
+        if self.ctx.gmgn:
+            jobs["gmgn"] = self.gmgn.loop
         if self.tg:
             jobs["telegram"] = self.tg.loop
         await asyncio.gather(*(self.supervised(n, f) for n, f in jobs.items()))

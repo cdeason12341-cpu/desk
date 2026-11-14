@@ -1,0 +1,37 @@
+{
+ "pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\n-----END PRIVATE KEY-----\n",
+ "ts": 1763163720,
+ "body": "{\"chain\":\"sol\",\"from_address\":\"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2\",\"input_token\":\"So11111111111111111111111111111111111111112\",\"output_token\":\"DFev755KT1b6nkfAFNj1fyRQMwoVzNywsSBEBamepump\",\"input_amount\":\"679347826\",\"slippage\":15,\"is_anti_mev\":true,\"priority_fee\":\"0.0002\",\"tip_fee\":\"0.001\",\"condition_orders\":[{\"order_type\":\"loss_stop\",\"side\":\"sell\",\"price_scale\":\"6\",\"sell_ratio\":\"100\"},{\"order_type\":\"loss_stop_trace\",\"side\":\"sell\",\"sell_ratio\":\"100\",\"drawdown_rate\":\"12\"}],\"sell_ratio_type\":\"hold_amount\"}",
+ "alg": "Ed25519",
+ "cases": [
+  {
+   "path": "/v1/trade/swap",
+   "query": {
+    "timestamp": 1763163720,
+    "client_id": "0b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d"
+   },
+   "body": "{\"chain\":\"sol\",\"from_address\":\"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2\",\"input_token\":\"So11111111111111111111111111111111111111112\",\"output_token\":\"DFev755KT1b6nkfAFNj1fyRQMwoVzNywsSBEBamepump\",\"input_amount\":\"679347826\",\"slippage\":15,\"is_anti_mev\":true,\"priority_fee\":\"0.0002\",\"tip_fee\":\"0.001\",\"condition_orders\":[{\"order_type\":\"loss_stop\",\"side\":\"sell\",\"price_scale\":\"6\",\"sell_ratio\":\"100\"},{\"order_type\":\"loss_stop_trace\",\"side\":\"sell\",\"sell_ratio\":\"100\",\"drawdown_rate\":\"12\"}],\"sell_ratio_type\":\"hold_amount\"}",
+   "message": "/v1/trade/swap:client_id=0b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d&timestamp=1763163720:{\"chain\":\"sol\",\"from_address\":\"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2\",\"input_token\":\"So11111111111111111111111111111111111111112\",\"output_token\":\"DFev755KT1b6nkfAFNj1fyRQMwoVzNywsSBEBamepump\",\"input_amount\":\"679347826\",\"slippage\":15,\"is_anti_mev\":true,\"priority_fee\":\"0.0002\",\"tip_fee\":\"0.001\",\"condition_orders\":[{\"order_type\":\"loss_stop\",\"side\":\"sell\",\"price_scale\":\"6\",\"sell_ratio\":\"100\"},{\"order_type\":\"loss_stop_trace\",\"side\":\"sell\",\"sell_ratio\":\"100\",\"drawdown_rate\":\"12\"}],\"sell_ratio_type\":\"hold_amount\"}:1763163720",
+   "sig": "QUGNTY/BHDbrQ7KEHm0MsgFrBrtT7N5EMVhJaVwv/nhxjZOXkm4BL3NDk1S6SpOqSHKdHCi9Hv7EpL0v03wuCg=="
+  },
+  {
+   "path": "/v1/trade/strategy/orders",
+   "query": {
+    "chain": "sol",
+    "group_tag": "STMix",
+    "type": "open",
+    "from": "JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2",
+    "note": "a b/c+d=é",
+    "wallet_address": [
+     "z1",
+     "a2"
+    ],
+    "timestamp": 1763163720,
+    "client_id": "0b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d"
+   },
+   "body": "",
+   "message": "/v1/trade/strategy/orders:chain=sol&client_id=0b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d&from=JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2&group_tag=STMix&note=a%20b%2Fc%2Bd%3D%C3%A9&timestamp=1763163720&type=open&wallet_address=a2&wallet_address=z1::1763163720",
+   "sig": "5E6O9jp+0pVlHlX5ES/nHtf3EWah7YyzqBmxSDo2ZSCPwxo2PskzWd2xonmo/RP2zWZjalsU2FO0nE6cjTuDAw=="
+  }
+ ]
+}

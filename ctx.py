@@ -42,9 +42,10 @@ class Ctx:
         self.db, self.s, self.net, self.bus = db, settings, net, bus
         self.notifier = notifier or NullNotifier()
         self.clock = clock
-        self.logs = {n: make_logger(n, log_files) for n in AGENTS + ("desk", "telegram", "publish")}
+        self.logs = {n: make_logger(n, log_files) for n in AGENTS + ("desk", "telegram", "publish", "gmgn")}
         self.paused = set(db.meta("paused", []) or [])
         self.on_event = None
+        self.gmgn = None            # GmgnTrader (hands-off mode), set by main.Desk
         self.night = db.meta("night") or self.new_night()
 
     # ---- nights

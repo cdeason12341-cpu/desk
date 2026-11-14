@@ -34,3 +34,25 @@
 14. Copycat containment match needs >= 3 letters on both sides (avoids 1-2 letter names matching everything).
 15. Missing DexScreener priceChange keys are treated as "no value" (never kill on them; rules mode uses 0).
 16. scanner.min_liquidity_usd 40000 -> 10000 (owner via Grok Bot app, 2026-11-14 ~4:56 PM CST). Auditor liquidity rules unchanged.
+
+## GMGN hands-off mode (2026-11-14 ~5:45 PM CT)
+17. New mode "gmgn" alongside FOMO tap-to-trade (FOMO flow, links.py and r=savipww unchanged). Own table gmgn_orders,
+    own settings gmgn.*, own heartbeat "gmgn", own PAPER/LIVE (gmgn.mode; desk.mode stays FOMO's). Starts PAPER.
+    Client gmgn.py mirrors gmgn-cli 1.7.2 (signer.ts): Ed25519 over "{path}:{sorted_query}:{body}:{timestamp}", fresh
+    client_id per attempt, IPv4 + UA gmgn-cli/1.7.2, POSTs never retried. Only from_address = owner's main wallet
+    JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2; anything else is refused before any request.
+18. Exits attached to every buy (server-side, sell_ratio_type hold_amount): loss_stop price_scale = risk.stop_pct (6),
+    loss_stop_trace drawdown_rate = risk.trail_pct (12), profit_stop_trace price_scale = risk.trail_start_pct (20) with
+    drawdown 12 (the config has no fixed take-profit; this mirrors "trail arms at +20%"). Missing strategy_order_id after a
+    fill -> limit_order stop_loss strategy (100%) -> if that fails, market-sell 100% + Telegram alert. While awake the
+    watcher also follows holdings + open STMix strategies, market-sells on liquidity pulled and the 3h timeout.
+19. Hard caps in code before every signed buy: per trade = desk ticket (tracks bumps) but never above gmgn.cap_trade_usd
+    ($47.50); max gmgn.max_tickets_night (4) per night; night spend <= cap x tickets ($190); ticket + fees + 0.02 SOL reserve
+    <= wallet SOL. Caps change only via owner Telegram "cap trade N" / "cap tickets N" + "CONFIRM CAP" (change_log).
+    /halt stops all GMGN buys immediately (exits stay on); /unhalt resumes.
+20. LIVE gate: 1 full PAPER night -> 2h PAPER, user request 2026-11-14 5:42 PM CT (GMGN mode only; recorded in change_log
+    key gmgn.live_gate). GMGN LIVE = 2h of GMGN PAPER + plan check (quote must not be PLAN_UPGRADE_REQUIRED) + wallet covers
+    one ticket + owner sends "gmgn live" then types "GMGN LIVE". FOMO's own LIVE gate (1 full PAPER night + LIVE) is unchanged.
+21. Quote/swap need a paid GMGN plan (free: 403 PLAN_UPGRADE_REQUIRED, weight 11 > capacity 5). Owner upgraded to Plus
+    2026-11-14 ~5:50 PM CT; quote verified code 0. PAPER uses the real quote; if a quote is ever plan-blocked it notes that,
+    simulates at the DexScreener price and re-tries the quote after 10 min. Wallet SOL is re-read via /v1/user/info before sizing.

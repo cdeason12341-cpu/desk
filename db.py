@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS heartbeats(agent TEXT PRIMARY KEY, ts REAL, note TEXT
 CREATE TABLE IF NOT EXISTS pushes(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, kind TEXT, text TEXT, ok INTEGER, night TEXT);
 CREATE TABLE IF NOT EXISTS ws_events(id INTEGER PRIMARY KEY, ts REAL, kind TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS balance(id INTEGER PRIMARY KEY, ts REAL, balance REAL, mode TEXT, night TEXT);
+CREATE TABLE IF NOT EXISTS gmgn_orders(
+  id INTEGER PRIMARY KEY, ts REAL, night TEXT, mode TEXT, mint TEXT, name TEXT, symbol TEXT, status TEXT, reason TEXT,
+  size_usd REAL, sol_usd REAL, lamports INTEGER, entry_price REAL, peak REAL, last_price REAL, last_liq REAL,
+  order_id TEXT, strategy_order_id TEXT, repair TEXT, tx TEXT, exit_reason TEXT, exit_price REAL, pnl_usd REAL, pct REAL,
+  closed_at REAL, quote TEXT, body TEXT, conditions TEXT, last_check REAL, sell_order_id TEXT);
 CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY, ts REAL, agent TEXT, kind TEXT, note TEXT, night TEXT);
 """
 

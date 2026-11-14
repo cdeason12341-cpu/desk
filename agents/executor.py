@@ -46,6 +46,7 @@ class Executor:
         self.log = ctx.logs["executor"]
         self.pending: dict[str, dict] = {}      # LIVE: mint -> waiting for Bought/Skip
         self.bar: dict[str, dict] = {}          # app progress bar
+        self.gmgn_tasks: set = set()
 
     async def loop(self):
         while True:
@@ -107,6 +108,9 @@ class Executor:
             out = dict(base, signalPrice=price, reason=f"price up {100*(price/ref-1):.0f}% since signal")
             self._record(out, stack, {}); c.skip(mint, "executor", out["reason"])
             return out
+        if getattr(c, "gmgn", None) is not None:          # GMGN hands-off mode: own task, own caps; FOMO flow unchanged
+            t = asyncio.ensure_future(c.gmgn.on_pass(mint, scan.get("name") or c.label(mint), scan.get("symbol"), price, liq, an.get("score")))
+            self.gmgn_tasks.add(t); t.add_done_callback(self.gmgn_tasks.discard)
         sz = size_ticket(s, stack, free, liq)
         if sz["status"] != "ok":
             out = dict(base, signalPrice=price, reason=sz["reason"])
