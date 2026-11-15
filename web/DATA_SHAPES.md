@@ -19,8 +19,10 @@ Wrong token -> decrypt throws -> error state "can't read the desk (link changed?
 
 ## Fetching
 `fetch(base + "state.json?t=" + Date.now(), {cache:"no-store"})` (Pages sends max-age=600).
-404 for a file = not published yet (empty state). A publish happens on events (signal, fill, exit, audit done),
-debounced 20 s, plus a heartbeat every 180 s; each takes ~30 s to go live. `state.ts` tells how fresh the data is.
+404 for a file = not published yet (empty state). A publish happens on events (signal, fill, exit, audit, analysis, scan),
+debounced 20 s, plus a heartbeat every 180 s; a publish is capped at 90 s and never overlaps
+a previous Pages run. Typical time from a coin event to the app is about 40–70 s
+(20 s debounce + ~20–25 s Pages deploy + 0–15 s poll on the Live view). `state.ts` tells how fresh the data is.
 Poll `state.json` every 30 s while visible; fetch other files when their screen is open.
 
 All timestamps are ISO-8601 UTC (`...Z`); show them in the phone's local time. All `link` fields are FOMO URLs
@@ -124,3 +126,31 @@ the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real mon
 (other than refused/skipped). FOMO `link` comes only from links.py. Secrets and broker fields
 are never included. The app shows this on the Scores tab and as a Home card; tapping a row
 reveals the four answers and the failed reasons.
+
+## feed.json (Live evaluation feed, newest first, max 100 tonight)
+```json
+{"v":1,"ts":"…Z","night":"2026-11-14-1640","minScore":60,
+ "bars":{"alive_6h":0.70,"organic":0.65,"chase":0.30},
+ "items":[
+   {"t":"…Z","mint":"…pump","mintShort":"fQKg…pump","name":"Nyajira","symbol":"NYA",
+    "stage":"analyst","outcome":"no_buy","reason":null,"recheckN":null,
+    "layer":null,"layerName":null,"score":59,
+    "answers":{"alive_6h":0.54,"organic":0.53,"flush":0.27,"chase":0.68},
+    "passed":false,"failed":["alive_6h 0.54","organic 0.53","chase 0.68","score 59"],
+    "link":"https://fomo.family/coin?address=…&chainId=1399811149&r=savipww&source=share_link"},
+   {"t":"…Z","mint":"…","mintShort":"…","name":"DeadCoin","symbol":"DEAD",
+    "stage":"scanner","outcome":"kill","reason":"liq $0.0K","recheckN":null,
+    "layer":null,"layerName":null,"score":null,"answers":null,"passed":null,"failed":[],
+    "link":"…"},
+   {"t":"…Z","stage":"recheck","outcome":"recheck","recheckN":2,"reason":"recheck 2: liq $5.4K · next at 30m"},
+   {"t":"…Z","stage":"room","outcome":"waiting","reason":"waiting room"},
+   {"t":"…Z","stage":"auditor","outcome":"fail","layer":3,"layerName":"Dev wallet","reason":"dev sold","passed":false}
+ ]}
+```
+`stage` is `scanner`, `recheck`, `room`, `auditor`, or `analyst`.
+`outcome` is `kill`, `pass`, `fail`, `recheck`, `waiting`, `buy`, or `no_buy`.
+`bars` are the current Analyst alive / organic / chase thresholds (chase is a max).
+`minScore` is the current `analyst.min_score` buy bar. Analyst rows in the app highlight
+green when `score >= minScore`. BUY means the Analyst passed every bar; NO BUY otherwise.
+FOMO `link` comes only from links.py (`r=savipww`). Secrets and broker fields are never included.
+The app shows this as the Live feed at the top of the Scores / Live tab and polls it every 15 s while that tab is open.

@@ -2,9 +2,9 @@
    Never builds FOMO URLs: every link comes from coin_url / link / profile_url / SIGNUP_URL in the data. */
 (function () {
   "use strict";
-  const POLL_S = 30, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
+  const POLL_S = 30, LIVE_POLL_S = 15, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -61,9 +61,10 @@
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    nextAt = Date.now() + POLL_S * 1000;
+    const delay = (r.name === "live" || r.name === "scores") ? LIVE_POLL_S : POLL_S;
+    nextAt = Date.now() + delay * 1000;
     render();
-    pollTimer = setTimeout(poll, POLL_S * 1000);
+    pollTimer = setTimeout(poll, delay * 1000);
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
   setInterval(() => { if (S.offline) statusRow(); }, 1000);
@@ -72,6 +73,7 @@
   const money = v => v == null ? "—" : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const pct = v => v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(1) + "%";
   const tm = t => t ? new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
+  const tmCT = t => t ? new Date(t).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Chicago" }) + " CT" : "—";
   const price = v => v == null ? "—" : "$" + Charts.fmtP(Number(v));
   const ago = s => s == null ? "—" : s < 90 ? Math.round(s) + "s" : Math.round(s / 60) + "m";
   const short = m => m ? m.slice(0, 4) + "…" + m.slice(-4) : "";
@@ -84,7 +86,7 @@
     const p = location.hash.replace(/^#\/?/, "").split("/");
     return { name: p[0] || "home", arg: p[1] ? decodeURIComponent(p[1]) : null };
   }
-  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit") poll(); else render(); });
+  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores") poll(); else render(); });
 
   // ---------- chrome
   function statusRow() {
@@ -106,7 +108,7 @@
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
+    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || (r === "scores" && a.dataset.tab === "live") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
     statusRow();
   }
   $("#bellBtn").onclick = () => { location.hash = "#/activity"; };
@@ -123,6 +125,8 @@
     (F("agents/auditor.json")?.recent || []).forEach(r => add(r.mint, null, null, r.link || r.coin_url));
     (F("state.json")?.positions || []).forEach(p => add(p.mint, p.name, p.symbol, p.link));
     (F("activity.json")?.items || []).forEach(a => add(a.mint, null, null, a.link));
+    (F("scores.json")?.items || []).forEach(a => add(a.mint, a.name, a.symbol, a.link));
+    (F("feed.json")?.items || []).forEach(a => add(a.mint, a.name, a.symbol, a.link));
     return m;
   }
   function search(q) {
@@ -174,7 +178,7 @@
       body = `<div class="rowx"><div><div class="num">${ag.scoring?.length ? "Scoring" : ag.scored + " scored"}</div><div class="sub">${ag.mode === "rules" ? "Analyst (rules)" : "Jev"} · min ${ag.minScore}${ag.inputTokens ? " · " + ag.inputTokens.toLocaleString() + " tokens" : ""}</div>
         ${last ? `<div class="sub">${esc(coins().get(last.mint)?.name || short(last.mint))} · ${last.passed ? '<span class="green">pass</span>' : '<span class="red">' + esc(last.failed[0]) + "</span>"}</div>` : `<div class="sub">No coin scored yet</div>`}</div>
         <canvas class="ring" data-score="${last ? last.score : ""}" data-min="${ag.minScore}" width="64" height="64"></canvas></div>`;
-      body += `<a class="hint" href="#/scores" style="display:block;margin-top:10px">Analyst scores · min ${ag.minScore} to buy</a>`;
+      body += `<a class="hint" href="#/live" style="display:block;margin-top:10px">Live feed · min ${ag.minScore} to buy</a>`;
     } else if (name === "executor") {
       const last = ag.recent?.[0], st2 = F("state.json");
       const filled = last && last.status === "bought";
@@ -278,26 +282,93 @@
     </div>`;
   }
   function scoresTeaser() {
-    const sc = F("scores.json");
-    if (!sc) return "";
-    const min = sc.minScore, items = sc.items || [];
+    const sc = F("scores.json"), fd0 = F("feed.json");
+    if (!sc && !fd0) return "";
+    const min = (fd0 && fd0.minScore != null) ? fd0.minScore : sc?.minScore, items = sc?.items || [];
     const last = items[0];
-    return `<h1>Analyst scores</h1><a class="card tap" href="#/scores">
-      <div class="rowx"><div><div class="sub">Min score to buy · ${min}</div>
-        <div class="num">${items.length} scored tonight</div>
-        ${last ? `<div class="sub">${esc(last.name || last.mintShort || short(last.mint))} · <span class="${last.passed ? "green" : "red"}">${last.score} ${last.passed ? "pass" : "reject"}</span></div>` : `<div class="sub">No coin scored yet</div>`}
+    const fd = F("feed.json");
+    const nFeed = (fd?.items || []).length;
+    const latest = (fd?.items || [])[0];
+    const latestLabel = latest ? esc(latest.name || latest.symbol || latest.mintShort || short(latest.mint)) : "";
+    return `<h1>Live feed</h1><a class="card tap" href="#/live">
+      <div class="rowx"><div><div class="sub">Every coin the desk evaluates · min ${min} to buy</div>
+        <div class="num">${nFeed || items.length} event${(nFeed || items.length) === 1 ? "" : "s"} tonight</div>
+        ${latest ? `<div class="sub">${latestLabel} · ${esc(liveOutcome(latest))}</div>` : (last ? `<div class="sub">${esc(last.name || last.mintShort || short(last.mint))} · <span class="${last.passed ? "green" : "red"}">${last.score} ${last.passed ? "pass" : "reject"}</span></div>` : `<div class="sub">Waiting for the next coin</div>`)}
       </div></div>
       ${scoreBar(last ? last.score : 0, min)}
-      <div class="sub" style="margin-top:8px">Tap for every decision, the four answers, and why it failed</div>
+      <div class="sub" style="margin-top:8px">Tap for the live feed and every Analyst score</div>
     </a>`;
+  }
+  function liveOutcome(it) {
+    const st = it.stage, o = it.outcome;
+    if (st === "analyst") return (it.score == null ? "" : it.score + " ") + (o === "buy" ? "BUY" : "NO BUY");
+    if (st === "auditor") return o === "pass" ? "Auditor pass" : "Auditor fail" + (it.layerName ? " · " + it.layerName : "");
+    if (st === "recheck") return o === "pass" ? "Recheck " + (it.recheckN || "") + " passed" : "Recheck " + (it.recheckN || "");
+    if (st === "room") return "Waiting room";
+    if (o === "kill") return "Scanner kill";
+    if (o === "pass") return "Passed Scanner";
+    return (st || "") + (o ? " · " + o : "");
+  }
+  function liveMetric(label, val, bar, lower) {
+    if (val == null || bar == null) return `<span class="muted">${esc(label)} —</span>`;
+    const ok = lower ? Number(val) <= Number(bar) : Number(val) >= Number(bar);
+    return `<span class="${ok ? "ok" : "bad"}">${esc(label)} ${Number(val).toFixed(2)}/${Number(bar).toFixed(2)}</span>`;
+  }
+  function liveRow(it, min, bars) {
+    const label = it.name || it.symbol || it.mintShort || short(it.mint);
+    const hot = it.stage === "analyst" && it.score != null && Number(it.score) >= Number(min);
+    const tone = it.outcome === "buy" || it.outcome === "pass" || hot ? "green"
+      : (it.outcome === "kill" || it.outcome === "fail" || it.outcome === "no_buy") ? "red" : "";
+    const stage = it.stage === "recheck" && it.recheckN ? `Recheck ${it.recheckN}` : (it.stage || "").replace(/^./, c => c.toUpperCase());
+    let right = "";
+    if (it.stage === "analyst" && it.score != null) right = `<div class="sc ${hot || it.outcome === "buy" ? "green" : "red"}">${it.score}</div>`;
+    else if (it.outcome === "buy") right = `<div class="sc green">BUY</div>`;
+    else if (it.outcome === "no_buy") right = `<div class="pill red">NO BUY</div>`;
+    else if (it.outcome === "kill") right = `<div class="pill red">kill</div>`;
+    else if (it.outcome === "fail") right = `<div class="pill red">fail</div>`;
+    else if (it.outcome === "pass") right = `<div class="pill green">pass</div>`;
+    else if (it.outcome === "waiting") right = `<div class="pill">waiting</div>`;
+    else if (it.outcome === "recheck") right = `<div class="pill">recheck</div>`;
+    let detail = "";
+    if (it.stage === "analyst") {
+      const a = it.answers || {}, b = bars || {};
+      detail = `<div class="metrics">${liveMetric("alive", a.alive_6h, b.alive_6h, false)} ${liveMetric("organic", a.organic, b.organic, false)} ${liveMetric("chase", a.chase, b.chase, true)}</div>
+        <div class="sub">${esc(it.outcome === "buy" ? "BUY" : "NO BUY")} vs min ${esc(min)}${(it.failed || []).length ? " · " + esc((it.failed || []).join(" · ")) : ""}</div>`;
+    } else if (it.reason || it.layerName) {
+      const bits = [];
+      if (it.stage === "auditor" && it.layer) bits.push("layer " + it.layer + (it.layerName ? " · " + it.layerName : ""));
+      if (it.reason) bits.push(it.reason);
+      detail = `<div class="sub">${esc(bits.join(" · "))}</div>`;
+    }
+    const inner = `<div class="rowx">
+        <div class="grow"><div class="t">${esc(label)}</div>
+          <div class="s">${esc(stage)} · ${tmCT(it.t)}${it.symbol && it.name ? " · " + esc(it.symbol) : ""}</div></div>
+        ${right}
+      </div>${detail}`;
+    const cls = `live-row${hot ? " hot" : ""}${it.outcome === "buy" ? " buy" : ""}`;
+    return it.mint ? `<a class="${cls}" href="#/coin/${encodeURIComponent(it.mint)}">${inner}</a>` : `<div class="${cls}">${inner}</div>`;
+  }
+  function liveFeed(min) {
+    const fd = F("feed.json");
+    const items = fd?.items || [];
+    const bars = fd?.bars || {};
+    const m = min ?? fd?.minScore;
+    let h = `<h1>Live feed</h1>
+      <div class="card"><div class="sub">Newest first · every coin the desk evaluates · times in CT</div>
+      <div class="sub" style="margin-top:6px">Updates about every minute while this tab is open (the desk publishes shortly after each batch, then this app checks every 15s).</div></div>`;
+    if (!fd) return h + emptyBox("Waiting for the live feed", "The desk will publish it on the next update.");
+    if (!items.length) return h + emptyBox("Nothing evaluated yet", "Scanner kills, rechecks, waiting-room moves, Auditor results and Analyst scores show up here.");
+    h += `<div class="card list">${items.map(it => liveRow(it, m, bars)).join("")}</div>`;
+    return h;
   }
   function scores() {
     const g = gate(); if (g) return g;
-    const sc = F("scores.json"), ag = F("agents/analyst.json");
-    if (!sc) return `<h1>Analyst scores</h1>` + emptyBox("No scores yet", "Decisions show up here after the Analyst scores a coin.");
-    const min = sc.minScore ?? ag?.minScore, items = sc.items || [];
-    let h = `<a class="back" href="#/home">‹ Home</a><h1>Analyst scores</h1>
-      <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min}</div>
+    const sc = F("scores.json"), ag = F("agents/analyst.json"), fd = F("feed.json");
+    const min = (fd && fd.minScore != null) ? fd.minScore : (sc?.minScore ?? ag?.minScore);
+    let h = liveFeed(min);
+    const items = sc?.items || [];
+    h += `<h1>Analyst scores</h1>
+      <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min ?? "—"}</div>
       ${scoreBar(min, min)}
       <div class="sub" style="margin-top:8px">${items.length} decision${items.length === 1 ? "" : "s"} · newest first · tap a row for the four answers</div></div>`;
     if (!items.length) return h + emptyBox("No coin scored yet", "The desk is scanning. Scores appear after Auditor passes a coin.");
@@ -446,7 +517,7 @@
     chrome();
     const r = route();
     const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
-      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : r.name === "scores" ? scores() : home();
+      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live") ? scores() : home();
     V.innerHTML = html;
     chrome();
     document.querySelectorAll(".score-row").forEach(el => {
