@@ -209,7 +209,7 @@
   function gmgnPosRow(p) {
     const name = p.name || p.symbol || short(p.mint);
     const ex = p.exits || {};
-    const exits = `stop -${ex.stopPct ?? 6}% · trail ${ex.trailPct ?? 12}%` + (ex.attached ? " · exits on" : " · exits?");
+    const exits = `stop -${ex.stopPct ?? 15}% · trail ${ex.trailPct ?? 20}%` + (ex.attached ? " · exits on" : " · exits?");
     const inner = `<div class="ico ${(p.pct ?? 0) >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
       <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode)}</span></div>
       <div class="s">${money(p.sizeUsd)} · ${exits}</div></div>
