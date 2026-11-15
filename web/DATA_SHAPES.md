@@ -147,6 +147,8 @@ reveals the four answers and the failed reasons.
    {"t":"…Z","stage":"auditor","outcome":"fail","layer":3,"layerName":"Dev wallet","reason":"dev sold","passed":false}
  ]}
 ```
+Every item also carries `"liq"` and `"mc"` (USD numbers from the scan JSON `liquidityUsd` /
+`marketCapUsd`, or null). Scanner / recheck / room rows show them as `MC $31.2K · liq $12.0K`.
 `stage` is `scanner`, `recheck`, `room`, `auditor`, or `analyst`.
 `outcome` is `kill`, `pass`, `fail`, `recheck`, `waiting`, `buy`, or `no_buy`.
 `bars` are the current Analyst alive / organic / chase thresholds (chase is a max).

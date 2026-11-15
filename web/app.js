@@ -314,6 +314,7 @@
     const ok = lower ? Number(val) <= Number(bar) : Number(val) >= Number(bar);
     return `<span class="${ok ? "ok" : "bad"}">${esc(label)} ${Number(val).toFixed(2)}/${Number(bar).toFixed(2)}</span>`;
   }
+  function usdK(v) { v = Number(v) || 0; return v >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : "$" + (v / 1e3).toFixed(1) + "K"; }
   function liveRow(it, min, bars) {
     const label = it.name || it.symbol || it.mintShort || short(it.mint);
     const hot = it.stage === "analyst" && it.score != null && Number(it.score) >= Number(min);
@@ -334,10 +335,12 @@
       const a = it.answers || {}, b = bars || {};
       detail = `<div class="metrics">${liveMetric("alive", a.alive_6h, b.alive_6h, false)} ${liveMetric("organic", a.organic, b.organic, false)} ${liveMetric("chase", a.chase, b.chase, true)}</div>
         <div class="sub">${esc(it.outcome === "buy" ? "BUY" : "NO BUY")} vs min ${esc(min)}${(it.failed || []).length ? " · " + esc((it.failed || []).join(" · ")) : ""}</div>`;
-    } else if (it.reason || it.layerName) {
+    } else if (it.reason || it.layerName || it.mc != null || it.liq != null) {
       const bits = [];
       if (it.stage === "auditor" && it.layer) bits.push("layer " + it.layer + (it.layerName ? " · " + it.layerName : ""));
       if (it.reason) bits.push(it.reason);
+      if ((it.stage === "scanner" || it.stage === "recheck" || it.stage === "room") && (it.mc != null || it.liq != null))
+        bits.push("MC " + (it.mc != null ? usdK(it.mc) : "?") + " · liq " + (it.liq != null ? usdK(it.liq) : "?"));
       detail = `<div class="sub">${esc(bits.join(" · "))}</div>`;
     }
     const inner = `<div class="rowx">
