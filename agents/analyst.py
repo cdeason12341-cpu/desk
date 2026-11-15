@@ -34,7 +34,9 @@ def build_state(scan: dict, audit: dict, pair: dict, max_chars: int = 3000) -> s
     dev = (vals.get(3) or "").split("%")[0] or "n/a"
     top10 = (vals.get(4) or "").rstrip("%") or "n/a"
     g = lambda p: fields.get(pair, p)
-    st = (f"Coin {scan.get('name') or g('baseToken.name') or '?'} on Solana, graduated {scan.get('ageMin', 0)} min ago. "
+    age = int(scan.get("ageMin", 0) or 0)
+    age_txt = f"{age/60:.1f}h ago" if age >= 120 else f"{age} min ago"
+    st = (f"Coin {scan.get('name') or g('baseToken.name') or '?'} on Solana, graduated {age_txt}. "
           f"Liquidity ${_n(g('liquidity.usd'))}. Market cap ${_n(g('marketCap'))}.\n"
           f"Last 5 min: {_n(g('txns.m5.buys'))} buys, {_n(g('txns.m5.sells'))} sells, volume ${_n(g('volume.m5'))}, price {_n(g('priceChange.m5'), '{:+.1f}')}%.\n"
           f"Last 1h: {_n(g('txns.h1.buys'))} buys, {_n(g('txns.h1.sells'))} sells, volume ${_n(g('volume.h1'))}, price {_n(g('priceChange.h1'), '{:+.1f}')}%.\n"

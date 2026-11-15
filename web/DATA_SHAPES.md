@@ -108,3 +108,19 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
 Balance and SOL price are cached on the desk and refreshed at most every 60s. `sol`/`usd` may be
 null if the desk has not yet read the wallet. The Home card shows this as "Real wallet (GMGN LIVE)";
 the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real money)".
+
+
+## scores.json (Analyst scores list, newest first, max 50 tonight)
+```json
+{"v":1,"ts":"…Z","night":"2026-11-14-1640","minScore":60,
+ "items":[{"t":"…Z","mint":"…pump","mintShort":"fQKg…pump","name":"Nyajira","symbol":"NYA",
+           "score":59,"answers":{"alive_6h":0.54,"organic":0.53,"flush":0.27,"chase":0.68},
+           "passed":false,"failed":["alive_6h 0.54","organic 0.53","chase 0.68","score 59"],
+           "bought":false,
+           "link":"https://fomo.family/coin?address=…&chainId=1399811149&r=savipww&source=share_link"}]}
+```
+`minScore` is the current `analyst.min_score` bar (the number a coin must reach to buy).
+`bought` is true if that mint has a FOMO position, a bought execution, or a GMGN order tonight
+(other than refused/skipped). FOMO `link` comes only from links.py. Secrets and broker fields
+are never included. The app shows this on the Scores tab and as a Home card; tapping a row
+reveals the four answers and the failed reasons.

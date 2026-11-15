@@ -20,7 +20,7 @@ class Builder:
 
     def build(self) -> dict:
         files = {"state.json": self.state(), "chart.json": self.chart(), "activity.json": self.activity(),
-                 "account.json": self.account()}
+                 "account.json": self.account(), "scores.json": self.scores()}
         for a in AGENTS:
             files[f"agents/{a}.json"] = self.agent(a)
         for m in self.coin_mints():
@@ -115,7 +115,7 @@ class Builder:
                            "running": [{"mint": l["mint"], "layers": [{k: x[k] for k in ("n", "name", "pass", "value")} for x in l["layers"]]} for l in live],
                            "recent": [dict(json.loads(r["json"]), link=links.coin_url(r["mint"])) for r in rows]}
         if a == "analyst":
-            rows = c.db.rows("SELECT * FROM analyses WHERE night=? ORDER BY id DESC LIMIT 40", (n,))
+            rows = c.db.rows("SELECT * FROM analyses WHERE night=? ORDER BY ts DESC, id DESC LIMIT 50", (n,))
             return base | {"mode": s["analyst.mode"], "scored": len(rows), "minScore": s["analyst.min_score"],
                            "inputTokens": sum(r["input_tokens"] or 0 for r in rows),
                            "outputTokens": sum(r["output_tokens"] or 0 for r in rows),
@@ -134,6 +134,47 @@ class Builder:
                            "lastExitLabel": None if not last else ("Trailed out" if last["reason"] == "trail" else "Stopped" if last["reason"] == "stop" else last["reason"].title()),
                            "positions": [self.position_view(p) for p in pos]}
         return base
+
+    def scores(self):
+        """Last ~50 analyst decisions tonight, for the phone app's Analyst scores list."""
+        c, s, n = self.c, self.c.s, self.c.night
+        rows = c.db.rows("SELECT * FROM analyses WHERE night=? ORDER BY ts DESC, id DESC LIMIT 50", (n,))
+        bought = {r["mint"] for r in c.db.rows(
+            "SELECT mint FROM positions WHERE night=? UNION "
+            "SELECT mint FROM executions WHERE night=? AND status='bought' UNION "
+            "SELECT mint FROM gmgn_orders WHERE night=? AND status NOT IN ('refused','skipped')",
+            (n, n, n))}
+        items = []
+        for r in rows:
+            try:
+                body = json.loads(r["json"] or "{}")
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            mint = r["mint"]
+            co = c.coin(mint) or {}
+            failed = body.get("failed")
+            if failed is None:
+                try:
+                    failed = json.loads(r["failed"]) if r["failed"] else []
+                except Exception:
+                    failed = []
+            if not isinstance(failed, list):
+                failed = []
+            ans = body.get("answers") if isinstance(body.get("answers"), dict) else {}
+            items.append({
+                "t": iso(r["ts"]), "mint": mint,
+                "mintShort": (mint[:4] + "…" + mint[-4:]) if mint and len(mint) >= 8 else (mint or ""),
+                "name": co.get("name") or body.get("name"),
+                "symbol": co.get("symbol") or body.get("symbol"),
+                "score": r["score"] if r["score"] is not None else body.get("score"),
+                "answers": {"alive_6h": ans.get("alive_6h"), "organic": ans.get("organic"),
+                            "flush": ans.get("flush"), "chase": ans.get("chase")},
+                "passed": bool(r["passed"]), "failed": failed,
+                "bought": mint in bought, "link": links.coin_url(mint),
+            })
+        return {"v": 1, "ts": iso(), "night": n, "minScore": s["analyst.min_score"], "items": items}
 
     def coin_mints(self):
         n = self.c.night

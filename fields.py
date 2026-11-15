@@ -64,6 +64,14 @@ FIELDS = {
         "known_accounts": "knownAccounts",      # {address: {name, type}} type in AMM|CREATOR|LOCKER
         "total_holders": "totalHolders",
         "graph_insiders_detected": "graphInsidersDetected",
+        "token_supply": "token.supply",          # STRING/int raw units (verified Nyajira, Fartcoin, USPR)
+        "insider_networks": "insiderNetworks",  # list of networks, or null when none detected
+        # insiderNetworks[] verified 2026-11-14 on Nyajira (4qyk…pump) and Fartcoin (9BB6…pump):
+        #   {id, size, type, tokenAmount, currentHolding, activeAccounts}
+        "insider_network_current_holding": "insiderNetworks[].currentHolding",  # raw amount still held
+        "insider_network_token_amount": "insiderNetworks[].tokenAmount",        # raw; can be slightly above currentHolding
+        "insider_network_size": "insiderNetworks[].size",                       # wallets in that network
+        "insider_network_active": "insiderNetworks[].activeAccounts",
     },
     # --- RugCheck /v1/tokens/{mint}/insiders/graph ---
     # Top level is a LIST of networks (fresh coins return []).

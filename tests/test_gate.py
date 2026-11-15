@@ -66,6 +66,8 @@ def test_rules_mode():
         assert not r["passed"] and r["failed"][0] == label, (label, r["failed"])
         act = c.db.one("SELECT sub FROM activity WHERE mint=?", (m,))["sub"]
         assert act == f"Analyst (rules) · {label}", act
-    # bundled penalty: 3+ bundled wallets halves organic
-    a2 = rules_answers(c.s, p, 3)
-    assert abs(a2["organic"] - 0.325) < 1e-9
+    # bundled penalty: 5+ linked wallets halves organic (x0.5); 4 does not
+    a4 = rules_answers(c.s, p, 4)
+    assert abs(a4["organic"] - 0.65) < 1e-9
+    a5 = rules_answers(c.s, p, 5)
+    assert abs(a5["organic"] - 0.325) < 1e-9

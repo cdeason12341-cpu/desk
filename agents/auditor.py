@@ -47,6 +47,62 @@ def biggest_group(graph) -> int | None:
     return big if big >= 2 else 0
 
 
+def bundle_stats(report, supply: int | None = None) -> tuple[float | None, int | None]:
+    """% of supply held by all RugCheck insider networks, and size of the largest network.
+
+    Source (verified 2026-11-14 on Nyajira 4qyk…pump and Fartcoin 9BB6…pump):
+      report["insiderNetworks"][]["currentHolding"]  — raw amount still held
+      report["insiderNetworks"][]["size"]            — wallets in that network
+      report["token"]["supply"]                      — raw supply
+    Sum currentHolding across every network ("held by bundles"), not just the biggest.
+    insiderNetworks is null (or []) when RugCheck detected none — that is 0%, 0 linked,
+    same convention as an empty insiders/graph (DECISIONS #1). A present but unreadable
+    list, or networks with no usable supply, is no data (None, None).
+    """
+    if not isinstance(report, dict):
+        return None, None
+    nets = report.get("insiderNetworks")
+    if nets is None:
+        return 0.0, 0
+    if not isinstance(nets, list):
+        return None, None
+    if not nets:
+        return 0.0, 0
+    held, linked = 0, 0
+    for n in nets:
+        if not isinstance(n, dict) or "currentHolding" not in n:
+            return None, None
+        try:
+            held += int(n.get("currentHolding") or 0)
+        except (TypeError, ValueError):
+            return None, None
+        if "size" in n:
+            try:
+                linked = max(linked, int(n["size"] or 0))
+            except (TypeError, ValueError):
+                pass
+    if supply is None:
+        try:
+            supply = int(((report.get("token") or {}).get("supply")) or 0)
+        except (TypeError, ValueError):
+            supply = 0
+    if not supply:
+        return None, None
+    return 100.0 * held / supply, linked
+
+
+def bundle_layer(report, max_bundle_pct, supply: int | None = None) -> tuple[bool, str, float | None, int | None]:
+    """Layer 7 verdict: (passed, value, pct, linked). Count is informational; only % rejects."""
+    pct, linked = bundle_stats(report, supply)
+    if pct is None:
+        return False, "no data: bundles", None, None
+    if pct > max_bundle_pct:
+        return False, f"{pct:.0f}% held by bundles", pct, linked
+    if (linked or 0) == 0 and pct == 0:
+        return True, "None", pct, linked
+    return True, f"{linked} linked, {pct:.1f}% of supply", pct, linked
+
+
 def short(addr: str) -> str:
     return f"{addr[:4]}...{addr[-3:]}" if addr and len(addr) > 8 else (addr or "?")
 
@@ -107,6 +163,7 @@ class Auditor:
         self.live[mint] = state
         cache: dict = {}
         bundled = None
+        bundle_pct = None
         raw_log = []
 
         async def report():
@@ -240,16 +297,14 @@ class Auditor:
                     L.update(value=f"{int(age)}m" if age < 120 else f"{age/60:.1f}h", source="rpc")
                 elif n == 7:
                     try:
-                        g = await self._src(c.net.rug_graph, mint)
+                        rep = await report()
                     except Exception:
                         raise Red("no data: bundles", "rugcheck")
-                    bundled = biggest_group(g)
-                    if bundled is None:
-                        raise Red("no data: bundles", "rugcheck")
-                    raw_log.append(f"bundled={bundled}")
-                    if bundled >= s["auditor.max_bundled"]:
-                        raise Red(f"{bundled} bundled wallets", "rugcheck")
-                    L.update(value="None" if bundled == 0 else f"{bundled} linked", source="rugcheck")
+                    ok, value, bundle_pct, bundled = bundle_layer(rep, s["auditor.max_bundle_pct"])
+                    raw_log.append(f"bundled={bundled} bundle_pct={bundle_pct}")
+                    if not ok:
+                        raise Red(value, "rugcheck")
+                    L.update(value=value, source="rugcheck")
                 elif n == 8:
                     try:
                         acc = await accounts()
@@ -277,6 +332,7 @@ class Auditor:
         out = {k: state[k] for k in ("agent", "mint", "ts", "passed", "layersChecked", "holders", "reason")}
         out["layers"] = [{k: l[k] for k in ("n", "name", "pass", "value", "source")} for l in layers]
         out["bundled"] = bundled
+        out["bundle_pct"] = None if bundle_pct is None else round(bundle_pct, 4)
         self.log.info(f"{out['ts']}\t{mint}\t" + "\t".join(f"L{l['n']}={l['value']}({l['ms']}ms)" for l in layers if l["ms"] is not None)
                       + f"\t{' | '.join(raw_log)}\tverdict={'pass' if passed else 'red'}")
         if record:

@@ -57,6 +57,20 @@ class Net:
                 out.extend(d)
         return out
 
+    async def gecko_new_pools(self, page: int = 1) -> dict:
+        """Recent Solana pools (GeckoTerminal public API). Used only as a WS-gap backstop."""
+        r = await self.http.get(
+            "https://api.geckoterminal.com/api/v2/networks/solana/new_pools",
+            params={"page": page},
+            headers={"Accept": "application/json"},
+        )
+        if r.status_code == 429:
+            raise RateLimited("gecko 429")
+        if r.status_code != 200:
+            raise SourceError(f"gecko new_pools {r.status_code}")
+        d = r.json()
+        return d if isinstance(d, dict) else {"data": []}
+
     # ---- RugCheck
     async def rug_report(self, mint):
         return await self._rug(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report")

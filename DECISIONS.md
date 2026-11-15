@@ -82,3 +82,74 @@
     published. Secrets stay out of the feed. The app is still read-only; FOMO links still come only
     from links.py with r=savipww. FOMO card label is "FOMO practice balance (PAPER, not real money)".
     GMGN trades appear on the Activity tab marked LIVE. Modes, caps and settings were not changed.
+
+## Bundle supply rule (user request 2026-11-14 9:46 PM CT)
+24. Auditor layer 7 now rejects a coin only when bundled wallets hold more than 20% of
+    supply (`auditor.max_bundle_pct`, default 20, range 1–100, aliases "bundle pct" /
+    "bundle percent", Telegram `set bundle pct to N`, logged in change_log). The old
+    count reject (5+ linked wallets, `auditor.max_bundled`) is disabled: the setting stays
+    in the registry with default 1000 (was 5; logged as a user request) and the Auditor
+    no longer rejects on count. The layer row still shows the linked count for info, e.g.
+    "4 linked, 4.1% of supply" (or "None"). Source is the RugCheck report already fetched
+    for earlier layers: `insiderNetworks[].currentHolding` summed across every network,
+    divided by `token.supply` (raw units). Field names were verified on live reports for
+    Nyajira (`4qyk…pump`, 4.1% / 4 linked, pass) and Fartcoin (`9BB6…pump`, 92.9% / 2123
+    linked, would reject). `currentHolding` is the amount still held (`tokenAmount` can
+    be slightly higher). The insiders/graph endpoint is not used for the % rule: on
+    Fartcoin it omitted the 2123-wallet network that the report listed. `topHolders[].insider`
+    was false on both tokens, so it is not used. `insiderNetworks` null or `[]` (typical
+    on fresh coins with `graphInsidersDetected` 0) is 0% / 0 linked, a pass — the same
+    convention as an empty graph (DECISIONS #1). Treating null as "no data" would red
+    nearly every young coin, so that is fail-safe, not a fail-closed missing-data case.
+    A failed report fetch, a non-list `insiderNetworks`, a network missing `currentHolding`,
+    or networks present with no usable supply, is still red "no data: bundles". Equal to
+    20% passes ("more than 20%"). `audit.bundled` is now the largest network `size` from
+    the same report field (so the Analyst penalty sees the full network, not the incomplete
+    graph). `analyst.rules_bundled_from` 3 → 5 (user request, change_log, default updated);
+    the penalty itself is unchanged (organic × `analyst.rules_bundled_penalty` 0.5). The
+    app coin view already renders each layer `value`, so the new wording shows there
+    without a client change. Modes, caps, and other settings were not changed.
+
+
+## Analyst min score for tonight (user request 2026-11-14 11:00 PM CT)
+25. `analyst.min_score` 70 → 60 for tonight's testing only (change_log source
+    "user request 2026-11-14 11:00 PM CT · tonight only, revert 8 AM CT"). The
+    other Analyst bars were left alone: `min_alive_6h` 0.70, `min_organic` 0.65,
+    `max_chase` 0.30. Modes and caps were not changed (FOMO PAPER, GMGN LIVE,
+    $65 / 4 tickets). Revert to 70 at 8 AM CT.
+
+## PumpPortal websocket (2026-11-14 ~11:05 PM CT)
+26. Root cause of the ~2-minute reconnects: `ws_loop` wrapped `ws.recv()` in
+    `asyncio.wait_for(..., timeout=scanner.ws_silent_s)` (default 120s) and
+    treated a quiet socket as dead (`ConnectionError("silent 120s")`).
+    Migrations are naturally sparse, so a healthy connection was torn down
+    about every two minutes (and on each tear-down the desk re-subscribed).
+    Protocol ping/pong was already on (`ping_interval=20`, `ping_timeout=20`)
+    and is the right liveness check; a real dead socket still surfaces as a
+    keepalive ping timeout, which still reconnects. The 120s silence timeout
+    is no longer used as a kill switch. `scanner.ws_silent_s` stays in the
+    registry (aliases unchanged) but does not close the socket. `subscribeNewToken`
+    was not added: new-token events are frequent and would flood the connection;
+    they are not needed once liveness is ping/pong. `wsReconnects1h` in
+    state.json / desk-health is unchanged in SQL (count of `ws_events` kind
+    `reconnect` in the last hour) but now means real drops only — it is no
+    longer inflated by silence timeouts. A backstop covers any short gap:
+    each Scanner poll asks GeckoTerminal `GET /api/v2/networks/solana/new_pools`
+    (up to 8 pages or 5 minutes of creates; one page is only ~30s of Solana
+    pool creates) and admits PumpSwap, pump-mint, SOL-quoted pools that are
+    not already in `coins` and are still inside `scanner.max_age_h`. Existing
+    coins are not touched. DexScreener still has no public new-pairs list, so
+    it cannot be the discovery backstop; it still enriches coins already in
+    the waiting room.
+
+## Analyst scores in the phone app (user request 2026-11-14 ~11:05 PM CT)
+27. The read-only app has an Analyst scores list (Scores tab, also reachable
+    from a Home card and the Analyst agent card). Publisher writes `scores.json`:
+    the last 50 analyses tonight, newest first, with time, name/symbol, short
+    mint, score, the four answers (alive_6h, organic, flush, chase), pass/reject,
+    failed reasons, whether it was bought (FOMO position, bought execution, or
+    a non-refused GMGN order tonight), the current `minScore` bar, and a FOMO
+    `link` from links.py (`r=savipww`). Secrets and broker fields are never in
+    the feed. Tapping a row reveals the four answers and reasons; pass/reject
+    are coloured and the min-score bar is visible. Service worker bumped to
+    `desk-shell-v4`. Modes, caps, and other settings were not changed.

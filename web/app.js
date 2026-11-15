@@ -4,7 +4,7 @@
   "use strict";
   const POLL_S = 30, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -174,6 +174,7 @@
       body = `<div class="rowx"><div><div class="num">${ag.scoring?.length ? "Scoring" : ag.scored + " scored"}</div><div class="sub">${ag.mode === "rules" ? "Analyst (rules)" : "Jev"} · min ${ag.minScore}${ag.inputTokens ? " · " + ag.inputTokens.toLocaleString() + " tokens" : ""}</div>
         ${last ? `<div class="sub">${esc(coins().get(last.mint)?.name || short(last.mint))} · ${last.passed ? '<span class="green">pass</span>' : '<span class="red">' + esc(last.failed[0]) + "</span>"}</div>` : `<div class="sub">No coin scored yet</div>`}</div>
         <canvas class="ring" data-score="${last ? last.score : ""}" data-min="${ag.minScore}" width="64" height="64"></canvas></div>`;
+      body += `<a class="hint" href="#/scores" style="display:block;margin-top:10px">Analyst scores · min ${ag.minScore} to buy</a>`;
     } else if (name === "executor") {
       const last = ag.recent?.[0], st2 = F("state.json");
       const filled = last && last.status === "bought";
@@ -241,7 +242,66 @@
       <div class="card stat"><div class="v">${c.scannerPassed}</div><div class="k">passed Scanner</div></div>
       <div class="card stat"><div class="v">${c.audited - c.auditRejected}/${c.audited}</div><div class="k">cleared Auditor</div></div>
       <div class="card stat"><div class="v">${c.trades}</div><div class="k">trades</div></div></div>`;
+    h += scoresTeaser();
     h += `<h1>Agents</h1>` + AGENTS.map(a => agentCard(a, false)).join("");
+    return h;
+  }
+
+  function scoreBar(score, min) {
+    const fill = Math.max(0, Math.min(100, Number(score) || 0));
+    const mark = Math.max(0, Math.min(100, Number(min) || 0));
+    return `<div class="bar thresh"><i data-fill="${fill}"></i><span class="mark" style="left:${mark}%"></span></div>`;
+  }
+  function scoreRow(it, min, open) {
+    const pass = !!it.passed, ans = it.answers || {};
+    const label = it.name || it.symbol || it.mintShort || short(it.mint);
+    const why = (it.failed || []).join(" · ") || (pass ? "cleared every bar" : "");
+    const bought = it.bought ? `<span class="pill cyan">bought</span>` : "";
+    const rec = pass ? "pass" : "reject";
+    return `<div class="score-row${open ? " open" : ""}" data-mint="${esc(it.mint)}">
+      <div class="rowx">
+        <div class="grow"><div class="t">${esc(label)}</div>
+          <div class="s">${esc(it.mintShort || short(it.mint))} · ${tm(it.t)} · <span class="${pass ? "green" : "red"}">${rec}</span></div></div>
+        <div class="sc ${pass ? "green" : "red"}">${it.score == null ? "—" : it.score}</div>
+      </div>
+      ${scoreBar(it.score, min)}
+      <div class="detail">
+        <div class="answers">
+          <div><div class="k">Staying power</div><div class="v">${ans.alive_6h == null ? "—" : Number(ans.alive_6h).toFixed(2)}</div></div>
+          <div><div class="k">Real buyers</div><div class="v">${ans.organic == null ? "—" : Number(ans.organic).toFixed(2)}</div></div>
+          <div><div class="k">Flush</div><div class="v">${ans.flush == null ? "—" : Number(ans.flush).toFixed(2)}</div></div>
+          <div><div class="k">Chasing</div><div class="v">${ans.chase == null ? "—" : Number(ans.chase).toFixed(2)}</div></div>
+        </div>
+        <div class="sub" style="margin-top:8px">${esc(why)}</div>
+        <div class="pills" style="margin-top:8px"><span class="pill ${pass ? "green" : "red"}">${rec}</span>${bought}</div>
+      </div>
+    </div>`;
+  }
+  function scoresTeaser() {
+    const sc = F("scores.json");
+    if (!sc) return "";
+    const min = sc.minScore, items = sc.items || [];
+    const last = items[0];
+    return `<h1>Analyst scores</h1><a class="card tap" href="#/scores">
+      <div class="rowx"><div><div class="sub">Min score to buy · ${min}</div>
+        <div class="num">${items.length} scored tonight</div>
+        ${last ? `<div class="sub">${esc(last.name || last.mintShort || short(last.mint))} · <span class="${last.passed ? "green" : "red"}">${last.score} ${last.passed ? "pass" : "reject"}</span></div>` : `<div class="sub">No coin scored yet</div>`}
+      </div></div>
+      ${scoreBar(last ? last.score : 0, min)}
+      <div class="sub" style="margin-top:8px">Tap for every decision, the four answers, and why it failed</div>
+    </a>`;
+  }
+  function scores() {
+    const g = gate(); if (g) return g;
+    const sc = F("scores.json"), ag = F("agents/analyst.json");
+    if (!sc) return `<h1>Analyst scores</h1>` + emptyBox("No scores yet", "Decisions show up here after the Analyst scores a coin.");
+    const min = sc.minScore ?? ag?.minScore, items = sc.items || [];
+    let h = `<a class="back" href="#/home">‹ Home</a><h1>Analyst scores</h1>
+      <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min}</div>
+      ${scoreBar(min, min)}
+      <div class="sub" style="margin-top:8px">${items.length} decision${items.length === 1 ? "" : "s"} · newest first · tap a row for the four answers</div></div>`;
+    if (!items.length) return h + emptyBox("No coin scored yet", "The desk is scanning. Scores appear after Auditor passes a coin.");
+    h += `<div class="card list">${items.map(it => scoreRow(it, min, false)).join("")}</div>`;
     return h;
   }
   function agents() { const g = gate(); if (g) return g; return `<h1>Your 5 agents</h1>` + AGENTS.map(a => agentCard(a, true)).join("") + `<div class="hint">All agent changes go through Telegram (@Denarpobot). This app is read-only.</div>`; }
@@ -386,9 +446,12 @@
     chrome();
     const r = route();
     const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
-      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : home();
+      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : r.name === "scores" ? scores() : home();
     V.innerHTML = html;
     chrome();
+    document.querySelectorAll(".score-row").forEach(el => {
+      el.addEventListener("click", () => el.classList.toggle("open"));
+    });
     // post-render drawing
     const ch = F("chart.json"), st = F("state.json");
     const hc = $("#homeChart");

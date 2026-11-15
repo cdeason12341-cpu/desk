@@ -20,9 +20,13 @@ class FakeNet:
         self.pairs = {}
         self.jev_resp = None
         self.rpc_map = {}
+        self.new_pools = {}
 
     async def dex_tokens(self, mints):
         return [self.pairs[m] for m in mints if m in self.pairs]
+
+    async def gecko_new_pools(self, page=1):
+        return self.new_pools.get(page, {"data": []})
 
     async def rpc(self, method, params, timeout=30):
         fn = self.rpc_map.get(method)

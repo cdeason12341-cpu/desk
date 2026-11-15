@@ -36,14 +36,78 @@ def pick_pair(pairs: list[dict], mint: str) -> dict | None:
     return fields.select_pair(mine)
 
 
+def watch_window_min(s) -> float:
+    """Minutes a migrated coin stays in the waiting room and is re-checked."""
+    try:
+        h = s["scanner.max_age_h"]
+    except (KeyError, TypeError):
+        h = None
+    if h is not None:
+        return float(h) * 60.0
+    try:
+        return float(s["scanner.max_wait_min"])
+    except (KeyError, TypeError):
+        return 60.0
+
+
+WSOL_GECKO_ID = "solana_So11111111111111111111111111111111111111112"
+# GeckoTerminal new_pools page 1 is only ~30s of Solana pool creates; a few pages cover a short WS gap.
+CATCHUP_PAGES = 8
+CATCHUP_LOOKBACK_S = 5 * 60
+
+
+def parse_new_pools(payload) -> list[dict]:
+    """Pure. PumpSwap (graduated) pump-mint pools quoted in SOL from a GeckoTerminal new_pools body."""
+    out = []
+    if not isinstance(payload, dict):
+        return out
+    for x in payload.get("data") or []:
+        if not isinstance(x, dict):
+            continue
+        rel = x.get("relationships") or {}
+        dex = ((rel.get("dex") or {}).get("data") or {}).get("id")
+        if dex != "pumpswap":
+            continue
+        base = ((rel.get("base_token") or {}).get("data") or {}).get("id") or ""
+        quote = ((rel.get("quote_token") or {}).get("data") or {}).get("id") or ""
+        mint = base.split("_", 1)[-1] if base else ""
+        if not mint.endswith("pump"):
+            continue
+        if quote and quote != WSOL_GECKO_ID:
+            continue
+        attrs = x.get("attributes") or {}
+        created = _iso_ts(attrs.get("pool_created_at"))
+        if created is None:
+            continue
+        out.append({"mint": mint, "created_at": created, "name": attrs.get("name"),
+                    "pool": attrs.get("address"), "dex": dex})
+    return out
+
+
+def _iso_ts(v):
+    if not v:
+        return None
+    try:
+        from datetime import datetime, timezone
+        if isinstance(v, (int, float)):
+            return float(v) / (1000.0 if v > 10_000_000_000 else 1.0)
+        s = str(v).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
 def decide(s, coin: dict, pair: dict | None, top10: float | None, runners: list[dict], now: float) -> tuple[str, str | None]:
     """('pass'|'kill'|'wait'|'drop', reason). Pure; used by the loop, tests and replay."""
     mint = coin["mint"]
     age_min = (now - coin["migrated_at"]) / 60.0
+    limit = watch_window_min(s)
     if not mint.endswith("pump"):
         return "kill", "not a pump mint"
     if pair is None:                                   # DexScreener doesn't know it yet: it waits
-        return ("drop", "never qualified") if age_min >= s["scanner.max_wait_min"] else ("wait", None)
+        return ("drop", "never qualified") if age_min >= limit else ("wait", None)
     if fields.get(pair, "quoteToken.address") != solana.WSOL:
         return "kill", f"not SOL-quoted ({fields.get(pair, 'quoteToken.symbol') or '?'})"
     liq = float(fields.get(pair, "liquidity.usd") or 0)
@@ -58,7 +122,7 @@ def decide(s, coin: dict, pair: dict | None, top10: float | None, runners: list[
                     [r for r in runners if r.get("mint") != mint])
     if cc:
         return "kill", f"copycat of {cc}"
-    if age_min >= s["scanner.max_wait_min"]:
+    if age_min >= limit:
         return "drop", "never qualified"
     if top10 is None:
         return "wait", None                              # never pass without a top-10 number
@@ -89,22 +153,24 @@ class Scanner:
         self.extra: dict[str, dict] = {}
 
     # ---------- websocket (ONE connection for the desk)
-    async def ws_loop(self):
+    # Liveness is the websockets protocol ping/pong (ping_interval=20, ping_timeout=20).
+    # Do not tear the socket down just because migrations went quiet — they are naturally sparse.
+    # scanner.ws_silent_s stays in the registry but is not used as a kill switch.
+    async def ws_loop(self, connect=None):
         import websockets
         backoff = 1
+        def _connect():
+            return websockets.connect(WS_URL, max_size=2**22, ping_interval=20, ping_timeout=20)
+        open_ws = connect or _connect
         while True:
             try:
-                async with websockets.connect(WS_URL, max_size=2**22, ping_interval=20, ping_timeout=20) as ws:
+                async with open_ws() as ws:
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
                     self.c.db.x("INSERT INTO ws_events(ts,kind,note) VALUES(?,?,?)", (time.time(), "open", ""))
                     self.log.info(f"{iso()}\tws\topen\tsubscribeMigration")
                     backoff = 1
                     self.ws_last = time.time()
-                    while True:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=self.c.s["scanner.ws_silent_s"])
-                        except asyncio.TimeoutError:
-                            raise ConnectionError(f"silent {self.c.s['scanner.ws_silent_s']}s")
+                    async for raw in ws:
                         self.ws_last = time.time()
                         try:
                             msg = json.loads(raw)
@@ -123,17 +189,57 @@ class Scanner:
     async def on_migration(self, msg: dict):
         m = fields.FIELDS["migration"]
         mint = fields.get(msg, m["mint"])
+        self.admit(mint, self.c.clock(), "migration",
+                   signature=fields.get(msg, m["signature"]),
+                   pool_label=fields.get(msg, m["pool_label"]), raw=msg)
+
+    def admit(self, mint, migrated_at, source, signature=None, pool_label=None, raw=None) -> bool:
+        """Insert a newly seen graduation into the waiting room. Idempotent on mint."""
         if not mint or self.c.coin(mint):
-            return
+            return False
         now = self.c.clock()
         self.c.db.x("INSERT OR IGNORE INTO coins(mint,signature,pool_label,creator,migrated_at,first_seen,status,night,raw) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (mint, fields.get(msg, m["signature"]), fields.get(msg, m["pool_label"]), None, now, now, "room",
-                     self.c.night, json.dumps(msg)))
-        self.c.hb("scanner", "migration")
+                    (mint, signature, pool_label or source, None, migrated_at, now, "room",
+                     self.c.night, json.dumps(raw if raw is not None else {"source": source, "mint": mint})))
+        if source == "migration":
+            self.c.hb("scanner", "migration")
         if not mint.endswith("pump"):
-            self.emit({"mint": mint, "migrated_at": now}, None, None, "kill", "not a pump mint", now)
-            return
-        asyncio.create_task(self.capture_creator(mint))
+            self.emit({"mint": mint, "migrated_at": migrated_at}, None, None, "kill", "not a pump mint", now)
+            return True
+        try:
+            asyncio.get_running_loop().create_task(self.capture_creator(mint))
+        except RuntimeError:
+            pass
+        return True
+
+    async def catchup_graduations(self) -> int:
+        """Backstop: pull recent PumpSwap graduates so a short WS gap does not drop a coin."""
+        added = 0
+        oldest_ok = self.c.clock() - watch_window_min(self.c.s) * 60.0
+        page_cutoff = self.c.clock() - CATCHUP_LOOKBACK_S
+        fn = getattr(self.c.net, "gecko_new_pools", None)
+        if fn is None:
+            return 0
+        for page in range(1, CATCHUP_PAGES + 1):
+            try:
+                payload = await fn(page)
+            except Exception:
+                if page == 1:
+                    raise
+                break
+            rows = parse_new_pools(payload)
+            if not rows:
+                break
+            page_oldest = min(r["created_at"] for r in rows)
+            for r in rows:
+                if r["created_at"] < oldest_ok:
+                    continue
+                raw = {"source": "gap_backfill", "mint": r["mint"], "pool": r.get("pool"), "name": r.get("name")}
+                if self.admit(r["mint"], r["created_at"], "gap_backfill", pool_label="pumpswap", raw=raw):
+                    added += 1
+            if page_oldest < page_cutoff:
+                break
+        return added
 
     async def capture_creator(self, mint):
         """Creator: migration message has none -> RugCheck report. Creator balance NOW via RPC."""
@@ -154,6 +260,12 @@ class Scanner:
 
     # ---------- polling
     async def poll_loop(self):
+        try:
+            n = self.backfill_room()
+            if n:
+                self.log.info(f"{iso()}\tbackfill\treopened {n} dropped mint(s) under {self.c.s['scanner.max_age_h']}h")
+        except Exception as e:
+            self.c.error("scanner", "backfill", str(e)[:300])
         while True:
             t0 = time.time()
             try:
@@ -167,6 +279,17 @@ class Scanner:
                 self.c.error("scanner", "poll", str(e)[:300])
             await asyncio.sleep(max(1, self.c.s["scanner.poll_s"] - (time.time() - t0)))
 
+    def backfill_room(self) -> int:
+        """Re-open dropped ('never qualified') migrations still inside the watch window."""
+        now = self.c.clock()
+        cutoff = now - watch_window_min(self.c.s) * 60.0
+        rows = self.c.db.rows(
+            "SELECT mint FROM coins WHERE status='dropped' AND migrated_at>=? AND (reason='never qualified' OR reason IS NULL)",
+            (cutoff,))
+        for r in rows:
+            self.c.db.x("UPDATE coins SET status='room', reason=NULL WHERE mint=?", (r["mint"],))
+        return len(rows)
+
     def room(self):
         return self.c.db.rows("SELECT * FROM coins WHERE status='room'")
 
@@ -174,6 +297,15 @@ class Scanner:
         return self.c.db.rows("SELECT mint,name,symbol FROM coins WHERE runner=1 AND first_seen>=?", (time.time() - 86400,))
 
     async def poll_once(self):
+        n = self.backfill_room()
+        if n:
+            self.log.info(f"{iso()}\tbackfill\treopened {n} dropped mint(s) under {self.c.s['scanner.max_age_h']}h")
+        try:
+            added = await self.catchup_graduations()
+            if added:
+                self.log.info(f"{iso()}\tcatchup\tadmitted {added} missed graduation(s) from new_pools")
+        except Exception as e:
+            self.c.error("scanner", "catchup", str(e)[:300])
         room = self.room()
         if not room:
             return
