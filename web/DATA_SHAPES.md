@@ -156,3 +156,10 @@ Every item also carries `"liq"` and `"mc"` (USD numbers from the scan JSON `liqu
 green when `score >= minScore`. BUY means the Analyst passed every bar; NO BUY otherwise.
 FOMO `link` comes only from links.py (`r=savipww`). Secrets and broker fields are never included.
 The app shows this as the Live feed on the Live tab and polls it every 15 s while that tab is open. A Live | Scores toggle at the top of the tab switches to the Analyst scores list (scores.json). Tapping an Analyst row (on Live or Scores) opens a detail sheet: each answer vs its bar, PASS/FAIL, and BUY or “missed {minScore} by N”.
+
+## trades.json (Real | Paper toggle on Home)
+`{v, ts, deskMode, gmgnMode, real: Side, paper: Side & {bypassOn, bypassCount}}`
+Side: `{open: [Row], closed: [Row], pnlTonightUsd, pnlAllUsd, closedTonight, wins, losses}`.
+Real = GMGN LIVE orders + LIVE positions. Paper = PAPER positions (FOMO) + GMGN PAPER orders.
+Row: position_view / gmgn_order fields plus `source` ("FOMO"|"GMGN"), `open`, `bypass` (bool), `score` (analyst score for
+bypass rows), `closedAt`. No broker ids, quotes, bodies or tx.

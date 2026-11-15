@@ -4,7 +4,7 @@
   "use strict";
   const POLL_S = 30, LIVE_POLL_S = 15, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -108,7 +108,7 @@
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || (r === "scores" && a.dataset.tab === "live") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
+    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || (r === "scores" && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
     statusRow();
   }
   $("#bellBtn").onclick = () => { location.hash = "#/activity"; };
@@ -216,32 +216,42 @@
       <div class="r"><div class="${(p.pct ?? 0) >= 0 ? "green" : "red"}">${p.pnlUsd != null ? money(p.pnlUsd) : pct(p.pct)}</div><div class="s">${pct(p.pct)}</div></div>`;
     return p.mint ? `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
-  function home() {
-    const g = gate(); if (g) return g;
-    const st = F("state.json"), ch = F("chart.json"), gm = st.gmgn || gmgnState();
-    const start = st.startBalance ?? st.balance, d = st.balance - start;
-    const fomoLabel = st.mode === "PAPER" ? "FOMO practice balance (PAPER, not real money)" : "FOMO LIVE stack";
-    let h = gmgnWalletCard(gm);
-    h += `<div class="card"><div class="sub">${fomoLabel}</div>
-      <div class="big">${money(st.balance)}</div>
-      <div class="sub"><span class="${d >= 0 ? "green" : "red"}">${d >= 0 ? "+" : ""}${money(d).replace("$-", "-$")} (${pct(start ? d / start * 100 : 0)})</span> · free ${money(st.free)} · in positions ${money(st.inPositions)}</div>
-      <canvas id="homeChart" style="margin-top:12px"></canvas>
-      <div id="homeChartEmpty" class="sub hidden" style="padding:20px 0;text-align:center">The chart starts with the first trade</div></div>`;
-    if (st.ticket && st.ticket.kind !== "ok") h += `<div class="status info" style="margin:0 0 10px">${esc(st.ticket.msg)}</div>`;
-    const gOpen = gm?.open || [];
-    if (gOpen.length) {
-      h += `<h1>GMGN positions</h1><div class="card list">${gOpen.map(gmgnPosRow).join("")}</div>`;
+  function moneyTabs() {
+    const onPaper = route().name === "paper";
+    return `<div class="seg" role="tablist" aria-label="Real money or Paper">
+      <a href="#/home" class="${onPaper ? "" : "on real"}" role="tab" aria-selected="${!onPaper}">Real money</a>
+      <a href="#/paper" class="${onPaper ? "on paper" : ""}" role="tab" aria-selected="${onPaper}">Paper</a>
+    </div>`;
+  }
+  function bypassBadge(r) { return r.bypass ? `<span class="badge bypass">BYPASS · score ${r.score ?? "?"}</span>` : ""; }
+  function tradeRow(r) {
+    const name = r.name || r.symbol || short(r.mint);
+    const p = r.pct ?? 0, up = p >= 0;
+    const src = r.source === "GMGN" ? "GMGN" : "FOMO";
+    let sub;
+    if (r.open) {
+      const ex = r.exits || {};
+      sub = r.source === "GMGN" ? `${money(r.sizeUsd)} · stop -${ex.stopPct ?? 15}% · trail ${ex.trailPct ?? 20}%${ex.attached ? " · exits on" : " · exits?"}`
+        : `${money(r.sizeUsd)} · stop -${r.stopPct}%${r.trailActive ? " · trailing" : ""}`;
+    } else {
+      const why = r.exitReason ? (r.exitReason === "trail" ? "trailed out" : r.exitReason === "stop" ? "stopped" : r.exitReason) : r.status;
+      sub = `${money(r.sizeUsd)} · ${esc(why || "closed")} ${tm(r.closedAt)}`;
     }
-    if (st.positions.length) {
-      h += `<h1>Open positions</h1><div class="card list">${st.positions.map(p => `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}"><div class="ico ${p.pct >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(p.name)}</div><div class="s">${money(p.sizeUsd)} · stop -${p.stopPct}%${p.trailActive ? " · trailing" : ""}</div></div>
-      <div class="r"><div class="${p.pct >= 0 ? "green" : "red"}">${pct(p.pct)}</div><div class="s">${price(p.lastPrice)}</div></div></a>
-      <a class="btn fomo" href="${esc(p.link)}" target="_blank" rel="noopener">Sell on FOMO</a>`).join("")}</div>`;
-    } else if (!gOpen.length) {
-      h += `<h1>Open positions</h1>` + emptyBox("No open positions", "The desk is scanning. Buys arrive as Telegram pushes.");
-    }
+    const right = r.pnlUsd != null ? money(r.pnlUsd) : pct(r.pct);
+    const inner = `<div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
+      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span></div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
+      <div class="r"><div class="${up ? "green" : "red"}">${right}</div><div class="s">${pct(r.pct)}</div></div>`;
+    return r.mint ? `<a class="row${r.bypass ? " byp" : ""}" href="#/coin/${encodeURIComponent(r.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
+  }
+  function pnlCard(side, label, cls) {
+    const t = side.pnlTonightUsd ?? 0, a = side.pnlAllUsd ?? 0;
+    return `<div class="card ${cls}"><div class="sub">${label}</div>
+      <div class="grid2" style="margin-top:8px"><div><div class="${t >= 0 ? "green" : "red"}" style="font:700 22px var(--mono)">${money(t)}</div><div class="sub">tonight · ${side.closedTonight || 0} closed</div></div>
+      <div><div class="${a >= 0 ? "green" : "red"}" style="font:700 22px var(--mono)">${money(a)}</div><div class="sub">all time · ${side.wins || 0}W ${side.losses || 0}L</div></div></div></div>`;
+  }
+  function tonightAndAgents(st) {
     const c = st.counts;
-    h += `<h1>Tonight</h1><div class="grid2">
+    let h = `<h1>Tonight</h1><div class="grid2">
       <div class="card stat"><div class="v">${c.pools}</div><div class="k">pools seen</div></div>
       <div class="card stat"><div class="v">${c.scannerPassed}</div><div class="k">passed Scanner</div></div>
       <div class="card stat"><div class="v">${c.audited - c.auditRejected}/${c.audited}</div><div class="k">cleared Auditor</div></div>
@@ -250,7 +260,46 @@
     h += `<h1>Agents</h1>` + AGENTS.map(a => agentCard(a, false)).join("");
     return h;
   }
-
+  function home() {
+    const g = gate(); if (g) return g;
+    const st = F("state.json"), gm = st.gmgn || gmgnState(), tr = F("trades.json");
+    let h = moneyTabs();
+    if (route().name === "paper") return h + paperView(st, tr) + tonightAndAgents(st);
+    // ---- Real money: GMGN LIVE only
+    h += gmgnWalletCard(gm);
+    const real = tr?.real;
+    if (real) {
+      h += pnlCard(real, "Real P&L (GMGN LIVE)", "real");
+      h += `<h1>Real positions</h1>` + (real.open.length ? `<div class="card list">${real.open.map(tradeRow).join("")}</div>`
+        : emptyBox("No real positions open", gm?.mode === "LIVE" ? "GMGN buys on its own when a coin passes. Exits sit on GMGN." : "GMGN is in PAPER mode."));
+      if (real.closed.length) h += `<h1>Real trades</h1><div class="card list">${real.closed.map(tradeRow).join("")}</div>`;
+    } else {
+      const gOpen = (gm?.open || []).filter(p => p.mode === "LIVE");
+      h += `<h1>Real positions</h1>` + (gOpen.length ? `<div class="card list">${gOpen.map(gmgnPosRow).join("")}</div>` : emptyBox("No real positions open", "Waiting for the next update."));
+    }
+    return h + tonightAndAgents(st);
+  }
+  function paperView(st, tr) {
+    const start = st.startBalance ?? st.balance, d = st.balance - start;
+    const fomoLabel = st.mode === "PAPER" ? "FOMO practice balance (PAPER, not real money)" : "FOMO LIVE stack";
+    let h = `<div class="card paper"><div class="rowx"><div class="sub">${fomoLabel}</div><span class="badge">PAPER</span></div>
+      <div class="big">${money(st.balance)}</div>
+      <div class="sub"><span class="${d >= 0 ? "green" : "red"}">${d >= 0 ? "+" : ""}${money(d).replace("$-", "-$")} (${pct(start ? d / start * 100 : 0)})</span> · free ${money(st.free)} · in positions ${money(st.inPositions)}</div>
+      <canvas id="homeChart" style="margin-top:12px"></canvas>
+      <div id="homeChartEmpty" class="sub hidden" style="padding:20px 0;text-align:center">The chart starts with the first trade</div></div>`;
+    if (st.ticket && st.ticket.kind !== "ok") h += `<div class="status info" style="margin:0 0 10px">${esc(st.ticket.msg)}</div>`;
+    const paper = tr?.paper;
+    if (!paper) {
+      const ps = st.positions.filter(p => p.mode === "PAPER");
+      return h + `<h1>Paper positions</h1>` + (ps.length ? `<div class="card list">${ps.map(p => tradeRow(Object.assign({ open: true, source: "FOMO" }, p))).join("")}</div>` : emptyBox("No paper positions", "Waiting for the next update."));
+    }
+    h += pnlCard(paper, "Paper P&L (not real money)", "paper");
+    if (paper.bypassOn) h += `<div class="status info" style="margin:0 0 10px">Analyst bypass is on for testing: coins that failed scoring still paper-buy and show BYPASS · score N. Never real money.</div>`;
+    h += `<h1>Paper positions</h1>` + (paper.open.length ? `<div class="card list">${paper.open.map(r => tradeRow(r) + (r.source === "FOMO" && r.link ? `<a class="btn fomo" href="${esc(r.link)}" target="_blank" rel="noopener">Open on FOMO</a>` : "")).join("")}</div>`
+      : emptyBox("No paper positions open", "The desk is scanning. Paper buys arrive as Telegram pushes."));
+    if (paper.closed.length) h += `<h1>Paper trades</h1><div class="card list">${paper.closed.map(tradeRow).join("")}</div>`;
+    return h;
+  }
   function scoreBar(score, min) {
     const fill = Math.max(0, Math.min(100, Number(score) || 0));
     const mark = Math.max(0, Math.min(100, Number(min) || 0));
