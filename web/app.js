@@ -331,11 +331,14 @@
   const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
   function overrideBtns(it) {
     const bot = F("feed.json")?.tgBot || F("scores.json")?.tgBot;
-    if (it.overridable !== true || !bot || !/^[A-Za-z0-9_]{5,32}$/.test(bot) || !MINT_RE.test(it.mint || "")) return "";
+    const okP = it.overridablePaper === true, okR = it.overridableReal === true;
+    if (!(okP || okR) || !bot || !/^[A-Za-z0-9_]{5,32}$/.test(bot) || !MINT_RE.test(it.mint || "")) return "";
     if (Date.now() - new Date(it.t || it.ts).getTime() > 30 * 60 * 1000) return "";
     const u = k => `https://t.me/${bot}?start=${k}_${it.mint}`;
-    return `<div class="ovr"><a class="btn ovp" href="${esc(u("ovp"))}" target="_blank" rel="noopener">Override · Paper</a>
-      <a class="btn ovreal" href="${esc(u("ovr"))}" target="_blank" rel="noopener">Override · Real $</a></div>
+    const bp = okP ? `<a class="btn ovp" href="${esc(u("ovp"))}" target="_blank" rel="noopener">Override · Paper</a>`
+      : `<span class="btn ovdone">On paper (bypass)</span>`;
+    const br = okR ? `<a class="btn ovreal" href="${esc(u("ovr"))}" target="_blank" rel="noopener">Override · Real $</a>` : "";
+    return `<div class="ovr">${bp}${br}</div>
       <div class="ovnote">Opens Telegram. Skips only the Analyst score; Real $ asks you to confirm.</div>`;
   }
   function scoreDetail(it, min, bars, noOv) {
