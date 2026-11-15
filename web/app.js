@@ -75,7 +75,9 @@
   const price = v => v == null ? "—" : "$" + Charts.fmtP(Number(v));
   const ago = s => s == null ? "—" : s < 90 ? Math.round(s) + "s" : Math.round(s / 60) + "m";
   const short = m => m ? m.slice(0, 4) + "…" + m.slice(-4) : "";
+  const solAmt = v => v == null ? "—" : Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + " SOL";
   const F = f => S.files[f];
+  function gmgnState() { return F("state.json")?.gmgn || F("account.json")?.gmgn || null; }
 
   // ---------- routing
   function route() {
@@ -185,22 +187,54 @@
     return `<div class="card agent">${head}${body}${pause}</div>`;
   }
 
+  function gmgnWalletCard(g) {
+    if (!g) return "";
+    const live = g.mode === "LIVE";
+    const title = `Real wallet (GMGN ${esc(g.mode)})`;
+    const badges = [`<span class="badge ${live ? "live" : ""}">${esc(g.mode)}</span>`]
+      .concat(g.halted ? [`<span class="badge">HALTED</span>`] : []).join("");
+    const usd = g.usd != null ? money(g.usd) : "USD —";
+    const when = g.updatedAt ? ` · updated ${tm(g.updatedAt)}` : "";
+    const tickets = `${g.ticketsUsed}/${g.ticketsMax} tickets tonight`;
+    return `<div class="card real"><div class="rowx"><div class="sub">${title}</div><div class="pills" style="margin:0">${badges}</div></div>
+      <div class="big">${solAmt(g.sol)}</div>
+      <div class="sub">${usd} · ${esc(g.walletShort || short(g.wallet))}${when}</div>
+      <div class="pills"><span class="pill">${money(g.capTradeUsd)} / trade</span><span class="pill">${esc(tickets)}</span></div></div>`;
+  }
+  function gmgnPosRow(p) {
+    const name = p.name || p.symbol || short(p.mint);
+    const ex = p.exits || {};
+    const exits = `stop -${ex.stopPct ?? 6}% · trail ${ex.trailPct ?? 12}%` + (ex.attached ? " · exits on" : " · exits?");
+    const inner = `<div class="ico ${(p.pct ?? 0) >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
+      <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode)}</span></div>
+      <div class="s">${money(p.sizeUsd)} · ${exits}</div></div>
+      <div class="r"><div class="${(p.pct ?? 0) >= 0 ? "green" : "red"}">${p.pnlUsd != null ? money(p.pnlUsd) : pct(p.pct)}</div><div class="s">${pct(p.pct)}</div></div>`;
+    return p.mint ? `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
+  }
   function home() {
     const g = gate(); if (g) return g;
-    const st = F("state.json"), ch = F("chart.json");
+    const st = F("state.json"), ch = F("chart.json"), gm = st.gmgn || gmgnState();
     const start = st.startBalance ?? st.balance, d = st.balance - start;
-    let h = `<div class="card"><div class="sub">${st.mode === "PAPER" ? "PAPER balance" : "LIVE stack"} · tonight</div>
+    const fomoLabel = st.mode === "PAPER" ? "FOMO practice balance (PAPER, not real money)" : "FOMO LIVE stack";
+    let h = gmgnWalletCard(gm);
+    h += `<div class="card"><div class="sub">${fomoLabel}</div>
       <div class="big">${money(st.balance)}</div>
       <div class="sub"><span class="${d >= 0 ? "green" : "red"}">${d >= 0 ? "+" : ""}${money(d).replace("$-", "-$")} (${pct(start ? d / start * 100 : 0)})</span> · free ${money(st.free)} · in positions ${money(st.inPositions)}</div>
       <canvas id="homeChart" style="margin-top:12px"></canvas>
       <div id="homeChartEmpty" class="sub hidden" style="padding:20px 0;text-align:center">The chart starts with the first trade</div></div>`;
     if (st.ticket && st.ticket.kind !== "ok") h += `<div class="status info" style="margin:0 0 10px">${esc(st.ticket.msg)}</div>`;
-    h += `<h1>Open positions</h1>`;
-    h += st.positions.length ? `<div class="card list">${st.positions.map(p => `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}"><div class="ico ${p.pct >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
+    const gOpen = gm?.open || [];
+    if (gOpen.length) {
+      h += `<h1>GMGN positions</h1><div class="card list">${gOpen.map(gmgnPosRow).join("")}</div>`;
+    }
+    if (st.positions.length) {
+      h += `<h1>Open positions</h1><div class="card list">${st.positions.map(p => `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}"><div class="ico ${p.pct >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
       <div class="grow"><div class="t">${esc(p.name)}</div><div class="s">${money(p.sizeUsd)} · stop -${p.stopPct}%${p.trailActive ? " · trailing" : ""}</div></div>
       <div class="r"><div class="${p.pct >= 0 ? "green" : "red"}">${pct(p.pct)}</div><div class="s">${price(p.lastPrice)}</div></div></a>
-      <a class="btn fomo" href="${esc(p.link)}" target="_blank" rel="noopener">Sell on FOMO</a>`).join("")}</div>`
-      : emptyBox("No open positions", "The desk is scanning. Buys arrive as Telegram pushes.");
+      <a class="btn fomo" href="${esc(p.link)}" target="_blank" rel="noopener">Sell on FOMO</a>`).join("")}</div>`;
+    } else if (!gOpen.length) {
+      h += `<h1>Open positions</h1>` + emptyBox("No open positions", "The desk is scanning. Buys arrive as Telegram pushes.");
+    }
     const c = st.counts;
     h += `<h1>Tonight</h1><div class="grid2">
       <div class="card stat"><div class="v">${c.pools}</div><div class="k">pools seen</div></div>
@@ -212,15 +246,33 @@
   }
   function agents() { const g = gate(); if (g) return g; return `<h1>Your 5 agents</h1>` + AGENTS.map(a => agentCard(a, true)).join("") + `<div class="hint">All agent changes go through Telegram (@Denarpobot). This app is read-only.</div>`; }
 
+  function gmgnActivityItems(orders) {
+    return (orders || []).filter(o => o.status !== "refused").map(o => {
+      const closed = o.status === "closed";
+      const stop = closed && (o.exitReason === "loss_stop");
+      const kind = !closed ? "buy" : stop ? "stop" : "sell";
+      const title = !closed ? `Bought ${o.name || o.symbol || short(o.mint)}`
+        : stop ? `Stopped ${o.name || o.symbol || short(o.mint)}`
+        : `Sold ${o.name || o.symbol || short(o.mint)}`;
+      const tone = !closed ? "cyan" : (o.pnlUsd ?? 0) >= 0 && !stop ? "green" : "red";
+      const right1 = !closed ? money(o.sizeUsd) : money(o.pnlUsd);
+      const right2 = !closed ? o.mode : (o.pct != null ? pct(o.pct) : (o.exitReason || ""));
+      return {id: "g" + o.id, t: o.closedAt || o.openedAt || o.t, kind, title,
+              sub: `GMGN · ${o.mode}` + (o.exitReason && closed ? ` · ${o.exitReason.replace(/_/g, " ")}` : ""),
+              right1, right2, mint: o.mint, tone, mode: o.mode};
+    });
+  }
   function activity() {
     const g = gate(); if (g) return g;
     const a = F("activity.json");
     if (a?.items?.length) localStorage.setItem("desk.seen", String(a.items[0].id));
     const names = coins();
-    if (!a || !a.items.length) return `<h1>Activity</h1>` + emptyBox("Nothing yet tonight", "Buys, sells, stops and rejects show up here.");
-    return `<h1>Activity</h1><div class="card list">${a.items.map(i => {
+    const items = (a?.items || []).concat(gmgnActivityItems(gmgnState()?.orders)).sort((x, y) => new Date(y.t) - new Date(x.t));
+    if (!items.length) return `<h1>Activity</h1>` + emptyBox("Nothing yet tonight", "Buys, sells, stops and rejects show up here.");
+    return `<h1>Activity</h1><div class="card list">${items.map(i => {
       const ic = { buy: "↗", sell: "↘", stop: "■", reject: "✕" }[i.kind] || "•";
-      const inner = `<div class="ico ${i.tone === "cyan" ? "cyan" : i.tone}">${ic}</div><div class="grow"><div class="t">${esc(i.title)}</div><div class="s">${esc(i.sub)} · ${tm(i.t)}</div></div>
+      const live = i.mode === "LIVE" || (i.sub || "").includes("LIVE");
+      const inner = `<div class="ico ${i.tone === "cyan" ? "cyan" : i.tone}">${ic}</div><div class="grow"><div class="t">${esc(i.title)}${live ? ` <span class="badge live">LIVE</span>` : ""}</div><div class="s">${esc(i.sub)} · ${tm(i.t)}</div></div>
         <div class="r"><div class="${i.tone === "red" ? "red" : i.tone === "green" ? "green" : ""}">${esc(i.right1)}</div><div class="s">${esc(i.right2)}</div></div>`;
       return i.mint ? `<a class="row" href="#/coin/${encodeURIComponent(i.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
     }).join("")}</div>`;
@@ -297,14 +349,17 @@
     return h;
   }
 
-  const GROUPS = { scanner: "Scanner", auditor: "Auditor", analyst: "Analyst", executor: "Executor", risk: "Risk", desk: "Desk" };
+  const GROUPS = { scanner: "Scanner", auditor: "Auditor", analyst: "Analyst", executor: "Executor", risk: "Risk", gmgn: "GMGN", desk: "Desk" };
   function account() {
     const g = gate(); if (g) return g;
     const a = F("account.json"), st = F("state.json");
     if (!a) return emptyBox("Account not published yet", "");
-    let h = `<h1>Account</h1><div class="card list">
-      <div class="row"><div class="grow"><div class="t">Mode</div><div class="s">Change in Telegram: paper | live</div></div><span class="badge ${a.mode === "LIVE" ? "live" : ""}">${esc(a.mode)}</span></div>
-      <div class="row"><div class="grow"><div class="t">${a.mode === "PAPER" ? "PAPER balance" : "LIVE stack"}</div><div class="s">Change in Telegram: stack 1240</div></div><div class="r">${money(a.stack)}</div></div>
+    const gm = a.gmgn || st?.gmgn;
+    let h = `<h1>Account</h1>`;
+    if (gm) h += gmgnWalletCard(gm);
+    h += `<div class="card list">
+      <div class="row"><div class="grow"><div class="t">FOMO mode</div><div class="s">Change in Telegram: paper | live</div></div><span class="badge ${a.mode === "LIVE" ? "live" : ""}">${esc(a.mode)}</span></div>
+      <div class="row"><div class="grow"><div class="t">${a.mode === "PAPER" ? "FOMO practice balance (PAPER, not real money)" : "FOMO LIVE stack"}</div><div class="s">Change in Telegram: stack 1240</div></div><div class="r">${money(a.stack)}</div></div>
       <a class="row" href="${esc(a.profile_url)}" target="_blank" rel="noopener"><div class="grow"><div class="t">FOMO profile</div><div class="s">@${esc(a.fomoHandle)}</div></div><div class="r cyan">Open ›</div></a>
       <button class="row" id="invite" style="width:100%;text-align:left"><div class="grow"><div class="t">Invite a friend</div><div class="s">10% off FOMO fees through your link</div></div><div class="r cyan">Share ›</div></button>
       <div class="row"><div class="grow"><div class="t">Notifications</div><div class="s wrap">Notifications come through Telegram (@Denarpobot)</div></div></div>

@@ -76,7 +76,8 @@ class Builder:
                                "paused": a in c.paused} for a in AGENTS},
                 "counts": self.night_counts(), "ticket": tc, "wsReconnects1h": recon,
                 "layer8Down": bool(self.d.auditor.gpa_down_alerted),
-                "signupUrl": links.SIGNUP_URL}
+                "signupUrl": links.SIGNUP_URL,
+                "gmgn": self.gmgn()}
 
     def chart(self):
         rows = self.c.db.rows("SELECT ts, balance FROM balance WHERE mode=? ORDER BY ts DESC LIMIT 500", (self.c.mode(),))[::-1]
@@ -136,8 +137,8 @@ class Builder:
 
     def coin_mints(self):
         n = self.c.night
-        rows = self.c.db.q("SELECT DISTINCT mint FROM (SELECT mint FROM audits WHERE night=? UNION SELECT mint FROM positions WHERE night=? OR status IN ('open','exiting'))",
-                           (n, n))
+        rows = self.c.db.q("SELECT DISTINCT mint FROM (SELECT mint FROM audits WHERE night=? UNION SELECT mint FROM positions WHERE night=? OR status IN ('open','exiting') UNION SELECT mint FROM gmgn_orders WHERE night=? OR status IN ('open','exiting','pending','submitting'))",
+                           (n, n, n))
         return [r[0] for r in rows][-MAX_COIN_FILES:]
 
     def candles(self, mint, bucket=60):
@@ -199,8 +200,64 @@ class Builder:
                 "profileUrl": links.profile_url(s["desk.fomo_handle"]), "signupUrl": links.SIGNUP_URL,
                 "settings": c.s.specs_public(),
                 "changeLog": [{"t": iso(r["ts"]), "key": r["key"], "old": json.loads(r["old"]), "new": json.loads(r["new"]), "source": r["source"]} for r in ch],
-                "telegramBot": "@Denarpobot", "editVia": "telegram"}
+                "telegramBot": "@Denarpobot", "editVia": "telegram",
+                "gmgn": self.gmgn()}
 
+
+    def gmgn_position(self, o):
+        s = self.c.s
+        entry, last = o["entry_price"], o["last_price"] or o["entry_price"]
+        size = o["size_usd"] or 0
+        pnl = pct = None
+        if entry and last and size:
+            pnl = round(size * (last / entry - 1), 2)
+            pct = round((last / entry - 1) * 100, 2)
+        attached = bool(o.get("strategy_order_id")) or o.get("mode") == "PAPER"
+        return {"id": o["id"], "mint": o["mint"], "name": o["name"], "symbol": o["symbol"],
+                "mode": o["mode"], "status": o["status"], "entryPrice": entry, "lastPrice": last,
+                "peakPrice": o["peak"], "sizeUsd": size, "pct": pct, "pnlUsd": pnl,
+                "openedAt": iso(o["ts"]) if o["ts"] else None,
+                "exits": {"stopPct": s["risk.stop_pct"], "trailPct": s["risk.trail_pct"],
+                          "trailStartPct": s["risk.trail_start_pct"], "attached": bool(attached),
+                          "repair": o.get("repair") or None},
+                "link": links.coin_url(o["mint"]) if o["mint"] else None}
+
+    def gmgn_order(self, o):
+        """Public trade row. Never includes quote, body, conditions, tx, or ids from the broker."""
+        return {"id": o["id"], "t": iso(o["ts"]) if o["ts"] else None, "mint": o["mint"],
+                "name": o["name"], "symbol": o["symbol"], "mode": o["mode"], "status": o["status"],
+                "reason": o["reason"], "sizeUsd": o["size_usd"], "entryPrice": o["entry_price"],
+                "lastPrice": o["last_price"] or o["entry_price"], "exitPrice": o["exit_price"],
+                "exitReason": o["exit_reason"], "pnlUsd": o["pnl_usd"], "pct": o["pct"],
+                "openedAt": iso(o["ts"]) if o["ts"] else None,
+                "closedAt": iso(o["closed_at"]) if o["closed_at"] else None,
+                "link": links.coin_url(o["mint"]) if o["mint"] else None}
+
+    def gmgn(self):
+        """Read-only GMGN wallet + trades for the phone app. No secrets, no order bodies."""
+        from agents.gmgn_trader import night_usage, ACTIVE
+        from gmgn import MAIN_WALLET
+        c, s = self.c, self.c.s
+        g = getattr(self.d, "gmgn", None)
+        snap = g.wallet_snapshot() if g and hasattr(g, "wallet_snapshot") else {
+            "sol": None, "usd": None, "solUsd": None, "updatedAt": None}
+        mode = s["gmgn.mode"]
+        n, used = night_usage(c.db, c.night, mode)
+        cap = float(s["gmgn.cap_trade_usd"])
+        tickets = int(s["gmgn.max_tickets_night"])
+        placeholders = ",".join("?" * len(ACTIVE))
+        open_rows = c.db.rows(f"SELECT * FROM gmgn_orders WHERE status IN ({placeholders}) ORDER BY ts", ACTIVE)
+        recent = c.db.rows("SELECT * FROM gmgn_orders ORDER BY id DESC LIMIT 20")
+        return {"mode": mode, "enabled": bool(s["gmgn.enabled"]),
+                "halted": bool(c.db.meta("gmgn_halted", False)),
+                "wallet": MAIN_WALLET, "walletShort": f"{MAIN_WALLET[:4]}…{MAIN_WALLET[-4:]}",
+                "sol": snap.get("sol"), "usd": snap.get("usd"), "solUsd": snap.get("solUsd"),
+                "updatedAt": snap.get("updatedAt"),
+                "capTradeUsd": cap, "ticketsUsed": n, "ticketsMax": tickets,
+                "nightSpendUsd": round(used, 2), "nightCapUsd": round(cap * tickets, 2),
+                "reserveSol": s["gmgn.sol_reserve"],
+                "open": [self.gmgn_position(r) for r in open_rows],
+                "orders": [self.gmgn_order(r) for r in recent]}
 
 class Publisher:
     def __init__(self, desk):
@@ -250,7 +307,17 @@ class Publisher:
             await asyncio.sleep(5)
         return False
 
+    async def refresh_gmgn(self):
+        g = getattr(self.d, "gmgn", None)
+        if g is None or not hasattr(g, "refresh_wallet"):
+            return
+        try:
+            await g.refresh_wallet(min_age=60)
+        except Exception as e:
+            self.c.error("publisher", "gmgn", str(e)[:200])
+
     async def publish_once(self):
+        await self.refresh_gmgn()
         n = self.write_local()
         gid = secrets_store.get("GIST_ID")
         await self.wait_idle()                               # never overlapping runs

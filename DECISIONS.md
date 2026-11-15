@@ -56,3 +56,29 @@
 21. Quote/swap need a paid GMGN plan (free: 403 PLAN_UPGRADE_REQUIRED, weight 11 > capacity 5). Owner upgraded to Plus
     2026-11-14 ~5:50 PM CT; quote verified code 0. PAPER uses the real quote; if a quote is ever plan-blocked it notes that,
     simulates at the DexScreener price and re-tries the quote after 10 min. Wallet SOL is re-read via /v1/user/info before sizing.
+
+## Scanner max age (user request 2026-11-14 7:21 PM CT)
+22. Scanner watch window extended from ~1h (the old scanner.max_wait_min = 60 "never qualified" drop) to
+    scanner.max_age_h = 5 (alias "max age", validated 1–24 hours, changeable via Telegram `set max age to N`,
+    logged in change_log). PumpPortal subscribeMigration is unchanged: every new graduation is still tracked.
+    Instead of dropping a coin as "never qualified" after ~60 min, the Scanner keeps re-checking it (DexScreener
+    tokens/v1, batched 30, existing scanner.max_dex_rpm / 429 backoff) until it is max_age_h hours old. On startup
+    (and at the start of each poll) it backfills: coins already in the table with age < max_age_h that were dropped
+    as "never qualified" are returned to the waiting room. Killed / passed coins are not reopened. All other
+    Scanner filters are unchanged (min liq $10K, top10 ≤25%, SOL-quoted, pump mint, +h1 pump kill, copycat,
+    min pool age 10m). Older coins take the same Auditor 8/8 → Analyst → Executor → Risk path. Auditor layer 6
+    ("pool too young") is a minimum age only (default 10m) and already displays hours when age ≥ 120m, so a 5h
+    coin passes it. Analyst scoring is not age-based; state text now says "Xh ago" when age ≥ 120m (wording only).
+    scanner.max_wait_min stays in the registry for compatibility but is no longer the drop threshold.
+
+## Real wallet in the phone app (2026-11-14 ~9:40 PM CT)
+23. Home and Account now show the owner's real GMGN wallet alongside the FOMO PAPER stack, so the
+    $200 practice balance is no longer mistaken for real money. publisher.Builder.gmgn() is included
+    in state.json and account.json: mode, halted, wallet (full + short), cached SOL + USD (SOL price
+    from GMGN gas_price native_token_usd_price, same source the trader uses; refreshed at most every
+    60s, never blocks a publish on a failed read), caps (trade $, tickets used/limit, night spend),
+    open positions with mark-to-market P&L and attached exits (stop -6%, trail 12%, TP trail from +20%),
+    and the last 20 gmgn_orders. Quote, swap body, conditions, tx, and broker order ids are never
+    published. Secrets stay out of the feed. The app is still read-only; FOMO links still come only
+    from links.py with r=savipww. FOMO card label is "FOMO practice balance (PAPER, not real money)".
+    GMGN trades appear on the Activity tab marked LIVE. Modes, caps and settings were not changed.

@@ -85,3 +85,26 @@ cyan beam on the first layer with `pass:null`. (Plan B: no SSE; layers arrive pe
  "changeLog":[{"t","key","old","new","source"}]}`
 Plan B: the Account tab shows sliders + exact number fields read-only with each setting's range, and a
 "change in Telegram" hint that copies e.g. `set stop to -8%`. The app can't write to the desk.
+
+## gmgn (in state.json and account.json)
+Read-only snapshot of the owner's main GMGN wallet and hands-off trades. Never contains API keys,
+signing keys, swap bodies, quotes, tx hashes, or broker order ids.
+
+```json
+{"mode":"LIVE","enabled":true,"halted":false,
+ "wallet":"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2","walletShort":"JAP5…5zC2",
+ "sol":1.02,"usd":71.40,"solUsd":70.0,"updatedAt":"2026-11-15T02:40:00Z",
+ "capTradeUsd":65.0,"ticketsUsed":0,"ticketsMax":4,"nightSpendUsd":0.0,"nightCapUsd":260.0,
+ "reserveSol":0.02,
+ "open":[{"id":1,"mint","name","symbol","mode":"LIVE","status":"open",
+          "entryPrice":0.1,"lastPrice":0.11,"peakPrice":0.12,"sizeUsd":65.0,
+          "pct":10.0,"pnlUsd":6.5,"openedAt":"…Z",
+          "exits":{"stopPct":6,"trailPct":12,"trailStartPct":20,"attached":true,"repair":null},
+          "link":"https://fomo.family/coin?address=…&chainId=1399811149&r=savipww&source=share_link"}],
+ "orders":[{"id":1,"t":"…Z","mint","name","symbol","mode":"LIVE","status":"open|closed|…",
+            "reason":null,"sizeUsd":65.0,"entryPrice":0.1,"lastPrice":0.11,"exitPrice":null,
+            "exitReason":null,"pnlUsd":null,"pct":null,"openedAt":"…Z","closedAt":null,"link":"…"}]}
+```
+Balance and SOL price are cached on the desk and refreshed at most every 60s. `sol`/`usd` may be
+null if the desk has not yet read the wallet. The Home card shows this as "Real wallet (GMGN LIVE)";
+the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real money)".

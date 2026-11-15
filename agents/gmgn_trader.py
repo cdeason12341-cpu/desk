@@ -192,6 +192,30 @@ class GmgnTrader:
             self._bal = (time.time(), v)
         return v
 
+    def wallet_snapshot(self):
+        """Last cached wallet SOL + USD. Never calls the API. Used by the read-only publisher."""
+        bal_ts, lamports = self._bal
+        _sol_ts, sol = self._sol
+        sol_amt = (lamports / LAMPORTS) if lamports is not None else None
+        usd = round(sol_amt * sol, 2) if (sol_amt is not None and sol) else None
+        return {
+            "sol": round(sol_amt, 6) if sol_amt is not None else None,
+            "usd": usd,
+            "solUsd": sol,
+            "updatedAt": iso(bal_ts) if (lamports is not None and bal_ts) else None,
+        }
+
+    async def refresh_wallet(self, min_age=60):
+        """Refresh cached balance and SOL price at most once every min_age seconds."""
+        if self.client is None:
+            return self.wallet_snapshot()
+        now = time.time()
+        if self._sol[1] is None or now - self._sol[0] >= min_age:
+            await self.sol_usd()
+        if self._bal[1] is None or now - self._bal[0] >= min_age:
+            await self.wallet_lamports(fresh=True)
+        return self.wallet_snapshot()
+
     def ticket_usd(self, liq):
         """The desk's current ticket (tracks bumps), never above the GMGN per-trade cap."""
         from agents.executor import size_ticket
