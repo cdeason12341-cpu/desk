@@ -178,7 +178,7 @@
       body = `<div class="rowx"><div><div class="num">${ag.scoring?.length ? "Scoring" : ag.scored + " scored"}</div><div class="sub">${ag.mode === "rules" ? "Analyst (rules)" : "Jev"} · min ${ag.minScore}${ag.inputTokens ? " · " + ag.inputTokens.toLocaleString() + " tokens" : ""}</div>
         ${last ? `<div class="sub">${esc(coins().get(last.mint)?.name || short(last.mint))} · ${last.passed ? '<span class="green">pass</span>' : '<span class="red">' + esc(last.failed[0]) + "</span>"}</div>` : `<div class="sub">No coin scored yet</div>`}</div>
         <canvas class="ring" data-score="${last ? last.score : ""}" data-min="${ag.minScore}" width="64" height="64"></canvas></div>`;
-      body += `<a class="hint" href="#/live" style="display:block;margin-top:10px">Live feed · min ${ag.minScore} to buy</a>`;
+      body += `<a class="hint" href="#/scores" style="display:block;margin-top:10px">Scores · min ${ag.minScore} to buy · tap a row for why</a>`;
     } else if (name === "executor") {
       const last = ag.recent?.[0], st2 = F("state.json");
       const filled = last && last.status === "bought";
@@ -256,29 +256,59 @@
     const mark = Math.max(0, Math.min(100, Number(min) || 0));
     return `<div class="bar thresh"><i data-fill="${fill}"></i><span class="mark" style="left:${mark}%"></span></div>`;
   }
-  function scoreRow(it, min, open) {
-    const pass = !!it.passed, ans = it.answers || {};
-    const label = it.name || it.symbol || it.mintShort || short(it.mint);
-    const why = (it.failed || []).join(" · ") || (pass ? "cleared every bar" : "");
+  function barsOf() { return F("feed.json")?.bars || {}; }
+  function scoreVerdict(it, min) {
+    const score = it.score, minN = min == null ? null : Number(min);
+    if (it.passed || it.outcome === "buy") return { label: "BUY", cls: "buy", buy: true };
+    if (score != null && minN != null && Number(score) < minN) {
+      const n = Math.round(minN - Number(score));
+      return { label: `missed ${minN} by ${n}`, cls: "miss", buy: false };
+    }
+    return { label: "NO BUY", cls: "miss", buy: false };
+  }
+  function checkRow(label, val, bar, lower) {
+    const fmt = x => Number.isInteger(Number(x)) ? String(Math.round(Number(x))) : Number(x).toFixed(2);
+    const has = val != null && val !== "";
+    const vs = has ? fmt(val) : "—";
+    if (bar == null || bar === "") {
+      return `<div class="check"><span class="k">${esc(label)}</span><span class="v">${vs}</span><span class="muted"> </span></div>`;
+    }
+    const barS = fmt(bar);
+    if (!has) return `<div class="check"><span class="k">${esc(label)}</span><span class="v">— / ${barS}</span><span class="muted">—</span></div>`;
+    const ok = lower ? Number(val) <= Number(bar) : Number(val) >= Number(bar);
+    return `<div class="check"><span class="k">${esc(label)}</span><span class="v">${vs} / ${barS}</span><span class="${ok ? "ok" : "bad"}">${ok ? "PASS" : "FAIL"}</span></div>`;
+  }
+  function scoreDetail(it, min, bars) {
+    const a = it.answers || {}, b = bars || {};
+    const v = scoreVerdict(it, min);
+    const minN = min == null ? null : Number(min);
+    const scoreOk = it.score != null && minN != null && Number(it.score) >= minN;
     const bought = it.bought ? `<span class="pill cyan">bought</span>` : "";
-    const rec = pass ? "pass" : "reject";
-    return `<div class="score-row${open ? " open" : ""}" data-mint="${esc(it.mint)}">
+    const coin = it.mint ? `<a class="btn ghost" href="#/coin/${encodeURIComponent(it.mint)}" style="margin-top:10px">View coin</a>` : "";
+    return `<div class="checks">
+        ${checkRow("Staying power", a.alive_6h, b.alive_6h, false)}
+        ${checkRow("Real buyers", a.organic, b.organic, false)}
+        ${checkRow("Flush", a.flush, null, false)}
+        ${checkRow("Chasing", a.chase, b.chase, true)}
+        ${checkRow("Score", it.score, minN, false)}
+      </div>
+      <div class="verdict ${v.cls}">${esc(v.buy ? "BUY" : v.label)}</div>
+      <div class="pills" style="margin-top:8px"><span class="pill ${v.buy ? "green" : "red"}">${esc(v.buy ? "BUY" : "NO BUY")}</span>${bought}</div>
+      ${coin}`;
+  }
+  function scoreRow(it, min, open, bars) {
+    const v = scoreVerdict(it, min);
+    const label = it.name || it.symbol || it.mintShort || short(it.mint);
+    const b = bars || barsOf();
+    return `<div class="score-row${open ? " open" : ""}" data-mint="${esc(it.mint || "")}">
       <div class="rowx">
         <div class="grow"><div class="t">${esc(label)}</div>
-          <div class="s">${esc(it.mintShort || short(it.mint))} · ${tm(it.t)} · <span class="${pass ? "green" : "red"}">${rec}</span></div></div>
-        <div class="sc ${pass ? "green" : "red"}">${it.score == null ? "—" : it.score}</div>
+          <div class="s">${esc(it.mintShort || short(it.mint))} · ${tmCT(it.t || it.ts)}</div>
+          <div class="s ${v.buy ? "green" : "red"}">${esc(v.label)}</div></div>
+        <div class="sc ${v.buy || (it.score != null && Number(it.score) >= Number(min)) ? "green" : "red"}">${it.score == null ? "—" : it.score}</div>
       </div>
       ${scoreBar(it.score, min)}
-      <div class="detail">
-        <div class="answers">
-          <div><div class="k">Staying power</div><div class="v">${ans.alive_6h == null ? "—" : Number(ans.alive_6h).toFixed(2)}</div></div>
-          <div><div class="k">Real buyers</div><div class="v">${ans.organic == null ? "—" : Number(ans.organic).toFixed(2)}</div></div>
-          <div><div class="k">Flush</div><div class="v">${ans.flush == null ? "—" : Number(ans.flush).toFixed(2)}</div></div>
-          <div><div class="k">Chasing</div><div class="v">${ans.chase == null ? "—" : Number(ans.chase).toFixed(2)}</div></div>
-        </div>
-        <div class="sub" style="margin-top:8px">${esc(why)}</div>
-        <div class="pills" style="margin-top:8px"><span class="pill ${pass ? "green" : "red"}">${rec}</span>${bought}</div>
-      </div>
+      <div class="detail">${scoreDetail(it, min, b)}</div>
     </div>`;
   }
   function scoresTeaser() {
@@ -296,7 +326,7 @@
         ${latest ? `<div class="sub">${latestLabel} · ${esc(liveOutcome(latest))}</div>` : (last ? `<div class="sub">${esc(last.name || last.mintShort || short(last.mint))} · <span class="${last.passed ? "green" : "red"}">${last.score} ${last.passed ? "pass" : "reject"}</span></div>` : `<div class="sub">Waiting for the next coin</div>`)}
       </div></div>
       ${scoreBar(last ? last.score : 0, min)}
-      <div class="sub" style="margin-top:8px">Tap for the live feed and every Analyst score</div>
+      <div class="sub" style="margin-top:8px">Tap for the live feed, or switch to Scores for every Analyst decision</div>
     </a>`;
   }
   function liveOutcome(it) {
@@ -318,12 +348,22 @@
   function liveRow(it, min, bars) {
     const label = it.name || it.symbol || it.mintShort || short(it.mint);
     const hot = it.stage === "analyst" && it.score != null && Number(it.score) >= Number(min);
-    const tone = it.outcome === "buy" || it.outcome === "pass" || hot ? "green"
-      : (it.outcome === "kill" || it.outcome === "fail" || it.outcome === "no_buy") ? "red" : "";
     const stage = it.stage === "recheck" && it.recheckN ? `Recheck ${it.recheckN}` : (it.stage || "").replace(/^./, c => c.toUpperCase());
+    if (it.stage === "analyst") {
+      const v = scoreVerdict(it, min);
+      return `<div class="live-row score-row${hot ? " hot" : ""}${it.outcome === "buy" ? " buy" : ""}" data-mint="${esc(it.mint || "")}">
+        <div class="rowx">
+          <div class="grow"><div class="t">${esc(label)}</div>
+            <div class="s">${esc(stage)} · ${tmCT(it.t)}${it.symbol && it.name ? " · " + esc(it.symbol) : ""}</div>
+            <div class="s ${v.buy ? "green" : "red"}">${esc(v.label)}</div></div>
+          <div class="sc ${hot || v.buy ? "green" : "red"}">${it.score == null ? "—" : it.score}</div>
+        </div>
+        <div class="sub">Tap for the numbers vs each bar</div>
+        <div class="detail">${scoreDetail(it, min, bars)}</div>
+      </div>`;
+    }
     let right = "";
-    if (it.stage === "analyst" && it.score != null) right = `<div class="sc ${hot || it.outcome === "buy" ? "green" : "red"}">${it.score}</div>`;
-    else if (it.outcome === "buy") right = `<div class="sc green">BUY</div>`;
+    if (it.outcome === "buy") right = `<div class="sc green">BUY</div>`;
     else if (it.outcome === "no_buy") right = `<div class="pill red">NO BUY</div>`;
     else if (it.outcome === "kill") right = `<div class="pill red">kill</div>`;
     else if (it.outcome === "fail") right = `<div class="pill red">fail</div>`;
@@ -331,11 +371,7 @@
     else if (it.outcome === "waiting") right = `<div class="pill">waiting</div>`;
     else if (it.outcome === "recheck") right = `<div class="pill">recheck</div>`;
     let detail = "";
-    if (it.stage === "analyst") {
-      const a = it.answers || {}, b = bars || {};
-      detail = `<div class="metrics">${liveMetric("alive", a.alive_6h, b.alive_6h, false)} ${liveMetric("organic", a.organic, b.organic, false)} ${liveMetric("chase", a.chase, b.chase, true)}</div>
-        <div class="sub">${esc(it.outcome === "buy" ? "BUY" : "NO BUY")} vs min ${esc(min)}${(it.failed || []).length ? " · " + esc((it.failed || []).join(" · ")) : ""}</div>`;
-    } else if (it.reason || it.layerName || it.mc != null || it.liq != null) {
+    if (it.reason || it.layerName || it.mc != null || it.liq != null) {
       const bits = [];
       if (it.stage === "auditor" && it.layer) bits.push("layer " + it.layer + (it.layerName ? " · " + it.layerName : ""));
       if (it.reason) bits.push(it.reason);
@@ -358,25 +394,36 @@
     const m = min ?? fd?.minScore;
     let h = `<h1>Live feed</h1>
       <div class="card"><div class="sub">Newest first · every coin the desk evaluates · times in CT</div>
-      <div class="sub" style="margin-top:6px">Updates about every minute while this tab is open (the desk publishes shortly after each batch, then this app checks every 15s).</div></div>`;
+      <div class="sub" style="margin-top:6px">Updates about every minute while this tab is open (the desk publishes shortly after each batch, then this app checks every 15s). Tap an Analyst row for the numbers vs each bar.</div></div>`;
     if (!fd) return h + emptyBox("Waiting for the live feed", "The desk will publish it on the next update.");
     if (!items.length) return h + emptyBox("Nothing evaluated yet", "Scanner kills, rechecks, waiting-room moves, Auditor results and Analyst scores show up here.");
     h += `<div class="card list">${items.map(it => liveRow(it, m, bars)).join("")}</div>`;
+    return h;
+  }
+  function tabToggle() {
+    const onScores = route().name === "scores";
+    return `<div class="seg" role="tablist" aria-label="Live or Scores">
+      <a href="#/live" class="${onScores ? "" : "on"}" role="tab" aria-selected="${!onScores}">Live</a>
+      <a href="#/scores" class="${onScores ? "on" : ""}" role="tab" aria-selected="${onScores}">Scores</a>
+    </div>`;
+  }
+  function scoresList(min, items, bars) {
+    let h = `<h1>Analyst scores</h1>
+      <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min ?? "—"}</div>
+      ${scoreBar(min, min)}
+      <div class="sub" style="margin-top:8px">${items.length} decision${items.length === 1 ? "" : "s"} · newest first · tap a row for each number vs its bar</div></div>`;
+    if (!items.length) return h + emptyBox("No coin scored yet", "The desk is scanning. Scores appear after Auditor passes a coin.");
+    h += `<div class="card list">${items.map(it => scoreRow(it, min, false, bars)).join("")}</div>`;
     return h;
   }
   function scores() {
     const g = gate(); if (g) return g;
     const sc = F("scores.json"), ag = F("agents/analyst.json"), fd = F("feed.json");
     const min = (fd && fd.minScore != null) ? fd.minScore : (sc?.minScore ?? ag?.minScore);
-    let h = liveFeed(min);
     const items = sc?.items || [];
-    h += `<h1>Analyst scores</h1>
-      <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min ?? "—"}</div>
-      ${scoreBar(min, min)}
-      <div class="sub" style="margin-top:8px">${items.length} decision${items.length === 1 ? "" : "s"} · newest first · tap a row for the four answers</div></div>`;
-    if (!items.length) return h + emptyBox("No coin scored yet", "The desk is scanning. Scores appear after Auditor passes a coin.");
-    h += `<div class="card list">${items.map(it => scoreRow(it, min, false)).join("")}</div>`;
-    return h;
+    const bars = (fd && fd.bars) || barsOf();
+    if (route().name === "scores") return tabToggle() + scoresList(min, items, bars);
+    return tabToggle() + liveFeed(min);
   }
   function agents() { const g = gate(); if (g) return g; return `<h1>Your 5 agents</h1>` + AGENTS.map(a => agentCard(a, true)).join("") + `<div class="hint">All agent changes go through Telegram (@Denarpobot). This app is read-only.</div>`; }
 
@@ -524,7 +571,7 @@
     V.innerHTML = html;
     chrome();
     document.querySelectorAll(".score-row").forEach(el => {
-      el.addEventListener("click", () => el.classList.toggle("open"));
+      el.addEventListener("click", e => { if (e.target.closest("a")) return; el.classList.toggle("open"); });
     });
     // post-render drawing
     const ch = F("chart.json"), st = F("state.json");

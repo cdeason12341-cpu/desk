@@ -155,4 +155,4 @@ Every item also carries `"liq"` and `"mc"` (USD numbers from the scan JSON `liqu
 `minScore` is the current `analyst.min_score` buy bar. Analyst rows in the app highlight
 green when `score >= minScore`. BUY means the Analyst passed every bar; NO BUY otherwise.
 FOMO `link` comes only from links.py (`r=savipww`). Secrets and broker fields are never included.
-The app shows this as the Live feed at the top of the Scores / Live tab and polls it every 15 s while that tab is open.
+The app shows this as the Live feed on the Live tab and polls it every 15 s while that tab is open. A Live | Scores toggle at the top of the tab switches to the Analyst scores list (scores.json). Tapping an Analyst row (on Live or Scores) opens a detail sheet: each answer vs its bar, PASS/FAIL, and BUY or “missed {minScore} by N”.
