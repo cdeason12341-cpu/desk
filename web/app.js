@@ -223,7 +223,7 @@
       <a href="#/paper" class="${onPaper ? "on paper" : ""}" role="tab" aria-selected="${onPaper}">Paper</a>
     </div>`;
   }
-  function bypassBadge(r) { return r.bypass ? `<span class="badge bypass">BYPASS · score ${r.score ?? "?"}</span>` : ""; }
+  function bypassBadge(r) { return r.bypass ? `<span class="badge bypass${r.tag === "OVERRIDE" ? " override" : ""}">${esc(r.tag || "BYPASS")} · score ${r.score ?? "?"}</span>` : ""; }
   function tradeRow(r) {
     const name = r.name || r.symbol || short(r.mint);
     const p = r.pct ?? 0, up = p >= 0;
@@ -327,7 +327,18 @@
     const ok = lower ? Number(val) <= Number(bar) : Number(val) >= Number(bar);
     return `<div class="check"><span class="k">${esc(label)}</span><span class="v">${vs} / ${barS}</span><span class="${ok ? "ok" : "bad"}">${ok ? "PASS" : "FAIL"}</span></div>`;
   }
-  function scoreDetail(it, min, bars) {
+  // Owner override (DECISION 36): Telegram deep links only; the app stays read-only. Analyst rejects only, <=30 min, once.
+  const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  function overrideBtns(it) {
+    const bot = F("feed.json")?.tgBot || F("scores.json")?.tgBot;
+    if (it.overridable !== true || !bot || !/^[A-Za-z0-9_]{5,32}$/.test(bot) || !MINT_RE.test(it.mint || "")) return "";
+    if (Date.now() - new Date(it.t || it.ts).getTime() > 30 * 60 * 1000) return "";
+    const u = k => `https://t.me/${bot}?start=${k}_${it.mint}`;
+    return `<div class="ovr"><a class="btn ovp" href="${esc(u("ovp"))}" target="_blank" rel="noopener">Override · Paper</a>
+      <a class="btn ovreal" href="${esc(u("ovr"))}" target="_blank" rel="noopener">Override · Real $</a></div>
+      <div class="ovnote">Opens Telegram. Skips only the Analyst score; Real $ asks you to confirm.</div>`;
+  }
+  function scoreDetail(it, min, bars, noOv) {
     const a = it.answers || {}, b = bars || {};
     const v = scoreVerdict(it, min);
     const minN = min == null ? null : Number(min);
@@ -343,6 +354,7 @@
       </div>
       <div class="verdict ${v.cls}">${esc(v.buy ? "BUY" : v.label)}</div>
       <div class="pills" style="margin-top:8px"><span class="pill ${v.buy ? "green" : "red"}">${esc(v.buy ? "BUY" : "NO BUY")}</span>${bought}</div>
+      ${noOv ? "" : overrideBtns(it)}
       ${coin}`;
   }
   function scoreRow(it, min, open, bars) {
@@ -407,8 +419,9 @@
             <div class="s ${v.buy ? "green" : "red"}">${esc(v.label)}</div></div>
           <div class="sc ${hot || v.buy ? "green" : "red"}">${it.score == null ? "—" : it.score}</div>
         </div>
+        ${overrideBtns(it)}
         <div class="sub">Tap for the numbers vs each bar</div>
-        <div class="detail">${scoreDetail(it, min, bars)}</div>
+        <div class="detail">${scoreDetail(it, min, bars, true)}</div>
       </div>`;
     }
     let right = "";

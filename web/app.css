@@ -154,3 +154,9 @@ canvas.ring{width:56px;height:56px;flex:none}#disc{width:220px!important;height:
 .row .src{font:600 10px/1 var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:3px 5px;margin-left:4px;vertical-align:middle}
 .row .bpline{margin:4px 0 2px}
 .row.byp{box-shadow:inset 3px 0 0 rgba(168,85,247,.6)}
+.ovr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.ovr .btn{height:40px;margin-top:0;font-size:14px;border-radius:12px}
+.btn.ovp{background:rgba(251,191,36,.14);color:var(--amber);border:1px solid rgba(251,191,36,.45)}
+.btn.ovreal{background:rgba(34,197,94,.14);color:var(--green);border:1px solid rgba(34,197,94,.5)}
+.ovnote{font:11px var(--mono);color:var(--muted);margin-top:6px}
+.badge.bypass.override{background:rgba(251,146,60,.16);color:#fb923c;border-color:rgba(251,146,60,.45)}
