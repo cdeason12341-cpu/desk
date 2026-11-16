@@ -12,7 +12,7 @@ on:
     branches: [main]
     paths: ['web/**', '.github/workflows/publish.yml']
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
   actions: write
@@ -104,10 +104,11 @@ jobs:
         with:
           path: _site
           retention-days: 1
-      # actions/deploy-pages always sends github.sha as pages_build_version, even
-      # if GITHUB_SHA is overridden. Data changes live in the gist, so that SHA
-      # is reused and Pages no-ops later deploys (DECISION 47). Call the Pages
-      # API with the gist revision so every deploy has a unique version.
+      # The Pages API requires pages_build_version to be a git SHA that exists
+      # in the repo (a gist rev 404s). deploy-pages always sends github.sha, so
+      # data-only publishes reused one version and the site went stale (DECISION 47).
+      # Mint a unique empty-tree commit on pages-deploys (not main; no files,
+      # no secrets) and deploy that version.
       - name: Deploy Pages (unique pages_build_version)
         env:
           REV: ${{ inputs.rev || github.sha }}
@@ -117,6 +118,15 @@ jobs:
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
           test -n "${ARTIFACT_ID}"
+          export GIT_AUTHOR_NAME="desk-pages"
+          export GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          EMPTY_TREE=$(git hash-object -t tree --stdin -w </dev/null)
+          BUILD_SHA=$(git commit-tree "$EMPTY_TREE" -m "pages ${REV:0:7}")
+          git push -f origin "${BUILD_SHA}:refs/heads/pages-deploys"
+          export BUILD_SHA
+          echo "pages build sha ${BUILD_SHA:0:7} (gist ${REV:0:7})"
           AUD=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote("https://github.com/"+os.environ["GITHUB_REPOSITORY_OWNER"], safe=""))')
           OIDC=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" \
@@ -132,7 +142,7 @@ jobs:
               return s
           payload = json.dumps({
               "artifact_id": int(os.environ["ARTIFACT_ID"]),
-              "pages_build_version": os.environ["REV"],
+              "pages_build_version": os.environ["BUILD_SHA"],
               "oidc_token": os.environ["OIDC"],
           }).encode()
           req = urllib.request.Request(
@@ -150,10 +160,10 @@ jobs:
                   body = json.load(r)
           except urllib.error.HTTPError as e:
               raise SystemExit(f"create deployment failed {e.code}: {redact(e.read().decode()[:500])}")
-          print("created pages deployment", os.environ["REV"][:7], "status", body.get("status") or "ok")
+          print("created pages deployment", os.environ["BUILD_SHA"][:7], "gist", os.environ["REV"][:7], "status", body.get("status") or "ok")
           PY
           for i in $(seq 1 36); do
-            if st=$(gh api "repos/${GITHUB_REPOSITORY}/pages/deployments/${REV}" --jq '.status' 2>/dev/null); then
+            if st=$(gh api "repos/${GITHUB_REPOSITORY}/pages/deployments/${BUILD_SHA}" --jq '.status' 2>/dev/null); then
               echo "pages status: ${st}"
               case "${st}" in
                 succeed|success) exit 0 ;;
