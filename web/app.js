@@ -4,7 +4,7 @@
   "use strict";
   const POLL_S = 30, LIVE_POLL_S = 15, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", "scanner.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -61,7 +61,7 @@
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    const delay = (r.name === "live" || r.name === "scores") ? LIVE_POLL_S : POLL_S;
+    const delay = (r.name === "live" || r.name === "scores" || r.name === "scanner") ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
     render();
     pollTimer = setTimeout(poll, delay * 1000);
@@ -86,7 +86,7 @@
     const p = location.hash.replace(/^#\/?/, "").split("/");
     return { name: p[0] || "home", arg: p[1] ? decodeURIComponent(p[1]) : null };
   }
-  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores") poll(); else render(); });
+  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores" || r.name === "scanner") poll(); else render(); });
 
   // ---------- chrome
   function statusRow() {
@@ -108,7 +108,7 @@
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || (r === "scores" && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
+    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || ((r === "scores" || r === "scanner") && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
     statusRow();
   }
   $("#bellBtn").onclick = () => { location.hash = "#/activity"; };
@@ -466,12 +466,81 @@
     return h;
   }
   function tabToggle() {
-    const onScores = route().name === "scores";
-    return `<div class="seg" role="tablist" aria-label="Live or Scores">
-      <a href="#/live" class="${onScores ? "" : "on"}" role="tab" aria-selected="${!onScores}">Live</a>
-      <a href="#/scores" class="${onScores ? "on" : ""}" role="tab" aria-selected="${onScores}">Scores</a>
+    const r = route().name;
+    const tab = (h, n, label) => `<a href="#/${h}" class="${r === n ? "on" : ""}" role="tab" aria-selected="${r === n}">${label}</a>`;
+    return `<div class="seg seg3" role="tablist" aria-label="Live, Scores or Scanner">
+      ${tab("live", "live", "Live")}${tab("scores", "scores", "Scores")}${tab("scanner", "scanner", "Scanner")}
     </div>`;
   }
+  // ---------- Scanner view (owner request 2026-11-15 6:25 PM CT): every scanner decision, each check vs its bar
+  function scanVal(c) {
+    if (c.fmt === "bool") return c.value == null ? "n/a" : (c.value ? "yes" : "no");
+    if (c.value == null) return "n/a";
+    if (c.fmt === "usd") return usdK(c.value);
+    return (c.key === "h1" && c.value > 0 ? "+" : "") + Number(c.value).toFixed(c.key === "h1" ? 0 : 1) + "%";
+  }
+  function scanBar(c) {
+    if (c.op === "off") return "off";
+    if (c.bar == null) return "";
+    const b = c.fmt === "usd" ? usdK(c.bar) : (c.key === "h1" ? "+" : "") + Number(c.bar).toFixed(0) + "%";
+    return (c.op === ">=" ? "≥ " : "≤ ") + b;
+  }
+  function scanCheck(c) {
+    const st = c.pass === true ? `<span class="pf ok">PASS</span>` : c.pass === false ? `<span class="pf bad">FAIL</span>` : `<span class="pf">—</span>`;
+    return `<div class="scheck"><span class="k">${esc(c.label)}</span><span class="v">${esc(scanVal(c))}</span><span class="b">${esc(scanBar(c))}</span>${st}</div>`;
+  }
+  function scanPill(it) {
+    if (it.pill === "pass") return `<span class="pill green">pass</span>`;
+    if (it.pill === "waiting") return `<span class="pill">waiting</span>`;
+    if (it.pill === "recheck") return `<span class="pill amber">recheck</span>`;
+    return `<span class="pill red">kill</span>`;
+  }
+  function scanRow(it) {
+    const label = it.name || it.symbol || it.mintShort || short(it.mint);
+    let sub2 = "";
+    if (it.pill === "recheck") sub2 = `${it.recheckN ? `recheck ${it.recheckN} failed · ` : "killed · "}recheck ${it.nextRecheckN} at ${tmCT(it.nextAt)}`;
+    else if (it.pill === "kill" && it.final) sub2 = `recheck ${it.recheckN} · final`;
+    else if (it.pill === "waiting") sub2 = it.recheckN ? `recheck ${it.recheckN} cleared · back in the waiting room` : "waiting room";
+    const reason = it.pill !== "pass" && it.reason ? `<div class="s red">${esc(it.reason)}</div>` : "";
+    const fails = (it.checks || []).filter(c => c.pass === false).map(c => c.label).join(", ");
+    return `<div class="score-row scan-row" data-mint="${esc(it.mint || "")}">
+      <div class="rowx"><div class="grow"><div class="t">${esc(label)}</div>
+        <div class="s">${tmCT(it.t)}${it.symbol && it.name && it.symbol !== it.name ? " · " + esc(it.symbol) : ""}${it.ageMin != null ? " · " + it.ageMin + "m old" : ""}</div>
+        ${sub2 ? `<div class="s">${esc(sub2)}</div>` : ""}${reason}</div>
+        <div>${scanPill(it)}</div></div>
+      <div class="schecks mini">${(it.checks || []).slice(0, 4).map(c => `<span class="${c.pass === true ? "ok" : c.pass === false ? "bad" : ""}">${esc(c.label.split(" ")[0])} ${esc(scanVal(c))}</span>`).join("")}</div>
+      <div class="detail">
+        <div class="schecks">${(it.checks || []).map(scanCheck).join("")}</div>
+        ${fails ? `<div class="sub" style="margin-top:6px">Failed: ${esc(fails)}</div>` : ""}
+        <div class="sub" style="margin-top:6px">${esc(it.mint)}</div>
+        <a class="btn fomo" href="${esc(it.link)}" target="_blank" rel="noopener">Open on FOMO</a>
+        <a class="btn ghost" href="#/coin/${encodeURIComponent(it.mint)}">View coin</a>
+      </div></div>`;
+  }
+  function scannerView() {
+    const sf = F("scanner.json");
+    let h = `<h1>Scanner</h1>`;
+    if (!sf) return h + emptyBox("Waiting for the scanner feed", "The desk will publish it on the next update.");
+    const c = sf.counts1h || {}, L = sf.limits || {}, nm = L.nearMiss || {};
+    h += `<div class="grid4">
+      <div class="card stat"><div class="v">${c.seen ?? 0}</div><div class="k">seen 1h</div></div>
+      <div class="card stat"><div class="v green">${c.passed ?? 0}</div><div class="k">passed</div></div>
+      <div class="card stat"><div class="v red">${c.killed ?? 0}</div><div class="k">killed</div></div>
+      <div class="card stat"><div class="v amber">${c.rechecking ?? 0}</div><div class="k">rechecking</div></div></div>`;
+    const age = Number(L.maxAgeH) ? `max age ${L.maxAgeH}h` : "no age limit";
+    h += `<div class="card"><div class="sub">Current limits (from settings)</div><div class="pills">
+      <span class="pill">liq ≥ ${usdK(L.minLiquidityUsd)}</span>
+      <span class="pill">MC ${Number(L.minMarketCapUsd) ? "≥ " + usdK(L.minMarketCapUsd) : "off"}</span>
+      <span class="pill">top 10 ≤ ${L.maxTop10Pct}%</span><span class="pill">1h ≤ +${L.maxH1ChangePct}%</span>
+      <span class="pill">pump mint</span><span class="pill">SOL-quoted</span>
+      <span class="pill">pool age ≥ ${L.minPoolAgeMin}m</span><span class="pill">${esc(age)}</span></div>
+      <div class="sub" style="margin-top:8px">Rechecks at ${esc(L.recheckMinutes)} min, only if close: liq ≥ ${usdK(nm.minLiqUsd)}, MC ≥ ${usdK(nm.minMcUsd)}, top 10 ≤ ${nm.maxTop10Pct}%, 1h ≤ +${nm.maxH1Pct}%</div></div>`;
+    const items = sf.items || [];
+    if (!items.length) return h + emptyBox("Nothing scanned yet tonight", "New PumpSwap coins show up here as the scanner checks them.");
+    h += `<div class="sub" style="margin:0 2px 8px">Newest first · last ${items.length} tonight · times in CT · tap a row for every check</div>`;
+    return h + `<div class="card list">${items.map(scanRow).join("")}</div>`;
+  }
+
   function scoresList(min, items, bars) {
     let h = `<h1>Analyst scores</h1>
       <div class="card"><div class="sub">Min score to buy tonight</div><div class="big">${min ?? "—"}</div>
@@ -488,6 +557,7 @@
     const items = sc?.items || [];
     const bars = (fd && fd.bars) || barsOf();
     if (route().name === "scores") return tabToggle() + scoresList(min, items, bars);
+    if (route().name === "scanner") return tabToggle() + scannerView();
     return tabToggle() + liveFeed(min);
   }
   function agents() { const g = gate(); if (g) return g; return `<h1>Your 5 agents</h1>` + AGENTS.map(a => agentCard(a, true)).join("") + `<div class="hint">All agent changes go through Telegram (@Denarpobot). This app is read-only.</div>`; }
@@ -632,7 +702,7 @@
     chrome();
     const r = route();
     const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
-      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live") ? scores() : home();
+      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live" || r.name === "scanner") ? scores() : home();
     V.innerHTML = html;
     chrome();
     document.querySelectorAll(".score-row").forEach(el => {
