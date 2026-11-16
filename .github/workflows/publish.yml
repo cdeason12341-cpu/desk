@@ -18,7 +18,9 @@ permissions:
   actions: write
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Never cancel an in-flight Pages deploy. Cancelling one can leave the site
+  # stuck on an old artifact while later runs still report success (DECISION 47).
+  cancel-in-progress: false
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -36,9 +38,33 @@ jobs:
           [[ -z "${REV:-}" || "$REV" =~ ^[0-9a-f]{40}$ ]]
           test -n "$DATA_PATH" && test -n "$GIST_ID"
           mkdir -p _site && cp -r web/. _site/
-          # GITHUB_TOKEN gets 403 on the gists API; secret gists are readable unauthenticated by id.
-          curl -fsS --retry 3 --retry-delay 5 -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/gists/$GIST_ID${REV:+/$REV}" -o /tmp/gist.json
+          # Unauthenticated gist GET (GITHUB_TOKEN is 403 on gists). Don't print
+          # the URL: it contains GIST_ID. Retry 403/transient errors, then raw.
+          fetch_gist() {
+            local try url
+            url="https://api.github.com/gists/${GIST_ID}${REV:+/${REV}}"
+            for try in 1 2 3 4 5; do
+              if curl -fsS --retry 2 --retry-delay 3 -A "desk-publish" \
+                -H "Accept: application/vnd.github+json" \
+                "$url" -o /tmp/gist.json 2>/tmp/gist.err; then
+                return 0
+              fi
+              echo "gist api fetch failed (try ${try})"
+              sleep $((try * 4))
+            done
+            if curl -fsS --retry 3 --retry-delay 5 -A "desk-publish" \
+              "https://gist.githubusercontent.com/cdeason12341-cpu/${GIST_ID}/raw/${REV}/bundle.json" \
+              -o /tmp/bundle.json 2>/tmp/gist.err; then
+              python3 -c 'import json; json.dump({"files":{"bundle.json":{"content":open("/tmp/bundle.json").read(),"truncated":False}}}, open("/tmp/gist.json","w"))'
+              rm -f /tmp/bundle.json
+              echo "gist raw fallback ok"
+              return 0
+            fi
+            echo "gist fetch failed"
+            return 1
+          }
+          fetch_gist
+          rm -f /tmp/gist.err
           python3 - <<'PY'
           import json, os, re, urllib.request
           out = os.path.join("_site", "d", os.environ["DATA_PATH"])
@@ -77,8 +103,13 @@ jobs:
         with:
           path: _site
           retention-days: 1
+      # deploy-pages uses GITHUB_SHA as pages_build_version. Data changes live in
+      # the gist, so the repo SHA is unchanged across publishes; reusing it made
+      # Pages no-op later deploys and leave the live site on old files (DECISION 47).
       - id: deployment
         uses: actions/deploy-pages@v4
+        env:
+          GITHUB_SHA: ${{ inputs.rev || github.sha }}
       - name: Delete Pages artifact (it contains DATA_PATH in file paths)
         if: always()
         env:
