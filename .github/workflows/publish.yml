@@ -52,13 +52,15 @@ jobs:
               echo "gist api fetch failed (try ${try})"
               sleep $((try * 4))
             done
+            raw_url="https://gist.githubusercontent.com/cdeason12341-cpu/${GIST_ID}/raw${REV:+/${REV}}/bundle.json"
             if curl -fsS --retry 3 --retry-delay 5 -A "desk-publish" \
-              "https://gist.githubusercontent.com/cdeason12341-cpu/${GIST_ID}/raw/${REV}/bundle.json" \
-              -o /tmp/bundle.json 2>/tmp/gist.err; then
-              python3 -c 'import json; json.dump({"files":{"bundle.json":{"content":open("/tmp/bundle.json").read(),"truncated":False}}}, open("/tmp/gist.json","w"))'
-              rm -f /tmp/bundle.json
-              echo "gist raw fallback ok"
-              return 0
+              "$raw_url" -o /tmp/bundle.json 2>/tmp/gist.err; then
+              if python3 -c 'import json,sys; b=open("/tmp/bundle.json").read(); json.loads(b); json.dump({"files":{"bundle.json":{"content":b,"truncated":False}}}, open("/tmp/gist.json","w"))'; then
+                rm -f /tmp/bundle.json
+                echo "gist raw fallback ok"
+                return 0
+              fi
+              echo "gist raw fallback was not json"
             fi
             echo "gist fetch failed"
             return 1
