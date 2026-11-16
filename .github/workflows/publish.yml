@@ -99,17 +99,72 @@ jobs:
           PY
           rm -f /tmp/gist.json
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - id: upload
+        uses: actions/upload-pages-artifact@v3
         with:
           path: _site
           retention-days: 1
-      # deploy-pages uses GITHUB_SHA as pages_build_version. Data changes live in
-      # the gist, so the repo SHA is unchanged across publishes; reusing it made
-      # Pages no-op later deploys and leave the live site on old files (DECISION 47).
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      # actions/deploy-pages always sends github.sha as pages_build_version, even
+      # if GITHUB_SHA is overridden. Data changes live in the gist, so that SHA
+      # is reused and Pages no-ops later deploys (DECISION 47). Call the Pages
+      # API with the gist revision so every deploy has a unique version.
+      - name: Deploy Pages (unique pages_build_version)
         env:
-          GITHUB_SHA: ${{ inputs.rev || github.sha }}
+          REV: ${{ inputs.rev || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
+          test -n "${ARTIFACT_ID}"
+          OIDC=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=github" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          export OIDC
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+          def redact(s):
+              for k in ("OIDC", "GH_TOKEN"):
+                  v = os.environ.get(k) or ""
+                  if v:
+                      s = s.replace(v, "<redacted>")
+              return s
+          payload = json.dumps({
+              "artifact_id": int(os.environ["ARTIFACT_ID"]),
+              "pages_build_version": os.environ["REV"],
+              "oidc_token": os.environ["OIDC"],
+          }).encode()
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/pages/deployments",
+              data=payload, method="POST",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              },
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  body = json.load(r)
+          except urllib.error.HTTPError as e:
+              raise SystemExit(f"create deployment failed {e.code}: {redact(e.read().decode()[:500])}")
+          print("created pages deployment", os.environ["REV"][:7], "status", body.get("status") or "ok")
+          PY
+          for i in $(seq 1 36); do
+            if st=$(gh api "repos/${GITHUB_REPOSITORY}/pages/deployments/${REV}" --jq '.status' 2>/dev/null); then
+              echo "pages status: ${st}"
+              case "${st}" in
+                succeed|success) exit 0 ;;
+                fail|failure|error|canceled|cancelled) echo "pages deploy ${st}"; exit 1 ;;
+              esac
+            else
+              echo "pages status: pending"
+            fi
+            sleep 5
+          done
+          echo "pages deploy timeout"
+          exit 1
       - name: Delete Pages artifact (it contains DATA_PATH in file paths)
         if: always()
         env:
