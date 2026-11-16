@@ -117,8 +117,9 @@ jobs:
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
           test -n "${ARTIFACT_ID}"
+          AUD=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote("https://github.com/"+os.environ["GITHUB_REPOSITORY_OWNER"], safe=""))')
           OIDC=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=github" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUD}" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
           export OIDC
           python3 - <<'PY'
