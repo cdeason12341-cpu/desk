@@ -495,19 +495,24 @@
     if (it.pill === "recheck") return `<span class="pill amber">recheck</span>`;
     return `<span class="pill red">kill</span>`;
   }
+  function surgePill(it) {
+    const g = it.surge; if (!g) return "";
+    const w = Number(g.windowS || 60), wl = w % 60 === 0 ? `${w / 60}m` : `${w}s`;
+    return `<span class="pill surge" title="MC ${esc(usdK(g.mcFrom))} → ${esc(usdK(g.mcTo))} in ${esc(g.secs)}s">⚡ +${Math.round(Number(g.pct) || 0)}% in ${wl}</span>`;
+  }
   function scanRow(it) {
     const label = it.name || it.symbol || it.mintShort || short(it.mint);
     let sub2 = "";
     if (it.pill === "recheck") sub2 = `${it.recheckN ? `recheck ${it.recheckN} failed · ` : "killed · "}recheck ${it.nextRecheckN} at ${tmCT(it.nextAt)}`;
     else if (it.pill === "kill" && it.final) sub2 = `recheck ${it.recheckN} · final`;
     else if (it.pill === "waiting") sub2 = it.recheckN ? `recheck ${it.recheckN} cleared · back in the waiting room` : "waiting room";
-    const reason = it.pill !== "pass" && it.reason ? `<div class="s red">${esc(it.reason)}</div>` : "";
+    const reason = it.pill !== "pass" && it.reason ? `<div class="s ${it.pill === "waiting" ? "" : "red"}">${esc(it.reason)}</div>` : "";
     const fails = (it.checks || []).filter(c => c.pass === false).map(c => c.label).join(", ");
     return `<div class="score-row scan-row" data-mint="${esc(it.mint || "")}">
       <div class="rowx"><div class="grow"><div class="t">${esc(label)}</div>
         <div class="s">${tmCT(it.t)}${it.symbol && it.name && it.symbol !== it.name ? " · " + esc(it.symbol) : ""}${it.ageMin != null ? " · " + it.ageMin + "m old" : ""}</div>
         ${sub2 ? `<div class="s">${esc(sub2)}</div>` : ""}${reason}</div>
-        <div>${scanPill(it)}</div></div>
+        <div class="pillcol">${surgePill(it)}${scanPill(it)}</div></div>
       <div class="schecks mini">${(it.checks || []).slice(0, 4).map(c => `<span class="${c.pass === true ? "ok" : c.pass === false ? "bad" : ""}">${esc(c.label.split(" ")[0])} ${esc(scanVal(c))}</span>`).join("")}</div>
       <div class="detail">
         <div class="schecks">${(it.checks || []).map(scanCheck).join("")}</div>
@@ -527,14 +532,17 @@
       <div class="card stat"><div class="v green">${c.passed ?? 0}</div><div class="k">passed</div></div>
       <div class="card stat"><div class="v red">${c.killed ?? 0}</div><div class="k">killed</div></div>
       <div class="card stat"><div class="v amber">${c.rechecking ?? 0}</div><div class="k">rechecking</div></div></div>`;
+    const sg = L.surge || {};
     const age = Number(L.maxAgeH) ? `max age ${L.maxAgeH}h` : "no age limit";
     h += `<div class="card"><div class="sub">Current limits (from settings)</div><div class="pills">
       <span class="pill">liq ≥ ${usdK(L.minLiquidityUsd)}</span>
       <span class="pill">MC ${Number(L.minMarketCapUsd) ? "≥ " + usdK(L.minMarketCapUsd) : "off"}</span>
       <span class="pill">top 10 ≤ ${L.maxTop10Pct}%</span><span class="pill">1h ≤ +${L.maxH1ChangePct}%</span>
       <span class="pill">pump mint</span><span class="pill">SOL-quoted</span>
-      <span class="pill">pool age ≥ ${L.minPoolAgeMin}m</span><span class="pill">${esc(age)}</span></div>
-      <div class="sub" style="margin-top:8px">Rechecks at ${esc(L.recheckMinutes)} min, only if close: liq ≥ ${usdK(nm.minLiqUsd)}, MC ≥ ${usdK(nm.minMcUsd)}, top 10 ≤ ${nm.maxTop10Pct}%, 1h ≤ +${nm.maxH1Pct}%</div></div>`;
+      <span class="pill">pool age ≥ ${L.minPoolAgeMin}m</span><span class="pill">${esc(age)}</span>
+      ${Number(L.youngPriorityMin) ? `<span class="pill">young first &lt; ${L.youngPriorityMin}m</span>` : ""}</div>
+      <div class="sub" style="margin-top:8px">Rechecks at ${esc(L.recheckMinutes)} min, only if close: liq ≥ ${usdK(nm.minLiqUsd)}, MC ≥ ${usdK(nm.minMcUsd)}, top 10 ≤ ${nm.maxTop10Pct}%, 1h ≤ +${nm.maxH1Pct}%</div>
+      <div class="sub" style="margin-top:6px">${Number(sg.watchMax) ? `⚡ Surge watch: MC +${sg.pct}% within ${sg.windowS}s re-scans a coin first (all checks still apply) · up to ${sg.watchMax} coins · every ${sg.pollS}s · ${c.surges ?? 0} surge${c.surges === 1 ? "" : "s"} in the last hour` : "⚡ Surge watch off"}</div></div>`;
     const items = sf.items || [];
     if (!items.length) return h + emptyBox("Nothing scanned yet tonight", "New PumpSwap coins show up here as the scanner checks them.");
     h += `<div class="sub" style="margin:0 2px 8px">Newest first · last ${items.length} tonight · times in CT · tap a row for every check</div>`;
