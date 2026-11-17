@@ -315,7 +315,7 @@
       ? `${money(r.sizeUsd)} in ${tm(r.openedAt)} · stop ${price(r.stopLine)} · ${r.trailArmed ? "trail armed " + price(r.trailLine) : "2x " + price(r.tpLine)}`
       : `${money(r.sizeUsd)} · ${esc(r.exitReason || "closed")} ${tm(r.closedAt)}`;
     return `<a class="row" href="${esc(r.link)}" target="_blank" rel="noopener"><div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="badge" style="margin-left:6px">PAPER</span></div><div class="s">${sub}</div>${r.why ? `<div class="s">${esc(r.why)}</div>` : ""}</div>
+      <div class="grow"><div class="t">${esc(name)} <span class="badge" style="margin-left:6px">PAPER</span></div><div class="s">${sub}</div>${r.why ? `<div class="s" style="white-space:normal">${esc(r.why)}</div>` : ""}</div>
       <div class="r"><div class="${up ? "green" : "red"}">${money(r.pnlUsd)}</div><div class="s">${pct(r.pct)}</div></div></a>`;
   }
   function stratB() {
@@ -336,7 +336,7 @@
     h += `<h1>Open positions</h1>` + ((b.open || []).length ? `<div class="card list">${b.open.map(stratBRow).join("")}</div>`
       : emptyBox("No Strategy B positions open", "It waits an hour after graduation, then buys a pullback that's bouncing."));
     h += `<h1>Recent trades</h1>` + ((b.closed || []).length ? `<div class="card list">${b.closed.map(stratBRow).join("")}</div>` : emptyBox("No closed trades yet", ""));
-    h += `<h1>Rules</h1><div class="card list">${(b.rules || []).map(r => `<div class="row"><div class="grow"><div class="t">${esc(r.k)}</div><div class="s">${esc(r.v)}</div><div class="s">${esc(r.why)}</div></div></div>`).join("")}</div>`;
+    h += `<h1>Rules</h1><div class="card list">${(b.rules || []).map(r => `<div class="row"><div class="grow"><div class="t">${esc(r.k)}</div><div class="s" style="white-space:normal">${esc(r.v)}</div><div class="s" style="white-space:normal;opacity:.75">${esc(r.why)}</div></div></div>`).join("")}</div>`;
     return h + `<div class="hint">Strategy B is paper only: it never places a real order. Separate from the GMGN strategy and its P&L. This app is read-only.</div>`;
   }
   function scoreBar(score, min) {
