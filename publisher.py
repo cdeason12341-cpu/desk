@@ -612,7 +612,7 @@ class Builder:
 
     def gmgn(self):
         """Read-only GMGN wallet + trades for the phone app. No secrets, no order bodies."""
-        from agents.gmgn_trader import night_usage, ACTIVE
+        from agents.gmgn_trader import night_usage, ACTIVE, paper_snapshot
         from gmgn import MAIN_WALLET
         c, s = self.c, self.c.s
         g = getattr(self.d, "gmgn", None)
@@ -625,6 +625,9 @@ class Builder:
         placeholders = ",".join("?" * len(ACTIVE))
         open_rows = c.db.rows(f"SELECT * FROM gmgn_orders WHERE status IN ({placeholders}) ORDER BY ts", ACTIVE)
         recent = c.db.rows("SELECT * FROM gmgn_orders ORDER BY id DESC LIMIT 20")
+        ps = paper_snapshot(s, c.db)
+        paper = {k: ps[k] for k in ("bankrollUsd", "tradeUsd", "pnlUsd", "inPositionsUsd", "freeUsd")}
+        paper["since"] = iso(ps["since"]) if ps["since"] else None
         return {"mode": mode, "enabled": bool(s["gmgn.enabled"]),
                 "halted": bool(c.db.meta("gmgn_halted", False)),
                 "wallet": MAIN_WALLET, "walletShort": f"{MAIN_WALLET[:4]}…{MAIN_WALLET[-4:]}",
@@ -633,6 +636,7 @@ class Builder:
                 "capTradeUsd": cap, "ticketsUsed": n, "ticketsMax": tickets,
                 "nightSpendUsd": round(used, 2), "nightCapUsd": round(cap * tickets, 2),
                 "reserveSol": s["gmgn.sol_reserve"],
+                "paper": paper,
                 "open": [self.gmgn_position(r) for r in open_rows],
                 "orders": [self.gmgn_order(r) for r in recent]}
 

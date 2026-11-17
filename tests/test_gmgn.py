@@ -193,7 +193,7 @@ def test_paper_never_swaps_records_conditions():
     r = run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80))
     assert r["status"] == "paper" and "swap" not in fc.kinds() and fc.kinds() == ["quote"]
     o = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (M,))
-    assert o["mode"] == "PAPER" and o["size_usd"] == 50 and o["status"] == "open"
+    assert o["mode"] == "PAPER" and o["size_usd"] == 500 and o["status"] == "open"
     conds = json.loads(o["conditions"])
     assert conds[0] == {"order_type": "loss_stop", "side": "sell", "price_scale": "30", "sell_ratio": "100"}
     assert [c["order_type"] for c in conds] == ["loss_stop", "profit_stop_trace"]
@@ -202,7 +202,7 @@ def test_paper_never_swaps_records_conditions():
     assert "stop -30% for first 5 min, then -6%" in c.notifier.sent[-1]["text"]
     assert json.loads(o["body"])["from_address"] == gmgn.MAIN_WALLET
     msg = c.notifier.sent[-1]["text"]
-    assert msg.startswith("PAPER · GMGN · Buy Gm · $50.00") and "1/4 open" in msg and "not available on your GMGN plan" in msg
+    assert msg.startswith("PAPER · GMGN · Buy Gm · $500.00") and "1/4 open" in msg and "not available on your GMGN plan" in msg
     assert c.db.one("SELECT COUNT(*) n FROM positions")["n"] == 0          # FOMO book untouched
     assert run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80)) is None           # one per coin per night
     # plan-blocked quote is not re-called within 10 min

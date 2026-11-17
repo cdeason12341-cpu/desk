@@ -140,6 +140,9 @@ SPECS: list[Spec] = [
     _s("gmgn.max_tickets_night", 4, 1, 50, aliases=("gmgn tickets", "cap tickets"), fmt="{v}"),
     _s("gmgn.fallback_trade_usd", 20.0, 1, 10000, aliases=("gmgn fallback", "fallback trade"), fmt="${v:,.2f}"),   # 2nd size when the top size doesn't fit
     _s("gmgn.min_trade_usd", 1.0, 0.5, 10000, aliases=("gmgn min trade", "min trade"), fmt="${v:,.2f}"),          # floor: below the fallback, buy what free SOL covers down to this
+    # DECISION 68 (owner 2026-11-17 10:20 AM CT): Strategy A PAPER bankroll. Not protected; not used for LIVE or Strategy B.
+    _s("gmgn.paper_bankroll_usd", 2500.0, 1, 1_000_000, aliases=("a paper bankroll", "paper bankroll"), fmt="${v:,.2f}"),
+    _s("gmgn.paper_trade_usd", 500.0, 1, 10000, aliases=("a paper trade", "paper trade size"), fmt="${v:,.2f}"),
     _s("gmgn.max_open", 4, 1, 20, aliases=("gmgn max open", "max open"), fmt="{v}"),                     # LIVE positions at once (pending+open+exiting)
     _s("gmgn.live_gate_h", 2.0, 0.5, 48, aliases=("gmgn gate",), fmt="{v:g}h"),
     _s("gmgn.slippage_pct", 15, 1, 50, aliases=("gmgn slippage", "slippage"), fmt="{v:g}%"),

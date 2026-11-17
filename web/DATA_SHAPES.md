@@ -98,6 +98,7 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
  "sol":1.02,"usd":71.40,"solUsd":70.0,"updatedAt":"2026-11-15T02:40:00Z",
  "capTradeUsd":65.0,"ticketsUsed":0,"ticketsMax":4,"nightSpendUsd":0.0,"nightCapUsd":260.0,
  "reserveSol":0.02,
+ "paper":{"bankrollUsd":2500.0,"tradeUsd":500.0,"pnlUsd":0.0,"inPositionsUsd":0.0,"freeUsd":2500.0,"since":"2026-11-17T16:20:00Z"},
  "open":[{"id":1,"mint","name","symbol","mode":"LIVE","status":"open",
           "entryPrice":0.1,"lastPrice":0.11,"peakPrice":0.12,"sizeUsd":65.0,
           "pct":10.0,"pnlUsd":6.5,"openedAt":"…Z",
@@ -112,6 +113,9 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
 Balance and SOL price are cached on the desk and refreshed at most every 60s. `sol`/`usd` may be
 null if the desk has not yet read the wallet. The Home card shows this as "Real wallet (GMGN LIVE)";
 the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real money)".
+`paper` is Strategy A's simulated bankroll (DECISION 68): start amount, trade size, realized P&L
+since the bankroll reset, cash in open paper tickets, and free cash. It is not real money and is
+not limited by the wallet or `capTradeUsd`. `since` is an ISO timestamp or null.
 
 
 ## scores.json (Analyst scores list, newest first, max 50 tonight)

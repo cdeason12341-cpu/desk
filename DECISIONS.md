@@ -727,3 +727,12 @@ Replaces the PAPER-ONLY lock of DECISION 54 deliberately, by the owner's command
 - The old Strat B tab is now "Strat A" with a PAPER badge (`#/strata`). It holds Strategy A's previous Home views (Real money | Paper: GMGN / FOMO paper P&L, positions, tonight, agents) and A's Live | Scores | Scanner (`#/alive`, `#/scores`, `#/scanner`).
 - Redirects so old hashes still open something sensible: `#/stratb` → `#/home`, `#/stratblive` → `#/live`, `#/paper` → `#/apaper` (A's paper, same content as before). Header badge shows "B LIVE" while Strategy B is live.
 - Approval buttons and FOMO links are unchanged (still from published data / links.py with r=savipww). Shell desk-shell-v24, assets ?v=24.
+
+## 68. Strategy A PAPER bankroll $2,500 with $500 buys (owner 2026-11-17 10:20 AM CT, t310u: "Give strat a a paper currency of 2500 with 500 dollar buys")
+- Why: A is PAPER, but it was still sizing against the real wallet. After the wallet ran down, every A paper buy was refused ("free 0.0000 SOL can't cover even $1.00", orders 46–51). Paper trading should not depend on real SOL.
+- New non-protected settings: `gmgn.paper_bankroll_usd` = 2500, `gmgn.paper_trade_usd` = 500 (source `chat: owner asked A paper $2500 bankroll $500 buys 2026-11-17 10:20 AM CT`). Not in PROTECTED / CAP_KEYS. `gmgn.cap_trade_usd` stays $50 for real money and Strategy B.
+- Sizing (PAPER only): buy $500 when paper free covers it, else whatever is left down to `gmgn.min_trade_usd` ($1), else refuse with a paper-balance reason. Paper free = bankroll + realized A paper P&L since the reset − open A paper tickets. A thin pool can still cap the ticket (2% of liquidity), same idea as live, but never the $50 live cap.
+- The paper bankroll starts fresh now (`meta gmgn_paper_bankroll_since`). Old PAPER rows from before the reset do not count against it.
+- Caps: A paper uses `gmgn.max_open` (4) and `gmgn.max_tickets_night` (4) counted only on `gmgn_orders` mode=PAPER, so they do not take Strategy B LIVE slots or tickets, and B LIVE rows do not take A's paper slots. No per-trade $50 cap, no $200 night-spend cap, no wallet or reserve check on paper buys. Live / B sizing, modes, and cap values are unchanged.
+- App: Strat A tab shows the paper bankroll, free cash, P&L, open amount and $500 buy size (shell desk-shell-v25, assets ?v=25). Same numbers in `state.json` / `account.json` under `gmgn.paper`, and in the Telegram GMGN status line when A is PAPER.
+- Tests: `tests/test_gmgn_paper_bankroll.py`.

@@ -267,6 +267,70 @@ def pick_size(s, free: int | None, sol_usd: float, pool_cap_usd: float | None = 
                      f"(needs {buy_cost_lamports(s, lam) / LAMPORTS:.4f} SOL with fees and rent, after the {s['gmgn.sol_reserve']:g} SOL reserve)")
 
 
+# DECISION 68: Strategy A PAPER uses its own USD bankroll, never the real wallet or gmgn.cap_trade_usd.
+PAPER_BANKROLL_META = "gmgn_paper_bankroll_since"
+
+
+def paper_since_ts(db) -> float:
+    try:
+        return float(db.meta(PAPER_BANKROLL_META) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def paper_realized_pnl(db, since: float | None = None) -> float:
+    since = paper_since_ts(db) if since is None else since
+    r = db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM gmgn_orders WHERE mode='PAPER' AND status='closed' AND ts>=?",
+               (since,))
+    return float(r["p"] or 0)
+
+
+def paper_open_usd(db, since: float | None = None) -> float:
+    since = paper_since_ts(db) if since is None else since
+    ph = ",".join("?" * len(ACTIVE))
+    r = db.one(f"SELECT COALESCE(SUM(size_usd),0) s FROM gmgn_orders WHERE mode='PAPER' AND status IN ({ph}) AND ts>=?",
+               (*ACTIVE, since))
+    return float(r["s"] or 0)
+
+
+def paper_free_usd(s, db, since: float | None = None) -> float:
+    """Bankroll + realized paper P&L since the reset, minus open paper tickets. Old rows before the baseline don't count."""
+    since = paper_since_ts(db) if since is None else since
+    return round(float(s["gmgn.paper_bankroll_usd"]) + paper_realized_pnl(db, since) - paper_open_usd(db, since), 6)
+
+
+def paper_snapshot(s, db) -> dict:
+    since = paper_since_ts(db)
+    start = float(s["gmgn.paper_bankroll_usd"])
+    realized = paper_realized_pnl(db, since)
+    opened = paper_open_usd(db, since)
+    return {"bankrollUsd": start, "tradeUsd": float(s["gmgn.paper_trade_usd"]),
+            "pnlUsd": round(realized, 2), "inPositionsUsd": round(opened, 2),
+            "freeUsd": round(start + realized - opened, 2), "since": since or None}
+
+
+def pick_paper_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | None = None):
+    """A PAPER size (DECISION 68): gmgn.paper_trade_usd ($500) when paper free covers it, else whatever is left
+    down to gmgn.min_trade_usd, else refused. Never uses the wallet or gmgn.cap_trade_usd."""
+    top, low = float(s["gmgn.paper_trade_usd"]), float(s["gmgn.min_trade_usd"])
+    ceiling = top if pool_cap_usd is None else min(top, float(pool_cap_usd))
+    if ceiling < low:
+        return None, 0, f"pool too thin: max ${ceiling:,.2f} per trade is under ${low:,.2f}"
+    if not sol_usd:
+        return None, 0, "no SOL price"
+    if free_usd is None:
+        return None, 0, "paper balance unknown"
+    if free_usd + 1e-9 >= ceiling:
+        size = round(ceiling, 2)
+    else:
+        size = math.floor(max(free_usd, 0) * 100) / 100.0
+    if size >= low:
+        lam = int(math.floor(size / sol_usd * LAMPORTS))
+        return size, lam, None
+    return None, 0, (f"paper free ${max(free_usd, 0):,.2f} can't cover even ${low:,.2f} "
+                     f"(bankroll ${s['gmgn.paper_bankroll_usd']:,.2f})")
+
+
 def night_usage(db, night: str, mode: str) -> tuple[int, float]:
     r = db.one(f"SELECT COUNT(*) n, COALESCE(SUM(size_usd),0) u FROM gmgn_orders WHERE night=? AND mode=? AND status IN ({','.join('?'*len(COUNTED))})",
                (night, mode, *COUNTED))
@@ -303,6 +367,25 @@ def check_caps(s, db, night, mode, size_usd, lamports, sol_usd, wallet_lamports)
     if need > wallet_lamports:
         raise CapError(f"wallet has {wallet_lamports / LAMPORTS:.4f} SOL, needs {need / LAMPORTS:.4f} SOL "
                        f"(ticket + fees + {s['gmgn.sol_reserve']:g} SOL reserve)")
+
+
+def check_paper_caps(s, db, night, size_usd) -> None:
+    """A PAPER-only caps. Open and night tickets count only gmgn_orders mode=PAPER, so they never take
+    Strategy B LIVE slots. No per-trade $50 cap, no night dollar cap, no wallet check (DECISION 68)."""
+    top, low = float(s["gmgn.paper_trade_usd"]), float(s["gmgn.min_trade_usd"])
+    if not (size_usd > 0):
+        raise CapError("bad size or SOL price")
+    if size_usd > top + 1e-9:
+        raise CapError(f"${size_usd:,.2f} is over the paper trade size ${top:,.2f}")
+    mx, op = int(s["gmgn.max_open"]), open_count(db, "PAPER")
+    if op >= mx:
+        raise CapError(f"{op}/{mx} GMGN positions already open (max {mx} at once)")
+    tickets = int(s["gmgn.max_tickets_night"])
+    n, _used = night_usage(db, night, "PAPER")
+    if n >= tickets:
+        raise CapError(f"night ticket cap reached ({n}/{tickets})")
+    if paper_free_usd(s, db) + 1e-9 < size_usd:
+        raise CapError(f"paper free ${paper_free_usd(s, db):,.2f} can't cover ${size_usd:,.2f}")
 
 
 def sim_exit(s, o, price, now):
@@ -549,9 +632,10 @@ class GmgnTrader:
         return None if liq is None else float(liq) * self.s["executor.max_pool_pct"] / 100.0
 
     def ticket_usd(self, liq):
-        """Top GMGN size for this pool (gmgn.cap_trade_usd, $20 fallback decided against the wallet at buy time).
-        Independent of the FOMO paper stack/min-ticket sizing (DECISION 44)."""
-        top, low = float(self.s["gmgn.cap_trade_usd"]), float(self.s["gmgn.min_trade_usd"])     # floor $1
+        """Top GMGN size for this pool. LIVE: gmgn.cap_trade_usd ($50). PAPER: gmgn.paper_trade_usd ($500)
+        (DECISION 68). Independent of the FOMO paper stack/min-ticket sizing (DECISION 44)."""
+        top_key = "gmgn.paper_trade_usd" if self.mode() == "PAPER" else "gmgn.cap_trade_usd"
+        top, low = float(self.s[top_key]), float(self.s["gmgn.min_trade_usd"])     # floor $1
         pc = self.pool_cap_usd(liq)
         if pc is not None and pc < low:
             return None, f"pool too thin: max ${pc:,.2f} per trade is under ${low:,.2f}"
@@ -756,12 +840,31 @@ class GmgnTrader:
             self._refuse(mint, name, mode, top, "no SOL price")
             await self.push(f"{self.prefix()}Skipped {name}: no SOL price from GMGN", mint=mint)
             return {"status": "refused", "reason": "no SOL price"}
-        wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every sizing
+        if mode == "PAPER":                              # DECISION 68: paper bankroll, never the real wallet or the $50 live cap
+            size, lamports, why = pick_paper_size(s, paper_free_usd(s, c.db), sol_usd, self.pool_cap_usd(liq))
+            if size is None:
+                self._refuse(mint, name, mode, 0, why)
+                await self.push(f"{self.prefix()}Skipped {name}: {why}", kind="gmgn_refused", mint=mint)
+                return {"status": "refused", "reason": why}
+            try:
+                check_paper_caps(s, c.db, c.night, size)
+            except CapError as e:
+                self._refuse(mint, name, mode, size, str(e))
+                await self.push(f"{self.prefix()}Refused {name}: {e}", kind="gmgn_refused", mint=mint)
+                return {"status": "refused", "reason": str(e)}
+            body = buy_body(s, mint, lamports)
+            exits = exits_text(s)
+            q, qnote = await self.try_quote(mint, lamports)
+            oid = self._row(ts=c.clock(), night=c.night, mode="PAPER", mint=mint, name=name, symbol=symbol, status="open",
+                            size_usd=size, sol_usd=sol_usd, lamports=lamports, entry_price=price, peak=price, last_price=price,
+                            last_liq=liq, quote=json.dumps(q) if q else qnote, body=json.dumps(body),
+                            conditions=json.dumps(body["condition_orders"]), **grace_fields(s, c.clock()))
+            self._log("PAPER", mint, "sim-fill", f"${size:.2f}", f"{lamports}", f"price={price}", qnote)
+            await self.push(f"{self.prefix()}Buy {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · {self.open_label('PAPER')} · simulated fill\n{exits}\nQuote: {qnote}", mint=mint)
+            c.event("fill", mint)
+            return {"status": "paper", "id": oid, "body": body}
+        wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every LIVE sizing
         committed = committed_lamports(c.db, mode)
-        if mode == "PAPER" and wallet is not None:       # PAPER spends nothing real: count simulated open tickets against the wallet
-            r = c.db.one(f"SELECT COALESCE(SUM(lamports),0) l FROM gmgn_orders WHERE mode='PAPER' AND status IN ({','.join('?'*len(ACTIVE))})", ACTIVE)
-            wallet -= int(r["l"] or 0)
-            committed = 0
         size, lamports, why = pick_size(s, free_lamports(s, wallet, committed), sol_usd, self.pool_cap_usd(liq))
         if size is None:
             self._refuse(mint, name, mode, 0, why)
@@ -775,16 +878,6 @@ class GmgnTrader:
             return {"status": "refused", "reason": str(e)}
         body = buy_body(s, mint, lamports)
         exits = exits_text(s)
-        if mode == "PAPER":
-            q, qnote = await self.try_quote(mint, lamports)
-            oid = self._row(ts=c.clock(), night=c.night, mode="PAPER", mint=mint, name=name, symbol=symbol, status="open",
-                            size_usd=size, sol_usd=sol_usd, lamports=lamports, entry_price=price, peak=price, last_price=price,
-                            last_liq=liq, quote=json.dumps(q) if q else qnote, body=json.dumps(body),
-                            conditions=json.dumps(body["condition_orders"]), **grace_fields(s, c.clock()))
-            self._log("PAPER", mint, "sim-fill", f"${size:.2f}", f"{lamports}", f"price={price}", qnote)
-            await self.push(f"{self.prefix()}Buy {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · {self.open_label('PAPER')} · simulated fill\n{exits}\nQuote: {qnote}", mint=mint)
-            c.event("fill", mint)
-            return {"status": "paper", "id": oid, "body": body}
         return await self.live_buy(mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits, reentry=reentry)
 
     async def try_quote(self, mint, lamports):
@@ -1822,7 +1915,15 @@ class GmgnTrader:
         n, used = night_usage(self.c.db, self.c.night, self.mode())
         s = self.s
         el = (self.c.clock() - (self.paper_since() or self.c.clock())) / 3600
-        return (f"GMGN {self.mode()}{' · HALTED' if self.halted() else ''}{'' if s['gmgn.enabled'] else ' · off'} · "
+        head = (f"GMGN {self.mode()}{' · HALTED' if self.halted() else ''}{'' if s['gmgn.enabled'] else ' · off'} · ")
+        if self.mode() == "PAPER":
+            snap = paper_snapshot(s, self.c.db)
+            return (head +
+                    f"paper bankroll ${snap['bankrollUsd']:,.2f}, free ${snap['freeUsd']:,.2f}, P&L ${snap['pnlUsd']:+,.2f} · "
+                    f"size ${snap['tradeUsd']:,.2f}, then whatever paper free covers down to ${s['gmgn.min_trade_usd']:,.2f} · "
+                    f"tonight {n}/{s['gmgn.max_tickets_night']} tickets · {self.open_label('PAPER')}" +
+                    (f" · PAPER {el:.1f}h of {s['gmgn.live_gate_h']:g}h"))
+        return (head +
                 f"tonight {n}/{s['gmgn.max_tickets_night']} tickets, ${used:,.2f}/${s['gmgn.cap_trade_usd'] * s['gmgn.max_tickets_night']:,.2f} · "
                 f"size ${s['gmgn.cap_trade_usd']:,.2f}, then ${s['gmgn.fallback_trade_usd']:,.2f}, then whatever free SOL covers down to ${s['gmgn.min_trade_usd']:,.2f}{self._next_size()} · "
-                f"{self.open_label()}" + (f" · PAPER {el:.1f}h of {s['gmgn.live_gate_h']:g}h" if self.mode() == "PAPER" else ""))
+                f"{self.open_label()}")

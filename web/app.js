@@ -421,11 +421,20 @@
     h += bLiveBody(b);
     return h + `<div class="hint">Strategy B is the live strategy. Strategy A is on the Strat A tab (PAPER). This app is read-only.</div>`;
   }
+  function aPaperBankrollCard(g) {
+    const p = g && g.paper;
+    if (!p) return "";
+    const start = p.bankrollUsd ?? 0, d = p.pnlUsd ?? 0, equity = start + d;
+    return `<div class="card paper"><div class="rowx"><div class="sub">Strategy A paper bankroll · simulated, not real money</div><span class="badge">PAPER</span></div>
+      <div class="big">${money(equity)}</div>
+      <div class="sub"><span class="${d >= 0 ? "green" : "red"}">${d >= 0 ? "+" : ""}${money(d).replace("$-", "-$")} (${pct(start ? d / start * 100 : 0)})</span> · start ${money(start)} · free ${money(p.freeUsd ?? 0)} · in positions ${money(p.inPositionsUsd || 0)}${p.tradeUsd ? ` · buys ${money(p.tradeUsd)}` : ""}</div></div>`;
+  }
   function stratA() {
     const g = gate(); if (g) return g;
     const st = F("state.json"), gm = st.gmgn || gmgnState(), tr = F("trades.json");
     let h = pushBanner() + stratATabs() + aMoneyTabs();
     h += `<h1>Strategy A · PAPER <span class="badge">PAPER</span></h1>`;
+    h += aPaperBankrollCard(gm);
     if (route().name === "apaper") return h + paperView(st, tr) + tonightAndAgents(st);
     h += gmgnWalletCard(gm);
     const real = tr?.real;
