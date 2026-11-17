@@ -719,3 +719,11 @@ Replaces the PAPER-ONLY lock of DECISION 54 deliberately, by the owner's command
 - Records: `strat_b_orders` gains `mode` (existing rows → PAPER), lamports, sol_usd, order ids, tx, sell tx, entry_src, note, confirm_push_at. Paper bankroll / P&L use mode='PAPER' only; the open paper position (#2 GTA) keeps running and closes as paper. `strat_b.json` v2: top-level paper fields unchanged (paper rows only), `mode`/`label` follow the current mode ("B LIVE"), real results under `live` (no order ids or tx). strat_b_report.py prints B LIVE first, then B PAPER. Pushes say "B LIVE · …" (webpush titles "B LIVE · …"); paper ones stay "B PAPER".
 - App: Strat B tab shows a B LIVE card (real P&L, free SOL, last skip), B LIVE positions/trades, then the paper section; badges per row. Shell desk-shell-v23, assets ?v=23.
 - Tests `tests/test_strat_b_live_mode.py` (13) + updated `tests/test_strat_b.py`.
+
+## 67. App: Strategy B takes Home and Live; Strategy A moves to the old Strat B tab (owner 2026-11-17 9:21 AM CT, t308u: "can you make strat b appear where a is and swap a to b's spot")
+- UI-only. No desk settings, modes, caps, or trading code changed. Data shapes unchanged. Secrets never in web/.
+- Home (`#/home`) is now Strategy B · LIVE: the B LIVE card (real P&L, free SOL, last skip), B LIVE positions and trades, plus the shared GMGN wallet card. A Paper sub-tab (`#/bpaper`) holds B's simulated bankroll, paper positions/trades and rules.
+- The bottom Live tab (`#/live`) is now B's live feed: watchlist and evaluations (what was `#/stratblive`).
+- The old Strat B tab is now "Strat A" with a PAPER badge (`#/strata`). It holds Strategy A's previous Home views (Real money | Paper: GMGN / FOMO paper P&L, positions, tonight, agents) and A's Live | Scores | Scanner (`#/alive`, `#/scores`, `#/scanner`).
+- Redirects so old hashes still open something sensible: `#/stratb` → `#/home`, `#/stratblive` → `#/live`, `#/paper` → `#/apaper` (A's paper, same content as before). Header badge shows "B LIVE" while Strategy B is live.
+- Approval buttons and FOMO links are unchanged (still from published data / links.py with r=savipww). Shell desk-shell-v24, assets ?v=24.

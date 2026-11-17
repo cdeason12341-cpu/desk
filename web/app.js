@@ -174,7 +174,7 @@
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    const delay = (r.name === "live" || r.name === "scores" || r.name === "scanner" || r.name === "stratblive") ? LIVE_POLL_S : POLL_S;
+    const delay = LIVE_HASH[r.name] ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
     render(); pushResync();
     pollTimer = setTimeout(poll, delay * 1000);
@@ -195,11 +195,21 @@
   function gmgnState() { return F("state.json")?.gmgn || F("account.json")?.gmgn || null; }
 
   // ---------- routing
+  const ALIAS = { stratb: "home", stratblive: "live", paper: "apaper" };
+  const LIVE_HASH = { live: 1, scores: 1, scanner: 1, alive: 1 };
+  function applyAlias() {
+    const raw = location.hash.replace(/^#\/?/, "");
+    const name = raw.split("/")[0] || "home";
+    if (!ALIAS[name]) return;
+    const rest = raw.split("/").slice(1).filter(Boolean).join("/");
+    history.replaceState(null, "", location.pathname + location.search + "#/" + ALIAS[name] + (rest ? "/" + rest : ""));
+  }
   function route() {
+    applyAlias();
     const p = location.hash.replace(/^#\/?/, "").split("/");
     return { name: p[0] || "home", arg: p[1] ? decodeURIComponent(p[1]) : null };
   }
-  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores" || r.name === "scanner" || r.name === "stratblive") poll(); else render(); });
+  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || LIVE_HASH[r.name]) poll(); else render(); });
 
   // ---------- chrome
   function statusRow() {
@@ -216,12 +226,17 @@
   function chrome() {
     const st = F("state.json");
     const b = $("#modeBadge");
-    if (st) { b.classList.remove("hidden"); b.textContent = st.mode; b.classList.toggle("live", st.mode === "LIVE"); } else b.classList.add("hidden");
+    const bm = F("strat_b.json")?.mode;
+    if (bm === "LIVE") { b.classList.remove("hidden"); b.textContent = "B LIVE"; b.classList.add("live"); }
+    else if (st) { b.classList.remove("hidden"); b.textContent = st.mode; b.classList.toggle("live", st.mode === "LIVE"); }
+    else b.classList.add("hidden");
     const act = F("activity.json"); const seen = +(localStorage.getItem("desk.seen") || 0);
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || ((r === "scores" || r === "scanner") && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "stratblive" && a.dataset.tab === "stratb") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
+    const on = { home: r === "home" || r === "bpaper" || r === "coin" || r === "audit", live: r === "live",
+      strata: r === "strata" || r === "apaper" || r === "alive" || r === "scores" || r === "scanner" };
+    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || !!on[a.dataset.tab]));
     statusRow();
   }
   $("#bellBtn").onclick = () => { location.hash = "#/activity"; };
@@ -336,12 +351,26 @@
       <div class="r"><div class="${(p.pct ?? 0) >= 0 ? "green" : "red"}">${p.pnlUsd != null ? money(p.pnlUsd) : pct(p.pct)}</div><div class="s">${pct(p.pct)}</div></div>`;
     return p.mint ? `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
-  function moneyTabs() {
-    const onPaper = route().name === "paper";
-    return `<div class="seg" role="tablist" aria-label="Real money or Paper">
-      <a href="#/home" class="${onPaper ? "" : "on real"}" role="tab" aria-selected="${!onPaper}">Real money</a>
-      <a href="#/paper" class="${onPaper ? "on paper" : ""}" role="tab" aria-selected="${onPaper}">Paper</a>
+  function bMoneyTabs() {
+    const onPaper = route().name === "bpaper";
+    return `<div class="seg" role="tablist" aria-label="Strategy B live or paper">
+      <a href="#/home" class="${onPaper ? "" : "on real"}" role="tab" aria-selected="${!onPaper}">LIVE</a>
+      <a href="#/bpaper" class="${onPaper ? "on paper" : ""}" role="tab" aria-selected="${onPaper}">Paper</a>
     </div>`;
+  }
+  function aMoneyTabs() {
+    const onPaper = route().name === "apaper";
+    return `<div class="seg" role="tablist" aria-label="Real money or Paper">
+      <a href="#/strata" class="${onPaper ? "" : "on real"}" role="tab" aria-selected="${!onPaper}">Real money</a>
+      <a href="#/apaper" class="${onPaper ? "on paper" : ""}" role="tab" aria-selected="${onPaper}">Paper</a>
+    </div>`;
+  }
+  function stratATabs() {
+    const r = route().name;
+    const live = r === "alive" || r === "scores" || r === "scanner";
+    return `<div class="seg" role="tablist" aria-label="Strategy A overview or live">
+      <a href="#/strata" class="${live ? "" : "on paper"}" role="tab" aria-selected="${!live}">Overview</a>
+      <a href="#/alive" class="${live ? "on paper" : ""}" role="tab" aria-selected="${live}">Live</a></div>`;
   }
   function bypassBadge(r) { return r.bypass ? `<span class="badge bypass${r.tag === "OVERRIDE" ? " override" : ""}">${esc(r.tag || "BYPASS")} · score ${r.score ?? "?"}</span>` : ""; }
   function tradeRow(r) {
@@ -382,20 +411,32 @@
   }
   function home() {
     const g = gate(); if (g) return g;
+    const b = F("strat_b.json");
+    let h = pushBanner() + bMoneyTabs();
+    if (route().name === "bpaper") return h + bPaperBody(b);
+    h += `<h1>Strategy B · LIVE ${bBadge(b && b.mode)}</h1>`;
+    if (!b) return h + emptyBox("Strategy B hasn't published yet", "It shows up after the desk's next publish.");
+    const gm = F("state.json")?.gmgn || gmgnState();
+    h += gmgnWalletCard(gm);
+    h += bLiveBody(b);
+    return h + `<div class="hint">Strategy B is the live strategy. Strategy A is on the Strat A tab (PAPER). This app is read-only.</div>`;
+  }
+  function stratA() {
+    const g = gate(); if (g) return g;
     const st = F("state.json"), gm = st.gmgn || gmgnState(), tr = F("trades.json");
-    let h = pushBanner() + moneyTabs();
-    if (route().name === "paper") return h + paperView(st, tr) + tonightAndAgents(st);
-    // ---- Real money: GMGN LIVE only
+    let h = pushBanner() + stratATabs() + aMoneyTabs();
+    h += `<h1>Strategy A · PAPER <span class="badge">PAPER</span></h1>`;
+    if (route().name === "apaper") return h + paperView(st, tr) + tonightAndAgents(st);
     h += gmgnWalletCard(gm);
     const real = tr?.real;
     if (real) {
-      h += pnlCard(real, "Real P&L (GMGN LIVE)", "real");
-      h += `<h1>Real positions</h1>` + (real.open.length ? `<div class="card list">${real.open.map(tradeRow).join("")}</div>`
-        : emptyBox("No real positions open", gm?.mode === "LIVE" ? "GMGN buys on its own when a coin passes. Exits sit on GMGN." : "GMGN is in PAPER mode."));
-      if (real.closed.length) h += `<h1>Real trades</h1><div class="card list">${real.closed.map(tradeRow).join("")}</div>`;
+      h += pnlCard(real, "Strategy A P&L (GMGN, now PAPER)", "paper");
+      h += `<h1>Positions</h1>` + (real.open.length ? `<div class="card list">${real.open.map(tradeRow).join("")}</div>`
+        : emptyBox("No Strategy A positions open", gm?.mode === "LIVE" ? "GMGN buys on its own when a coin passes. Exits sit on GMGN." : "Strategy A is in PAPER mode."));
+      if (real.closed.length) h += `<h1>Trades</h1><div class="card list">${real.closed.map(tradeRow).join("")}</div>`;
     } else {
       const gOpen = (gm?.open || []).filter(p => p.mode === "LIVE");
-      h += `<h1>Real positions</h1>` + (gOpen.length ? `<div class="card list">${gOpen.map(gmgnPosRow).join("")}</div>` : emptyBox("No real positions open", "Waiting for the next update."));
+      h += `<h1>Positions</h1>` + (gOpen.length ? `<div class="card list">${gOpen.map(gmgnPosRow).join("")}</div>` : emptyBox("No Strategy A positions open", "Waiting for the next update."));
     }
     return h + tonightAndAgents(st);
   }
@@ -435,12 +476,7 @@
       <div class="grow"><div class="t">${esc(name)} <span style="margin-left:6px">${bBadge(r.mode)}</span></div><div class="s">${sub}</div>${r.why ? `<div class="s" style="white-space:normal">${esc(r.why)}</div>` : ""}</div>
       <div class="r"><div class="${up ? "green" : "red"}">${money(r.pnlUsd)}</div><div class="s">${pct(r.pct)}</div></div></a>`;
   }
-  function stratBTabs() {
-    const live = route().name === "stratblive";
-    return `<div class="seg" role="tablist" aria-label="Strategy B overview or live">
-      <a href="#/stratb" class="${live ? "" : "on paper"}" role="tab" aria-selected="${!live}">Overview</a>
-      <a href="#/stratblive" class="${live ? "on paper" : ""}" role="tab" aria-selected="${live}">Live</a></div>`;
-  }
+
   function bCheck(c) {
     const st = c.pass === true ? `<span class="pf ok">PASS</span>` : c.pass === false ? `<span class="pf bad">FAIL</span>` : `<span class="pf">—</span>`;
     return `<div class="scheck"><span class="k">${esc(c.label)}</span><span class="v">${esc(c.value)}</span><span class="b">${esc(c.bar)}</span>${st}</div>`;
@@ -481,7 +517,7 @@
   function stratBLive() {
     const g = gate(); if (g) return g;
     const L = F("strat_b_live.json");
-    let h = stratBTabs() + `<h1>Strategy B · Live ${bBadge(L && L.mode)}</h1>`;
+    let h = `<h1>Strategy B · LIVE ${bBadge(L && L.mode)}</h1>`;
     if (!L) return h + emptyBox("Strategy B live view hasn't published yet", "It shows up after the desk's next publish.");
     const n = L.counts || {};
     h += `<div class="pills" style="margin:0 0 12px"><span class="pill amber">${n.watching ?? 0} watching</span><span class="pill green">${n.boughtTonight ?? 0} bought</span><span class="pill red">${n.skippedTonight ?? 0} skipped</span><span class="pill">${n.expiredTonight ?? 0} expired</span><span class="pill">${n.evaluationsTonight ?? 0} evaluations tonight</span></div>`;
@@ -491,22 +527,20 @@
       : emptyBox("No Strategy B evaluations tonight yet", "B looks at every coin the auditor passes."));
     return h + `<div class="sub" style="margin-top:6px">Newest first. A row is added when a coin's verdict changes. Tap a row for every check. ${L.mode === "LIVE" ? "Strategy B is LIVE: its buys are real GMGN orders from your wallet." : "Strategy B is in PAPER mode and places no real orders."} This app is read-only.</div>`;
   }
-  function stratB() {
-    const g = gate(); if (g) return g;
-    const b = F("strat_b.json");
-    let h = stratBTabs() + `<h1>Strategy B ${bBadge(b && b.mode)}</h1>`;
+  function bLiveBody(b) {
+    const lv = b.live || {};
+    const lr = lv.lastRefusal;
+    let h = `<div class="card real"><div class="rowx"><div class="sub">B LIVE · real money from your GMGN wallet${b.mode === "LIVE" ? "" : " · not active (B is PAPER)"}</div>${bBadge("LIVE")}</div>
+      <div class="big ${(lv.pnlAllUsd ?? 0) >= 0 ? "green" : "red"}">${money(lv.pnlAllUsd ?? 0)}</div>
+      <div class="sub">tonight ${money(lv.pnlTonightUsd ?? 0)} · ${lv.closedAll ?? 0} closed · ${lv.wins ?? 0}W ${lv.losses ?? 0}L${lv.winRatePct == null ? "" : " · " + lv.winRatePct + "% win rate"}${lv.freeSol == null ? "" : ` · free ${Number(lv.freeSol).toFixed(4)} SOL after ${lv.reserveSol} SOL reserve`}</div>
+      ${lr ? `<div class="sub" style="white-space:normal;margin-top:4px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>` : ""}</div>`;
+    h += `<h1>B LIVE positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox("No B LIVE positions open", "B will buy when a coin qualifies and the wallet can cover it."));
+    if ((lv.closed || []).length) h += `<h1>B LIVE trades</h1><div class="card list">${lv.closed.map(stratBRow).join("")}</div>`;
+    return h;
+  }
+  function bPaperBody(b) {
+    let h = `<h1>Strategy B · PAPER <span class="badge">PAPER</span></h1>`;
     if (!b) return h + emptyBox("Strategy B hasn't published yet", "It shows up after the desk's next publish.");
-    const lv = b.live;
-    if (lv && (lv.active || lv.closedAll || (lv.open || []).length)) {
-      const lr = lv.lastRefusal;
-      h += `<div class="card"><div class="rowx"><div class="sub">B LIVE · real money from your GMGN wallet${lv.active ? "" : " · not active (B is PAPER)"}</div>${bBadge("LIVE")}</div>
-        <div class="big ${lv.pnlAllUsd >= 0 ? "green" : "red"}">${money(lv.pnlAllUsd)}</div>
-        <div class="sub">tonight ${money(lv.pnlTonightUsd)} · ${lv.closedAll} closed · ${lv.wins}W ${lv.losses}L${lv.winRatePct == null ? "" : " · " + lv.winRatePct + "% win rate"}${lv.freeSol == null ? "" : ` · free ${Number(lv.freeSol).toFixed(4)} SOL after ${lv.reserveSol} SOL reserve`}</div>
-        ${lr ? `<div class="sub" style="white-space:normal;margin-top:4px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>` : ""}</div>`;
-      h += `<h1>B LIVE positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox("No B LIVE positions open", ""));
-      if ((lv.closed || []).length) h += `<h1>B LIVE trades</h1><div class="card list">${lv.closed.map(stratBRow).join("")}</div>`;
-      h += `<h1>B PAPER</h1>`;
-    }
     const d = b.bankroll - b.bankrollStart;
     h += `<div class="card paper"><div class="rowx"><div class="sub">${esc(b.label)} · simulated, not real money${b.enabled ? "" : " · off"}</div><span class="badge">PAPER</span></div>
       <div class="big">${money(b.bankroll)}</div>
@@ -607,7 +641,7 @@
     const nFeed = (fd?.items || []).length;
     const latest = (fd?.items || [])[0];
     const latestLabel = latest ? esc(latest.name || latest.symbol || latest.mintShort || short(latest.mint)) : "";
-    return `<h1>Live feed</h1><a class="card tap" href="#/live">
+    return `<h1>Live feed</h1><a class="card tap" href="#/alive">
       <div class="rowx"><div><div class="sub">Every coin the desk evaluates · min ${min} to buy</div>
         <div class="num">${nFeed || items.length} event${(nFeed || items.length) === 1 ? "" : "s"} tonight</div>
         ${latest ? `<div class="sub">${latestLabel} · ${esc(liveOutcome(latest))}</div>` : (last ? `<div class="sub">${esc(last.name || last.mintShort || short(last.mint))} · <span class="${last.passed ? "green" : "red"}">${last.score} ${last.passed ? "pass" : "reject"}</span></div>` : `<div class="sub">Waiting for the next coin</div>`)}
@@ -694,7 +728,7 @@
         dips.map(d => {
           const label = d.name || d.symbol || short(d.mint);
           const drop = d.dropPct == null ? "—" : (d.dropPct >= 0 ? "−" + d.dropPct.toFixed(1) + "%" : "+" + Math.abs(d.dropPct).toFixed(1) + "%");
-          const href = d.mint ? `#/coin/${encodeURIComponent(d.mint)}` : (d.link || "#/live");
+          const href = d.mint ? `#/coin/${encodeURIComponent(d.mint)}` : (d.link || "#/alive");
           return `<a class="live-row" href="${href}"><div class="rowx">
             <div class="grow"><div class="t">${esc(label)}</div>
               <div class="s">Dip watch · high ${price(d.high)} · now ${price(d.lastPrice)} · ${esc(drop)}${d.expiresAt ? " · until " + tmCT(d.expiresAt) : ""}</div></div>
@@ -711,7 +745,7 @@
     const r = route().name;
     const tab = (h, n, label) => `<a href="#/${h}" class="${r === n ? "on" : ""}" role="tab" aria-selected="${r === n}">${label}</a>`;
     return `<div class="seg seg3" role="tablist" aria-label="Live, Scores or Scanner">
-      ${tab("live", "live", "Live")}${tab("scores", "scores", "Scores")}${tab("scanner", "scanner", "Scanner")}
+      ${tab("alive", "alive", "Live")}${tab("scores", "scores", "Scores")}${tab("scanner", "scanner", "Scanner")}
     </div>`;
   }
   // ---------- Scanner view (owner request 2026-11-15 6:25 PM CT): every scanner decision, each check vs its bar
@@ -806,9 +840,9 @@
     const min = (fd && fd.minScore != null) ? fd.minScore : (sc?.minScore ?? ag?.minScore);
     const items = sc?.items || [];
     const bars = (fd && fd.bars) || barsOf();
-    if (route().name === "scores") return tabToggle() + scoresList(min, items, bars);
-    if (route().name === "scanner") return tabToggle() + scannerView();
-    return tabToggle() + liveFeed(min);
+    if (route().name === "scores") return stratATabs() + tabToggle() + scoresList(min, items, bars);
+    if (route().name === "scanner") return stratATabs() + tabToggle() + scannerView();
+    return stratATabs() + tabToggle() + liveFeed(min);
   }
   function agents() { const g = gate(); if (g) return g; return `<h1>Your 5 agents</h1>` + AGENTS.map(a => agentCard(a, true)).join("") + `<div class="hint">All agent changes go through Telegram (@Denarpobot). This app is read-only.</div>`; }
 
@@ -951,8 +985,12 @@
   function render() {
     chrome();
     const r = route();
-    const html = r.name === "stratb" ? stratB() : r.name === "stratblive" ? stratBLive() : r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
-      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live" || r.name === "scanner") ? scores() : home();
+    const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
+      : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg)
+      : r.name === "live" ? stratBLive()
+      : (r.name === "scores" || r.name === "scanner" || r.name === "alive") ? scores()
+      : (r.name === "strata" || r.name === "apaper") ? stratA()
+      : home();
     V.innerHTML = html;
     chrome();
     document.querySelectorAll(".score-row").forEach(el => {
