@@ -4,7 +4,7 @@
   "use strict";
   const POLL_S = 30, LIVE_POLL_S = 15, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", "scanner.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", "scanner.json", "strat_b.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -206,10 +206,17 @@
       <div class="sub">${usd} · ${esc(g.walletShort || short(g.wallet))}${when}</div>
       <div class="pills"><span class="pill">${money(g.capTradeUsd)} / trade</span><span class="pill">${esc(tickets)}</span></div></div>`;
   }
+  function exitsLine(ex) {
+    const on = ex && ex.attached ? " · exits on" : " · exits?";
+    if (ex && ex.label) return ex.label + on;
+    if (ex && (ex.phase === "grace" || (ex.graceMin && ex.graceStopPct != null && ex.normalStopPct != null)))
+      return `stop -${ex.graceStopPct}% for first ${ex.graceMin ?? 5} min, then -${ex.normalStopPct}%` + on;
+    return `stop -${(ex && ex.stopPct) ?? 15}% · trail ${(ex && ex.trailPct) ?? 20}%` + on;
+  }
   function gmgnPosRow(p) {
     const name = p.name || p.symbol || short(p.mint);
     const ex = p.exits || {};
-    const exits = `stop -${ex.stopPct ?? 15}% · trail ${ex.trailPct ?? 20}%` + (ex.attached ? " · exits on" : " · exits?");
+    const exits = exitsLine(ex);
     const inner = `<div class="ico ${(p.pct ?? 0) >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
       <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode)}</span></div>
       <div class="s">${money(p.sizeUsd)} · ${exits}</div></div>
@@ -231,7 +238,7 @@
     let sub;
     if (r.open) {
       const ex = r.exits || {};
-      sub = r.source === "GMGN" ? `${money(r.sizeUsd)} · stop -${ex.stopPct ?? 15}% · trail ${ex.trailPct ?? 20}%${ex.attached ? " · exits on" : " · exits?"}`
+      sub = r.source === "GMGN" ? `${money(r.sizeUsd)} · ${exitsLine(ex)}`
         : `${money(r.sizeUsd)} · stop -${r.stopPct}%${r.trailActive ? " · trailing" : ""}`;
     } else {
       const why = r.exitReason ? (r.exitReason === "trail" ? "trailed out" : r.exitReason === "stop" ? "stopped" : r.exitReason) : r.status;
@@ -299,6 +306,38 @@
       : emptyBox("No paper positions open", "The desk is scanning. Paper buys arrive as Telegram pushes."));
     if (paper.closed.length) h += `<h1>Paper trades</h1><div class="card list">${paper.closed.map(tradeRow).join("")}</div>`;
     return h;
+  }
+  // ---------- Strategy B (paper only, read-only; DECISION 54)
+  function stratBRow(r) {
+    const name = r.name || r.symbol || short(r.mint);
+    const p = r.pct ?? 0, up = p >= 0;
+    const sub = r.status === "open"
+      ? `${money(r.sizeUsd)} in ${tm(r.openedAt)} · stop ${price(r.stopLine)} · ${r.trailArmed ? "trail armed " + price(r.trailLine) : "2x " + price(r.tpLine)}`
+      : `${money(r.sizeUsd)} · ${esc(r.exitReason || "closed")} ${tm(r.closedAt)}`;
+    return `<a class="row" href="${esc(r.link)}" target="_blank" rel="noopener"><div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
+      <div class="grow"><div class="t">${esc(name)} <span class="badge" style="margin-left:6px">PAPER</span></div><div class="s">${sub}</div>${r.why ? `<div class="s">${esc(r.why)}</div>` : ""}</div>
+      <div class="r"><div class="${up ? "green" : "red"}">${money(r.pnlUsd)}</div><div class="s">${pct(r.pct)}</div></div></a>`;
+  }
+  function stratB() {
+    const g = gate(); if (g) return g;
+    const b = F("strat_b.json");
+    let h = `<h1>Strategy B <span class="badge">PAPER</span></h1>`;
+    if (!b) return h + emptyBox("Strategy B hasn't published yet", "It shows up after the desk's next publish.");
+    const d = b.bankroll - b.bankrollStart;
+    h += `<div class="card paper"><div class="rowx"><div class="sub">${esc(b.label)} · simulated, not real money${b.enabled ? "" : " · off"}</div><span class="badge">PAPER</span></div>
+      <div class="big">${money(b.bankroll)}</div>
+      <div class="sub"><span class="${d >= 0 ? "green" : "red"}">${d >= 0 ? "+" : ""}${money(d).replace("$-", "-$")} (${pct(b.bankrollStart ? d / b.bankrollStart * 100 : 0)})</span> · start ${money(b.bankrollStart)} · free ${money(b.free)} · in positions ${money(b.inPositions)}</div></div>`;
+    h += pnlCard({ pnlTonightUsd: b.pnlTonightUsd, pnlAllUsd: b.pnlAllUsd, closedTonight: b.closedTonight, wins: b.wins, losses: b.losses }, "Strategy B P&L (PAPER, not real money)", "paper");
+    h += `<div class="grid2">
+      <div class="card stat"><div class="v">${b.winRatePct == null ? "—" : b.winRatePct + "%"}</div><div class="k">win rate · ${b.closedAll} closed</div></div>
+      <div class="card stat"><div class="v">${b.profitFactor == null ? "—" : b.profitFactor}</div><div class="k">profit factor</div></div>
+      <div class="card stat"><div class="v">${b.watching}</div><div class="k">coins watching</div></div>
+      <div class="card stat"><div class="v">${money(b.unrealizedUsd)}</div><div class="k">open P&L (est.)</div></div></div>`;
+    h += `<h1>Open positions</h1>` + ((b.open || []).length ? `<div class="card list">${b.open.map(stratBRow).join("")}</div>`
+      : emptyBox("No Strategy B positions open", "It waits an hour after graduation, then buys a pullback that's bouncing."));
+    h += `<h1>Recent trades</h1>` + ((b.closed || []).length ? `<div class="card list">${b.closed.map(stratBRow).join("")}</div>` : emptyBox("No closed trades yet", ""));
+    h += `<h1>Rules</h1><div class="card list">${(b.rules || []).map(r => `<div class="row"><div class="grow"><div class="t">${esc(r.k)}</div><div class="s">${esc(r.v)}</div><div class="s">${esc(r.why)}</div></div></div>`).join("")}</div>`;
+    return h + `<div class="hint">Strategy B is paper only: it never places a real order. Separate from the GMGN strategy and its P&L. This app is read-only.</div>`;
   }
   function scoreBar(score, min) {
     const fill = Math.max(0, Math.min(100, Number(score) || 0));
@@ -709,7 +748,7 @@
   function render() {
     chrome();
     const r = route();
-    const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
+    const html = r.name === "stratb" ? stratB() : r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
       : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live" || r.name === "scanner") ? scores() : home();
     V.innerHTML = html;
     chrome();

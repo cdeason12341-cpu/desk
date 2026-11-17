@@ -41,7 +41,7 @@ svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 .status{margin:10px 16px 0;padding:10px 12px;border-radius:12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#fca5a5;font-size:13px}
 .status.info{background:rgba(34,211,238,.08);border-color:rgba(34,211,238,.3);color:#a5f3fc}
 main{padding:12px 16px 8px}
-.tabs{position:fixed;bottom:0;left:0;right:0;z-index:10;height:calc(64px + var(--sab));padding-bottom:var(--sab);display:grid;grid-template-columns:repeat(5,1fr);background:rgba(0,0,0,.9);backdrop-filter:blur(14px);border-top:1px solid var(--line)}
+.tabs{position:fixed;bottom:0;left:0;right:0;z-index:10;height:calc(64px + var(--sab));padding-bottom:var(--sab);display:grid;grid-template-columns:repeat(6,1fr);background:rgba(0,0,0,.9);backdrop-filter:blur(14px);border-top:1px solid var(--line)}
 .tabs a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;color:var(--dim);font-size:11px;font-weight:600}
 .tabs a.on{color:var(--text)}.tabs a.on svg{stroke:var(--cyan)}
 h1{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin:18px 2px 8px}

@@ -101,7 +101,9 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
  "open":[{"id":1,"mint","name","symbol","mode":"LIVE","status":"open",
           "entryPrice":0.1,"lastPrice":0.11,"peakPrice":0.12,"sizeUsd":65.0,
           "pct":10.0,"pnlUsd":6.5,"openedAt":"…Z",
-          "exits":{"stopPct":6,"trailPct":12,"trailStartPct":20,"attached":true,"repair":null},
+          "exits":{"stopPct":6,"trailPct":12,"trailStartPct":20,"attached":true,"repair":null,
+                   "phase":"normal","graceMin":0,"graceStopPct":30,"normalStopPct":6,"graceUntil":null,
+                   "label":"stop -6% · trail 12%"},
           "link":"https://fomo.family/coin?address=…&chainId=1399811149&r=savipww&source=share_link"}],
  "orders":[{"id":1,"t":"…Z","mint","name","symbol","mode":"LIVE","status":"open|closed|…",
             "reason":null,"sizeUsd":65.0,"entryPrice":0.1,"lastPrice":0.11,"exitPrice":null,
@@ -163,3 +165,18 @@ Side: `{open: [Row], closed: [Row], pnlTonightUsd, pnlAllUsd, closedTonight, win
 Real = GMGN LIVE orders + LIVE positions. Paper = PAPER positions (FOMO) + GMGN PAPER orders.
 Row: position_view / gmgn_order fields plus `source` ("FOMO"|"GMGN"), `open`, `bypass` (bool), `score` (analyst score for
 bypass rows), `closedAt`. No broker ids, quotes, bodies or tx.
+
+## strat_b.json (Strat B tab) — Strategy B, PAPER ONLY (DECISION 54)
+Simulated strategy, separate from GMGN and from trades.json. Never real money; the app shows it with a PAPER badge.
+```json
+{"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","enabled":true,"night":"…",
+ "bankrollStart":1000.0,"bankroll":1012.4,"free":962.4,"inPositions":50.0,"unrealizedUsd":-3.1,
+ "pnlAllUsd":12.4,"pnlTonightUsd":12.4,"closedTonight":2,"closedAll":2,"wins":1,"losses":1,"winRatePct":50.0,"profitFactor":1.8,
+ "watching":7,"skipped":12,"expired":3,
+ "open":[{"id":3,"mint","name","symbol","mode":"PAPER","status":"open","sizeUsd":50.0,"entryPrice":0.0001,"signalPrice":0.0000988,
+          "lastPrice":0.000097,"peakPrice":0.0001,"openedAt":"…Z","mcEntry":120000,"why":"pullback -18% then +6% bounce, 74m after graduation",
+          "pnlUsd":-3.1,"pct":-6.2,"trailArmed":false,"stopLine":0.000065,"tpLine":0.0002,"trailLine":null,"timeStopAt":"…Z","link":"…r=savipww…"}],
+ "closed":[{… "status":"closed","pnlUsd":20.1,"pct":40.2,"exitReason":"stop|take profit 2x|spike|trail|time stop|liquidity pulled","exitPrice":…,"closedAt":"…Z"}],
+ "rules":[{"k":"Stop","v":"-35% from entry, from the first second","why":"…"}]}
+```
+`state.json` also carries `stratB`: `{label, mode, enabled, bankroll, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, watching, openCount}`.
