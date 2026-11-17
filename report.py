@@ -49,6 +49,29 @@ def summary(db: DB, night: str) -> dict:
             "footer": "New to FOMO? " + links.SIGNUP_URL}
 
 
+def cutoff(settings, now):
+    """Today's report_time as a local datetime."""
+    import datetime as dt
+    hh, mm = (int(x) for x in str(settings["desk.report_time"]).split(":"))
+    return now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+
+def default_night(db: DB, settings=None, now=None) -> str | None:
+    """Night the morning report should cover (DECISION 59). Normally the most recently closed night. If the desk
+    hasn't rolled yet today although report_time has passed (routine ran first, or the box was paused at 8 AM),
+    the still-open current night is last night, so report that one instead of re-reporting an older night."""
+    import datetime as dt
+    last = (db.one("SELECT id FROM nights WHERE ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1") or {}).get("id")
+    cur = db.meta("night")
+    if settings is not None and cur:
+        now = now or dt.datetime.now()
+        r = db.one("SELECT started_at, ended_at FROM nights WHERE id=?", (cur,))
+        due = db.meta("last_rollover") != now.date().isoformat() and now >= cutoff(settings, now)
+        if due and r and r["ended_at"] is None and dt.datetime.fromtimestamp(float(r["started_at"])) < cutoff(settings, now):
+            return cur
+    return last or cur
+
+
 def close_night(db: DB, night: str):
     s = summary(db, night)
     (ROOT / "logs" / "reports").mkdir(parents=True, exist_ok=True)
@@ -67,7 +90,8 @@ def clear_skips(db: DB, night: str | None = None):
 if __name__ == "__main__":
     db = DB(str(ROOT / "desk.db"))
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    night = args[0] if args else (db.one("SELECT id FROM nights WHERE ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1") or {}).get("id") or db.meta("night")
+    import config
+    night = args[0] if args else default_night(db, config.Settings(db))
     print(json.dumps(summary(db, night), indent=1, default=str))
     if "--clear-skips" in sys.argv:
         clear_skips(db, night)

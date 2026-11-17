@@ -37,6 +37,7 @@ FIELDS = {
         "priceUsd": "priceUsd",                 # STRING, cast to float
         "liquidity_usd": "liquidity.usd",
         "marketCap": "marketCap",
+        "fdv": "fdv",                           # fallback when marketCap is missing
         "volume_m5": "volume.m5",
         "volume_h1": "volume.h1",
         "volume_h24": "volume.h24",

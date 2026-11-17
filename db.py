@@ -36,7 +36,28 @@ CREATE TABLE IF NOT EXISTS gmgn_orders(
   id INTEGER PRIMARY KEY, ts REAL, night TEXT, mode TEXT, mint TEXT, name TEXT, symbol TEXT, status TEXT, reason TEXT,
   size_usd REAL, sol_usd REAL, lamports INTEGER, entry_price REAL, peak REAL, last_price REAL, last_liq REAL,
   order_id TEXT, strategy_order_id TEXT, repair TEXT, tx TEXT, exit_reason TEXT, exit_price REAL, pnl_usd REAL, pct REAL,
-  closed_at REAL, quote TEXT, body TEXT, conditions TEXT, last_check REAL, sell_order_id TEXT);
+  closed_at REAL, quote TEXT, body TEXT, conditions TEXT, last_check REAL, sell_order_id TEXT, no_surge INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS stage_pings(night TEXT, stage TEXT, mint TEXT, ts REAL, PRIMARY KEY(night, stage, mint));
+CREATE TABLE IF NOT EXISTS overrides(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, kind TEXT, status TEXT, score INTEGER, reject_ts REAL,
+  reject_price REAL, price REAL, liq REAL, mc REAL, size_usd REAL, expires REAL, result TEXT, night TEXT);
+CREATE TABLE IF NOT EXISTS surges(id INTEGER PRIMARY KEY, ts REAL, mint TEXT, pct REAL, mc_from REAL, mc_to REAL, secs REAL, window_s REAL, status TEXT, night TEXT, scanned INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS rechecks(mint TEXT PRIMARY KEY, n INTEGER DEFAULT 0, next_at REAL, first_reason TEXT, last_reason TEXT, updated REAL);
+CREATE TABLE IF NOT EXISTS gmgn_approvals(id INTEGER PRIMARY KEY, ts REAL, night TEXT, mint TEXT, name TEXT, symbol TEXT,
+  mc REAL, price REAL, liq REAL, score INTEGER, reentry TEXT, status TEXT, expires REAL, result TEXT);
+CREATE TABLE IF NOT EXISTS strat_b_watch(mint TEXT PRIMARY KEY, name TEXT, symbol TEXT, added_at REAL, grad_at REAL,
+  top10 REAL, holders INTEGER, bundle_pct REAL, high REAL, low REAL, last_price REAL, status TEXT, reason TEXT, updated REAL, night TEXT);
+CREATE TABLE IF NOT EXISTS strat_b_evals(id INTEGER PRIMARY KEY, ts REAL, night TEXT, mint TEXT, name TEXT, symbol TEXT, kind TEXT,
+  status TEXT, reason TEXT, checks TEXT, price REAL);
+CREATE INDEX IF NOT EXISTS strat_b_evals_night ON strat_b_evals(night, id);
+CREATE TABLE IF NOT EXISTS strat_b_orders(id INTEGER PRIMARY KEY, ts REAL, night TEXT, mint TEXT, name TEXT, symbol TEXT, status TEXT,
+  size_usd REAL, signal_price REAL, entry_price REAL, tokens REAL, buy_fees_usd REAL, peak REAL, last_price REAL, last_liq REAL,
+  entry_liq REAL, mc_entry REAL, trail_armed INTEGER DEFAULT 0, opened_at REAL, closed_at REAL, exit_reason TEXT,
+  exit_signal_price REAL, exit_price REAL, sell_fees_usd REAL, pnl_usd REAL, pct REAL, why TEXT, last_seen REAL);
+CREATE TABLE IF NOT EXISTS gmgn_dips(
+  id INTEGER PRIMARY KEY, ts REAL, night TEXT, mint TEXT, name TEXT, symbol TEXT,
+  score INTEGER, reentry TEXT, high REAL, low REAL, last_price REAL, last_liq REAL, last_mc REAL,
+  start_price REAL, start_liq REAL, status TEXT, reason TEXT, expires REAL, updated REAL,
+  want_gmgn INTEGER DEFAULT 0, fomo_item TEXT, result TEXT);
 CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY, ts REAL, agent TEXT, kind TEXT, note TEXT, night TEXT);
 """
 
@@ -50,6 +71,26 @@ class DB:
         self.c.execute("PRAGMA journal_mode=WAL")
         self.c.execute("PRAGMA synchronous=NORMAL")
         self.c.executescript(SCHEMA)
+        self._migrate()
+
+    MIGRATIONS = (("gmgn_orders", "sell_tx", "TEXT"), ("gmgn_orders", "entry_src", "TEXT"),
+                  ("gmgn_orders", "confirm_push_at", "REAL"), ("gmgn_orders", "audit", "TEXT"),
+                  ("gmgn_orders", "grace_until", "REAL"), ("gmgn_orders", "exits_phase", "TEXT"),
+                  ("gmgn_orders", "no_surge", "INTEGER"),
+                  ("strat_b_watch", "checks", "TEXT"), ("strat_b_watch", "eval_at", "REAL"), ("strat_b_watch", "evals", "INTEGER"),
+                  ("strat_b_watch", "source", "TEXT"), ("strat_b_evals", "source", "TEXT"),
+                  # Strategy B LIVE (DECISION 66): real GMGN orders share strat_b_orders, told apart by mode
+                  ("strat_b_orders", "mode", "TEXT"), ("strat_b_orders", "lamports", "INTEGER"), ("strat_b_orders", "sol_usd", "REAL"),
+                  ("strat_b_orders", "order_id", "TEXT"), ("strat_b_orders", "tx", "TEXT"), ("strat_b_orders", "strategy_order_id", "TEXT"),
+                  ("strat_b_orders", "sell_order_id", "TEXT"), ("strat_b_orders", "sell_tx", "TEXT"), ("strat_b_orders", "entry_src", "TEXT"),
+                  ("strat_b_orders", "note", "TEXT"), ("strat_b_orders", "confirm_push_at", "REAL"))
+
+    def _migrate(self):
+        for table, col, typ in self.MIGRATIONS:
+            cols = {r[1] for r in self.c.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in cols:
+                self.c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.c.execute("UPDATE strat_b_orders SET mode='PAPER' WHERE mode IS NULL")      # rows from before DECISION 66
 
     def x(self, sql, args=()):
         return self.c.execute(sql, args)

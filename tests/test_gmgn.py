@@ -104,7 +104,11 @@ class FakeClient:
             raise gmgn.GmgnError(400, 400, "BAD", "nope")
         return {"order_id": "s1"}
 
-    async def strategy_orders(self):
+    async def strategy_cancel(self, body):
+        self.calls.append(("strategy_cancel", body))
+        return {"ok": True}
+
+    async def strategy_orders(self, base_token=None, kind="open"):
         return {"list": []}
 
     async def wallet_holdings(self):
@@ -115,6 +119,7 @@ class FakeClient:
 
 
 def trader(client=None, **settings):
+    settings.setdefault("gmgn.dip_enabled", False)   # existing buy tests stay immediate; dip tests opt in
     c, clock = make_ctx(**settings)
     t = GmgnTrader(c, client or FakeClient())
     c.gmgn = t
@@ -130,9 +135,9 @@ def test_caps_hard_limits():
     c, _, t = trader()
     s, n = c.s, c.night
     lam = lambda usd: int(usd / 70 * LAMP)
-    check_caps(s, c.db, n, "LIVE", 47.5, lam(47.5), 70, 10 * LAMP)
+    check_caps(s, c.db, n, "LIVE", 50, lam(50), 70, 10 * LAMP)
     with pytest.raises(CapError, match="per-trade cap"):
-        check_caps(s, c.db, n, "LIVE", 47.51, lam(47.51), 70, 10 * LAMP)
+        check_caps(s, c.db, n, "LIVE", 50.01, lam(50.01), 70, 10 * LAMP)
     with pytest.raises(CapError, match="per-trade cap"):          # lamports over cap even if size_usd says ok
         check_caps(s, c.db, n, "LIVE", 47.5, lam(60), 70, 10 * LAMP)
     with pytest.raises(CapError, match="wallet has"):
@@ -149,6 +154,7 @@ def test_caps_hard_limits():
 def test_night_spend_cap():
     c, _, t = trader()
     c.s.set("gmgn.max_tickets_night", 5, source="test", force=True)
+    c.s.set("gmgn.max_open", 6, source="test", force=True)                                   # spend cap under test, not max open
     for i in range(4):
         t._row(ts=1, night=c.night, mode="LIVE", mint=f"m{i}", status="open", size_usd=47.5)
     t._row(ts=1, night=c.night, mode="LIVE", mint="x", status="refused", size_usd=47.5)      # refusals don't count
@@ -160,7 +166,7 @@ def test_night_spend_cap():
 
 def test_caps_only_raisable_by_owner_confirm():
     c, _, t = trader()
-    for name in ("cap trade", "gmgn.cap_trade_usd", "cap tickets", "gmgn mode", "gmgn gate"):
+    for name in ("cap trade", "gmgn.cap_trade_usd", "cap tickets", "gmgn mode", "gmgn gate", "min trade", "max open"):
         with pytest.raises(config.SettingError):
             c.s.set(name, "100")
     from telegram import Telegram
@@ -170,9 +176,9 @@ def test_caps_only_raisable_by_owner_confirm():
     assert out[0].startswith("That command only works from the owner")
     tg.from_owner = True
     assert "Type CONFIRM CAP" in run(tg.command("cap trade 60"))[0]
-    assert c.s["gmgn.cap_trade_usd"] == 47.5
+    assert c.s["gmgn.cap_trade_usd"] == 50.0
     assert run(tg.command("confirm cap"))[0] == "Type CONFIRM CAP in capitals."
-    assert "47.50 -> $60.00" in run(tg.command("CONFIRM CAP"))[0]
+    assert "50.00 -> $60.00" in run(tg.command("CONFIRM CAP"))[0]
     assert c.s["gmgn.cap_trade_usd"] == 60.0
     row = c.db.one("SELECT * FROM change_log WHERE key='gmgn.cap_trade_usd' ORDER BY id DESC LIMIT 1")
     assert row["source"] == "telegram owner CONFIRM CAP" and json.loads(row["new"]) == 60.0
@@ -187,13 +193,16 @@ def test_paper_never_swaps_records_conditions():
     r = run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80))
     assert r["status"] == "paper" and "swap" not in fc.kinds() and fc.kinds() == ["quote"]
     o = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (M,))
-    assert o["mode"] == "PAPER" and o["size_usd"] == 47.5 and o["status"] == "open"
+    assert o["mode"] == "PAPER" and o["size_usd"] == 50 and o["status"] == "open"
     conds = json.loads(o["conditions"])
-    assert conds[0] == {"order_type": "loss_stop", "side": "sell", "price_scale": "6", "sell_ratio": "100"}
-    assert conds[1]["order_type"] == "loss_stop_trace" and conds[1]["drawdown_rate"] == "12"
+    assert conds[0] == {"order_type": "loss_stop", "side": "sell", "price_scale": "30", "sell_ratio": "100"}
+    assert [c["order_type"] for c in conds] == ["loss_stop", "profit_stop_trace"]
+    assert conds[1]["drawdown_rate"] == "12" and conds[1]["price_scale"] == "20"
+    assert o["exits_phase"] == "grace" and o["grace_until"] == c.clock() + 5 * 60
+    assert "stop -30% for first 5 min, then -6%" in c.notifier.sent[-1]["text"]
     assert json.loads(o["body"])["from_address"] == gmgn.MAIN_WALLET
     msg = c.notifier.sent[-1]["text"]
-    assert msg.startswith("PAPER · GMGN · Buy Gm · $47.50") and "not available on your GMGN plan" in msg
+    assert msg.startswith("PAPER · GMGN · Buy Gm · $50.00") and "1/4 open" in msg and "not available on your GMGN plan" in msg
     assert c.db.one("SELECT COUNT(*) n FROM positions")["n"] == 0          # FOMO book untouched
     assert run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80)) is None           # one per coin per night
     # plan-blocked quote is not re-called within 10 min
@@ -222,12 +231,12 @@ def test_halt_blocks_buys():
 
 
 def test_live_refuses_over_balance_and_alerts():
-    fc = FakeClient(plan_blocked=False, wallet_sol=0.5)
+    fc = FakeClient(plan_blocked=False, wallet_sol=0.022)        # under the $1 floor after reserve, fees and rent
     c, _, t = trader(fc)
     go_live(c)
     r = run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80))
-    assert r["status"] == "refused" and "wallet has" in r["reason"] and "swap" not in fc.kinds()
-    assert c.notifier.sent[-1]["text"].startswith("GMGN · Refused Gm: wallet has")
+    assert r["status"] == "refused" and "can't cover even $1.00" in r["reason"] and "swap" not in fc.kinds()
+    assert c.notifier.sent[-1]["text"].startswith("GMGN · Skipped Gm: free 0.0020 SOL can't cover even $1.00")
 
 
 def test_live_swap_with_exits_attached(monkeypatch):
@@ -239,7 +248,7 @@ def test_live_swap_with_exits_attached(monkeypatch):
     assert r["status"] == "open" and r["strategy_order_id"] == "st1"
     body = [b for k, b in fc.calls if k == "swap"][0]
     assert body["from_address"] == gmgn.MAIN_WALLET and body["condition_orders"] == conditions(c.s)
-    assert int(body["input_amount"]) == int(47.5 / 70 * LAMP) and body["priority_fee"] and body["tip_fee"]
+    assert int(body["input_amount"]) == int(50 / 70 * LAMP) and body["priority_fee"] and body["tip_fee"]
     assert "strategy_create" not in fc.kinds()
 
 
@@ -252,11 +261,12 @@ def test_missing_strategy_repair_creates_stop(monkeypatch):
     fc = FakeClient(plan_blocked=False, strategy_id=None)
     c, _, t = trader(fc)
     go_live(c)
+    c.s.set("risk.grace_min", 0, source="test")          # this test is the attach-repair path, not grace
     r = run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80))
     assert r == {"status": "open", "repair": "strategy"}
     sc = [b for k, b in fc.calls if k == "strategy_create"][0]
     assert sc["sub_order_type"] == "stop_loss" and sc["amount_in_percent"] == "100" and sc["from_address"] == gmgn.MAIN_WALLET
-    assert abs(float(sc["check_price"]) - 0.94 / 70) < 1e-9
+    assert abs(float(sc["check_price"]) - 0.94) < 1e-9              # USD (DECISION 52)
     assert c.db.one("SELECT strategy_order_id FROM gmgn_orders")["strategy_order_id"] == "s1"
 
 
@@ -265,6 +275,7 @@ def test_missing_strategy_repair_fails_market_sells_and_alerts(monkeypatch):
     fc = FakeClient(plan_blocked=False, strategy_id=None, strat_fail=True)
     c, _, t = trader(fc)
     go_live(c)
+    c.s.set("risk.grace_min", 0, source="test")
     r = run(t.on_pass(M, "Gm", "GM", 1.0, 50000, 80))
     assert r == {"status": "exiting", "repair": "market_sell"}
     sells = [b for k, b in fc.calls if k == "swap" and b["input_token"] == M]
@@ -298,7 +309,7 @@ def test_executor_isolation_fomo_unchanged():
     """FOMO push/position identical with GMGN on; a GMGN crash can't break FOMO."""
     from agents.executor import Executor
     async def body(with_gmgn, broken=False):
-        c, _ = make_ctx()
+        c, _ = make_ctx(**{"gmgn.dip_enabled": False})
         if with_gmgn:
             t = GmgnTrader(c, FakeClient())
             if broken:

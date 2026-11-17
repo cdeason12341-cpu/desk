@@ -84,14 +84,33 @@ def test_poll_once_runs_catchup_before_dex_and_empty_net_is_fine():
 
 
 class _FakeWS:
-    def __init__(self, messages, then_exc=None, hang_s=0):
+    def __init__(self, messages, then_exc=None, hang_s=0, hang_pong=False):
         self._messages = list(messages)
         self._then_exc = then_exc
         self._hang_s = hang_s
+        self._hang_pong = hang_pong
+        self._dead = asyncio.Event()
         self.sent = []
+        self.pings = 0
+        self.aborted = False
 
     async def send(self, raw):
         self.sent.append(raw)
+
+    async def ping(self):
+        self.pings += 1
+        if self._dead.is_set():
+            raise ConnectionError("closed")
+        if self._hang_pong:
+            await self._dead.wait()
+            raise ConnectionError("aborted")
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(0.001)
+        return fut
+
+    def abort(self):
+        self.aborted = True
+        self._dead.set()
 
     def __aiter__(self):
         return self
@@ -100,9 +119,16 @@ class _FakeWS:
         if self._messages:
             return self._messages.pop(0)
         if self._hang_s:
-            await asyncio.sleep(self._hang_s)
+            try:
+                await asyncio.wait_for(self._dead.wait(), timeout=self._hang_s)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                raise ConnectionError("aborted")
         if self._then_exc:
             raise self._then_exc
+        if self._dead.is_set():
+            raise ConnectionError("aborted")
         raise StopAsyncIteration
 
 
@@ -138,3 +164,34 @@ def test_ws_loop_stays_open_through_silence_then_handles_migration():
     assert c.coin(PUMP) is not None
     # the ping-timeout close is a real reconnect
     assert any("keepalive ping timeout" in (n or "") for n in notes)
+
+
+def test_ws_loop_aborts_and_reconnects_when_pong_hangs():
+    """A hung ping/drain must abort the socket and reconnect — not wait for TCP timeout."""
+    c, clock = make_ctx()
+    clock.t = NOW
+    sc = Scanner(c)
+    hung = _FakeWS([], hang_s=30, hang_pong=True)
+    ok = _FakeWS([json.dumps({"mint": PUMP, "signature": "sig", "pool": "pump-amm"})], hang_s=0.2)
+    calls = {"n": 0}
+
+    @asynccontextmanager
+    async def connect():
+        calls["n"] += 1
+        yield hung if calls["n"] == 1 else ok
+
+    async def run_loop():
+        task = asyncio.create_task(sc.ws_loop(connect=connect, ping_interval=0.05, ping_timeout=0.05, backoff_start=0.05))
+        await asyncio.sleep(0.35)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    run(run_loop())
+    assert hung.aborted and hung.pings >= 1
+    assert calls["n"] >= 2
+    notes = [r["note"] for r in c.db.rows("SELECT note FROM ws_events WHERE kind='reconnect'")]
+    assert any("pong timeout" in (n or "") for n in notes)
+    assert c.coin(PUMP) is not None

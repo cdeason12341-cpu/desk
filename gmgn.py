@@ -147,8 +147,9 @@ class Gmgn:
     async def query_order(self, order_id):
         return await self.request("GET", "/v1/trade/query_order", {"order_id": order_id, "chain": CHAIN}, signed=True)
 
-    async def strategy_orders(self, base_token=None, kind="open"):
-        q = {"chain": CHAIN, "group_tag": "STMix", "type": kind, "from": MAIN_WALLET}
+    async def strategy_orders(self, base_token=None, kind="open", group_tag="STMix"):
+        """group_tag: 'STMix' (smart_trade / swap condition orders) or 'LimitOrder' (limit_order stop_loss etc.)."""
+        q = {"chain": CHAIN, "group_tag": group_tag, "type": kind, "from": MAIN_WALLET}
         if base_token:
             q["base_token"] = base_token
         return await self.request("GET", "/v1/trade/strategy/orders", q, signed=True)

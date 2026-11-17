@@ -37,6 +37,13 @@ class Net:
         self.log = log or (lambda *a, **k: None)
         self.dex_calls = 0
 
+    async def _send(self, coro, timeout, label):
+        """Hard cap around every HTTP await. httpx timeouts can still stall on a wedged transport."""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise SourceError(f"{label} timeout {timeout}s") from None
+
     async def close(self):
         await self.http.aclose()
 
@@ -47,7 +54,7 @@ class Net:
             chunk = mints[i:i + 30]
             await self.dex_bucket.take()
             self.dex_calls += 1
-            r = await self.http.get("https://api.dexscreener.com/tokens/v1/solana/" + ",".join(chunk))
+            r = await self._send(self.http.get("https://api.dexscreener.com/tokens/v1/solana/" + ",".join(chunk), timeout=20), 22, "dexscreener")
             if r.status_code == 429:
                 raise RateLimited("dexscreener 429")
             if r.status_code != 200:
@@ -57,13 +64,29 @@ class Net:
                 out.extend(d)
         return out
 
+    DEX_LATEST = {"profiles": "https://api.dexscreener.com/token-profiles/latest/v1",
+                  "boosts": "https://api.dexscreener.com/token-boosts/latest/v1"}
+
+    async def dex_latest(self, kind: str) -> list:
+        """Newest DexScreener token profiles / boosts (all chains; the scanner keeps Solana). Shared dex bucket."""
+        await self.dex_bucket.take()
+        self.dex_calls += 1
+        r = await self._send(self.http.get(self.DEX_LATEST[kind], timeout=20), 22, f"dexscreener {kind}")
+        if r.status_code == 429:
+            raise RateLimited("dexscreener 429")
+        if r.status_code != 200:
+            raise SourceError(f"dexscreener {kind} {r.status_code}")
+        d = r.json()
+        return d if isinstance(d, list) else []
+
     async def gecko_new_pools(self, page: int = 1) -> dict:
         """Recent Solana pools (GeckoTerminal public API). Used only as a WS-gap backstop."""
-        r = await self.http.get(
+        r = await self._send(self.http.get(
             "https://api.geckoterminal.com/api/v2/networks/solana/new_pools",
             params={"page": page},
             headers={"Accept": "application/json"},
-        )
+            timeout=20,
+        ), 22, "gecko new_pools")
         if r.status_code == 429:
             raise RateLimited("gecko 429")
         if r.status_code != 200:
@@ -80,7 +103,7 @@ class Net:
 
     async def _rug(self, url):
         async with self.rug_sem:
-            r = await self.http.get(url, timeout=20)
+            r = await self._send(self.http.get(url, timeout=20), 22, "rugcheck")
         if r.status_code == 429:
             raise RateLimited("rugcheck 429")
         if r.status_code != 200:
@@ -91,7 +114,7 @@ class Net:
     async def rpc(self, method, params, timeout=30):
         body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         async with self.rpc_sem:
-            r = await self.http.post(self.s["desk.rpc_url"], json=body, timeout=timeout)
+            r = await self._send(self.http.post(self.s["desk.rpc_url"], json=body, timeout=timeout), timeout + 2, f"rpc {method}")
         if r.status_code == 429:
             raise RateLimited(f"rpc 429 {method}")
         try:
@@ -113,9 +136,10 @@ class Net:
 
     # ---- Jev
     async def jev(self, key, state, questions, timeout):
-        r = await self.http.post("https://api.typesafe.ai/v1/systemone",
+        r = await self._send(self.http.post("https://api.typesafe.ai/v1/systemone",
                                  headers={"Authorization": f"Bearer {key}"},
-                                 json={"model": "jev-latest", "state": state, "questions": questions}, timeout=timeout)
+                                 json={"model": "jev-latest", "state": state, "questions": questions}, timeout=timeout),
+                             timeout + 2, "jev")
         if r.status_code == 429:
             raise RateLimited("jev 429")
         if r.status_code != 200:

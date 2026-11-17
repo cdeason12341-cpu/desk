@@ -78,10 +78,19 @@ class Executor:
         mint = scan["mint"]
         mode = c.mode()
         link = links.coin_url(mint, "solana")
+        # analyst paper bypass (DECISION 35) / owner paper override (DECISION 36): failed scoring, PAPER fill only, never GMGN
+        override = bool(item.get("override"))
+        bypass = bool(item.get("bypass")) or override
+        tag, tag_reason = ("OVERRIDE", "owner override") if override else ("BYPASS", "analyst bypass")
+        if bypass and mode != "PAPER":
+            self.log.info(f"{iso()}\t{mint}\t{tag.lower()} refused: desk mode {mode}")
+            return None                                       # never a LIVE signal for a coin that failed the analyst
         if c.db.one("SELECT id FROM executions WHERE mint=? AND night=? AND status IN ('sent','bought')", (mint, c.night)):
             return None                                       # 1 push per coin per night
         if c.db.one("SELECT id FROM positions WHERE mint=? AND status IN ('open','exiting')", (mint,)):
             return None                                       # never a 2nd buy on an open position
+        if not item.get("from_dip") and c.db.one("SELECT id FROM gmgn_dips WHERE mint=? AND night=? AND status IN ('watching','buying')", (mint, c.night)):
+            return None                                       # already waiting for a dip on this coin
         base = {"agent": "executor", "mint": mint, "signalPrice": None, "sizeUsd": 0, "stackPct": 0,
                 "link": link, "mode": mode, "status": "skipped", "reason": None}
         if pair is None:
@@ -91,25 +100,40 @@ class Executor:
             except Exception:
                 pair = None
         price = fields.get(pair, "priceUsd") if pair else None
+        liq = float(fields.get(pair, "liquidity.usd") or 0) if pair else 0
+        if item.get("from_dip") and item.get("dip_price"):
+            price = float(item["dip_price"])
+            if item.get("dip_liq") is not None:
+                liq = float(item["dip_liq"] or 0)
         stack, free = c.balance(), c.free()
         if not price:
             out = dict(base, reason="no price")
             self._record(out, stack, {}); c.skip(mint, "executor", "no price")
             return out
         price = float(price)
-        liq = float(fields.get(pair, "liquidity.usd") or 0)
         scan_liq = scan.get("liquidityUsd") or 0
-        if scan_liq and liq < scan_liq * (1 - s["executor.recheck_liq_drop_pct"] / 100.0):
+        if (not item.get("from_dip")) and scan_liq and liq < scan_liq * (1 - s["executor.recheck_liq_drop_pct"] / 100.0):
             out = dict(base, signalPrice=price, reason=f"liquidity down {100*(1-liq/scan_liq):.0f}%")
             self._record(out, stack, {}); c.skip(mint, "executor", out["reason"])
             return out
         ref = item.get("ref_price")
-        if ref and price > ref * (1 + s["executor.recheck_price_up_pct"] / 100.0):
+        if (not item.get("from_dip")) and ref and price > ref * (1 + s["executor.recheck_price_up_pct"] / 100.0):
             out = dict(base, signalPrice=price, reason=f"price up {100*(price/ref-1):.0f}% since signal")
             self._record(out, stack, {}); c.skip(mint, "executor", out["reason"])
             return out
-        if getattr(c, "gmgn", None) is not None:          # GMGN hands-off mode: own task, own caps; FOMO flow unchanged
-            t = asyncio.ensure_future(c.gmgn.on_pass(mint, scan.get("name") or c.label(mint), scan.get("symbol"), price, liq, an.get("score")))
+        # DECISION 64: PAPER auto-fill waits for the same dip as GMGN so the paper test stays comparable
+        dip_on = bool(s["gmgn.dip_enabled"]) and not bypass and not item.get("from_dip")
+        if dip_on and mode == "PAPER":
+            import dip as _dip
+            name = scan.get("name") or c.label(mint)
+            await _dip._watch(c, trader=getattr(c, "gmgn", None), executor=self).start(
+                mint, name, scan.get("symbol"), price, liq, an.get("score"),
+                want_gmgn=getattr(c, "gmgn", None) is not None, fomo_item=item,
+                mc=fields.get(pair, "marketCap") if pair else None)
+            return dict(base, signalPrice=price, status="watching", reason="waiting for a dip")
+        if not bypass and getattr(c, "gmgn", None) is not None:   # GMGN hands-off: own task, own caps. bypass items NEVER reach GMGN (paper or live)
+            t = asyncio.ensure_future(c.gmgn.on_pass(mint, scan.get("name") or c.label(mint), scan.get("symbol"), price, liq, an.get("score"),
+                                                        mc=fields.get(pair, "marketCap") if pair else None))
             self.gmgn_tasks.add(t); t.add_done_callback(self.gmgn_tasks.discard)
         sz = size_ticket(s, stack, free, liq)
         if sz["status"] != "ok":
@@ -119,19 +143,32 @@ class Executor:
         size = sz["size"]
         pct = 100.0 * size / stack if stack else 0
         name = scan.get("name") or c.label(mint)
-        text = buy_text(c.prefix(), name, size, pct, an.get("score"), s["risk.stop_pct"], s["risk.trail_pct"])
+        prefix = c.prefix()
+        if bypass:
+            prefix += f"{tag} · score {an.get('score')} · "
+        text = buy_text(prefix, name, size, pct, an.get("score"), s["risk.stop_pct"], s["risk.trail_pct"])
         ok = await self.push(text, buy_buttons(mint, mode), mint)
         out = dict(base, signalPrice=price, sizeUsd=size, stackPct=round(pct, 2), status="sent")
+        if bypass:
+            out["bypass"] = True
+            if override:
+                out["override"] = True
+        sig_reason = tag_reason if bypass else None
+        if not ok:
+            sig_reason = "push failed" if not bypass else f"{tag_reason}; push failed"
         c.db.x("INSERT INTO signals(ts,mint,price,size_usd,stack_pct,mode,status,reason,night) VALUES(?,?,?,?,?,?,?,?,?)",
-               (c.clock(), mint, price, size, round(pct, 2), mode, "sent", None if ok else "push failed", c.night))
+               (c.clock(), mint, price, size, round(pct, 2), mode, "sent", sig_reason, c.night))
         if mode == "PAPER":
             out["status"] = "bought"                         # paper fills at the signal price when the push goes out
+            if bypass:
+                out["reason"] = tag_reason
             if not ok:
-                out["reason"] = "push failed"
+                out["reason"] = f"{tag_reason}; push failed" if bypass else "push failed"
             c.db.x("UPDATE signals SET status='bought' WHERE mint=? AND night=? AND status='sent'", (mint, c.night))
             self._record(out, stack, sz)
             self.bar[mint] = {"pct": 100, "ts": c.clock()}
-            self.open_position(mint, name, scan.get("symbol"), price, size, pct, liq)
+            # bypass positions: name labelled so the app, activity and exit pushes show it; normal risk exits apply
+            self.open_position(mint, f"{tag} · {name}" if bypass else name, scan.get("symbol"), price, size, pct, liq)
             return out
         if not ok:
             out.update(status="skipped", reason="push failed")

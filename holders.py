@@ -18,8 +18,17 @@ async def fetch_accounts(net, mint: str, timeout=60) -> list[dict]:
     return out
 
 
+# Pool-vault owners that are a program-wide authority, not the pool address (DECISION 51: non-pump DEX pools).
+# They only ever hold AMM reserves, so excluding them from holder math is always correct.
+AMM_AUTHORITIES = {
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",   # Raydium AMM v4 authority
+    "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",   # Raydium CPMM authority (LetsBonk graduations)
+    "HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC",   # Meteora DAMM v2 pool authority
+}
+
+
 def excluded_owners(pool: str | None, mint: str, known_amm: list[str] | None = None) -> set[str]:
-    ex = set(known_amm or [])
+    ex = set(known_amm or []) | AMM_AUTHORITIES
     if pool:
         ex.add(pool)
     bc = solana.bonding_curve(mint) if solana.is_pubkey(mint) else None

@@ -63,7 +63,11 @@ def test_gmgn_section_shape_and_values():
     p = g["open"][0]
     assert p["name"] == "Nyajira" and p["sizeUsd"] == 65.0 and p["mode"] == "LIVE"
     assert p["pct"] == 10.0 and p["pnlUsd"] == 6.5
-    assert p["exits"] == {"stopPct": 6, "trailPct": 12, "trailStartPct": 20, "attached": True, "repair": None}
+    assert p["exits"]["stopPct"] == 6 and p["exits"]["trailPct"] == 12 and p["exits"]["trailStartPct"] == 20
+    assert p["exits"]["attached"] is True and p["exits"]["repair"] is None
+    assert p["exits"]["phase"] == "normal" and p["exits"]["graceMin"] == 0
+    assert p["exits"]["label"] == "stop -6% · trail 12%"
+    assert p["exits"]["graceStopPct"] == 30 and p["exits"]["normalStopPct"] == 6 and p["exits"]["graceUntil"] is None
     assert p["link"] == links.coin_url(M)
     o = g["orders"][0]
     assert o["status"] == "open" and o["sizeUsd"] == 65.0 and o["link"] == links.coin_url(M)

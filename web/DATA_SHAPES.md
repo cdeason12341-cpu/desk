@@ -146,13 +146,17 @@ reveals the four answers and the failed reasons.
     "link":"…"},
    {"t":"…Z","stage":"recheck","outcome":"recheck","recheckN":2,"reason":"recheck 2: liq $5.4K · next at 30m"},
    {"t":"…Z","stage":"room","outcome":"waiting","reason":"waiting room"},
-   {"t":"…Z","stage":"auditor","outcome":"fail","layer":3,"layerName":"Dev wallet","reason":"dev sold","passed":false}
- ]}
+   {"t":"…Z","stage":"auditor","outcome":"fail","layer":3,"layerName":"Dev wallet","reason":"dev sold","passed":false},
+   {"t":"…Z","stage":"dip","outcome":"watching","reason":"need -5% from high · buy anyway in 18s","high":0.0012,"lastPrice":0.00118,"dropPct":1.7}
+ ],
+ "dips":[{"mint","name","symbol","high","low","lastPrice","startPrice","dropPct","needPct":5,"timeoutS":30,
+          "expiresAt":"…Z","since":"…Z","link":"…r=savipww…"}]}
 ```
 Every item also carries `"liq"` and `"mc"` (USD numbers from the scan JSON `liquidityUsd` /
 `marketCapUsd`, or null). Scanner / recheck / room rows show them as `MC $31.2K · liq $12.0K`.
-`stage` is `scanner`, `recheck`, `room`, `auditor`, or `analyst`.
-`outcome` is `kill`, `pass`, `fail`, `recheck`, `waiting`, `buy`, or `no_buy`.
+`stage` is `scanner`, `recheck`, `room`, `auditor`, `analyst`, or `dip` (DECISION 64).
+`outcome` is `kill`, `pass`, `fail`, `recheck`, `waiting`, `buy`, `no_buy`, or for dip rows `watching`, `dip_buy`, `timeout_buy`, `skipped`.
+`dips` is the coins currently waiting for a 5% dip (or a 30s market buy if none comes).
 `bars` are the current Analyst alive / organic / chase thresholds (chase is a max).
 `minScore` is the current `analyst.min_score` buy bar. Analyst rows in the app highlight
 green when `score >= minScore`. BUY means the Analyst passed every bar; NO BUY otherwise.
@@ -166,7 +170,7 @@ Real = GMGN LIVE orders + LIVE positions. Paper = PAPER positions (FOMO) + GMGN 
 Row: position_view / gmgn_order fields plus `source` ("FOMO"|"GMGN"), `open`, `bypass` (bool), `score` (analyst score for
 bypass rows), `closedAt`. No broker ids, quotes, bodies or tx.
 
-## strat_b.json (Strat B tab) — Strategy B, PAPER ONLY (DECISION 54)
+## strat_b.json (Strat B tab) — Strategy B (DECISION 54; B LIVE since DECISION 66)
 Simulated strategy, separate from GMGN and from trades.json. Never real money; the app shows it with a PAPER badge.
 ```json
 {"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","enabled":true,"night":"…",
@@ -179,9 +183,22 @@ Simulated strategy, separate from GMGN and from trades.json. Never real money; t
  "closed":[{… "status":"closed","pnlUsd":20.1,"pct":40.2,"exitReason":"stop|take profit 2x|spike|trail|time stop|liquidity pulled","exitPrice":…,"closedAt":"…Z"}],
  "rules":[{"k":"Stop","v":"-35% from entry, from the first second","why":"…"}]}
 ```
-`state.json` also carries `stratB`: `{label, mode, enabled, bankroll, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, watching, openCount}`.
+`state.json` also carries `stratB`: `{label, mode, enabled, bankroll, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, watching, openCount, live:{label, active, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, freeSol, refusedTonight, openCount}}`.
 
-## strat_b_live.json (Strat B → Live) — PAPER ONLY (DECISION 60)
+**B LIVE (DECISION 66, `v`:2).** Top-level paper fields above stay paper-only (`mode='PAPER'` rows); `mode`/`label` are the
+current Strategy B mode (`"LIVE"` → `"B LIVE"`). Real-money results sit under `live`, never mixed with the paper bankroll:
+```json
+"live":{"label":"B LIVE","mode":"LIVE","active":true,"pnlAllUsd":-4.2,"pnlTonightUsd":-4.2,"closedTonight":1,"closedAll":1,
+        "wins":0,"losses":1,"winRatePct":0.0,"profitFactor":null,"unrealizedUsd":0,"inPositions":0,
+        "wallet":{"sol":0.0012,"usd":0.08,"solUsd":70.1,"updatedAt":"…Z"},"freeSol":0.0,"reserveSol":0.02,
+        "refusedTonight":3,"lastRefusal":{"t":"…Z","name":"Cat","reason":"free 0.0000 SOL can't cover even $1.00 …"},
+        "open":[{… "mode":"LIVE","label":"B LIVE","status":"open|submitting|pending|exiting","sol":0.71,"stopOnGmgn":true,"note":null}],
+        "closed":[{… "mode":"LIVE","label":"B LIVE","pnlUsd":-4.2,"pct":-35.4,"exitReason":"stop (GMGN server-side)|take profit 2x|…"}],
+        "failed":[…]}
+```
+Every order row also has `mode` ("PAPER"|"LIVE") and `label` ("B PAPER"|"B LIVE"). No order ids or tx signatures.
+
+## strat_b_live.json (Strat B → Live) — DECISION 60 (`mode`/`label` follow strat_b.mode; items may have status `refused` in LIVE)
 ```json
 {"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","night":"…","enabled":true,
  "counts":{"watching":3,"skippedTonight":9,"boughtTonight":1,"expiredTonight":2,"evaluationsTonight":41},

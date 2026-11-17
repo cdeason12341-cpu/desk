@@ -34,7 +34,7 @@ def test_max_age_set_validates_and_logs():
     row = c.db.one("SELECT key, old, new, source FROM change_log WHERE key='scanner.max_age_h' ORDER BY id DESC")
     assert row["source"] == "telegram"
     assert json.loads(row["old"]) == 5 and json.loads(row["new"]) == 8
-    for bad in (0, 25, 4.5, "abc"):
+    for bad in (-1, 25, 4.5, "abc"):          # 0 = off (no age limit) is valid since 2026-11-15
         try:
             c.s.set("max age", bad, source="test")
             raise AssertionError(f"accepted {bad}")
@@ -63,10 +63,11 @@ def test_decide_passes_older_coin_inside_5h():
 
 
 def test_existing_filters_still_kill():
-    c, _ = make_ctx()
+    c, _ = make_ctx(**{"scanner.sources": "pump"})          # pump-only mode keeps the old pump-mint gate
     age = 150
     v, r = decide(c.s, _coin(age, mint="x" * 40 + "xxxx"), _ok_pair(), 10.0, [], NOW)
     assert v == "kill" and "pump" in r
+    c, _ = make_ctx()
     usdc = _ok_pair()
     usdc["quoteToken"] = {"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "USDC"}
     v, r = decide(c.s, _coin(age), usdc, 10.0, [], NOW)

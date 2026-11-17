@@ -57,6 +57,7 @@ def pair(mint, price=1.0, liq=50000, h1=10.0, m5=-1.0, vol_h1=30000, buys_h1=200
 
 
 def make_ctx(**settings):
+    settings.setdefault("gmgn.dip_enabled", False)   # existing buy tests stay immediate; dip tests opt in
     db = DB(":memory:")
     s = config.Settings(db)
     for k, v in settings.items():

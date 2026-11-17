@@ -30,6 +30,7 @@ def test_rules():
 
 
 def open_paper(c, clock, mint, name, price=1.0):
+    c.s.set("gmgn.dip_enabled", False, source="test")
     ex = Executor(c)
     c.net.pairs[mint] = pair(mint, price=price, liq=100000, name=name, symbol=name)
     c.db.x("INSERT INTO coins(mint,name,symbol,status,migrated_at,first_seen,night) VALUES(?,?,?,?,?,?,?)",

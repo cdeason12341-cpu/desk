@@ -1,5 +1,6 @@
 """AGENT 3 · ANALYST. Builds a numbers-only state, asks Jev 4 closed 'noul' questions; code applies the gate."""
 from __future__ import annotations
+import stage_pings
 import asyncio, hashlib, json, time
 import fields, secrets_store
 from ctx import iso
@@ -95,21 +96,33 @@ class Analyst:
                 await asyncio.sleep(5)
             try:
                 res = await self.run(item["scan"], item["audit"])
-                if res and res["passed"] and self.c.bus:
-                    self.c.bus.executor.put_nowait({"scan": item["scan"], "audit": item["audit"], "analyst": res,
-                                                    "ref_price": res.get("_priceUsd")})
+                if res and self.c.bus:
+                    fwd = self.forward(item, res)
+                    if fwd is not None:
+                        self.c.bus.executor.put_nowait(fwd)
             except Exception as e:
                 self.c.error("analyst", "run", f"{item['scan'].get('mint')} {str(e)[:300]}")
+
+    def forward(self, item, res):
+        """What goes to the executor. Passed coins: unchanged. Failed coins: only when analyst.paper_bypass is on AND the
+        desk is PAPER, flagged bypass=True (the executor never sends those to GMGN). Otherwise None."""
+        base = {"scan": item["scan"], "audit": item["audit"], "analyst": res, "ref_price": res.get("_priceUsd")}
+        if res.get("passed"):
+            return base
+        if self.c.s["analyst.paper_bypass"] and self.c.mode() == "PAPER":
+            self.log.info(f"{iso()}\t{res.get('mint')}\tbypass\tscore={res.get('score')}\t{res.get('failed')}")
+            return dict(base, bypass=True)
+        return None
 
     async def fresh_pair(self, mint):
         from agents.scanner import pick_pair
         return pick_pair(await self.c.net.dex_tokens([mint]), mint)
 
-    async def run(self, scan, audit, pair=None):
+    async def run(self, scan, audit, pair=None, reentry=False):
         c, s = self.c, self.c.s
         mint = scan["mint"]
-        if c.db.one("SELECT id FROM analyses WHERE mint=? AND night=?", (mint, c.night)):
-            return None                                     # never re-asks the same coin
+        if not reentry and c.db.one("SELECT id FROM analyses WHERE mint=? AND night=?", (mint, c.night)):
+            return None                                     # never re-asks the same coin (a re-entry is a fresh decision, DECISION 46)
         if pair is None:
             try:
                 pair = await self.fresh_pair(mint)
@@ -134,8 +147,9 @@ class Analyst:
         out = {"agent": "analyst", "mint": mint,
                "answers": {k: (round(v, 4) if isinstance(v, (int, float)) else v) for k, v in (answers or {}).items()},
                "score": score, "passed": passed, "failed": failed, "model": model, "inputTokens": itok}
-        out_db = dict(out)
         out["_priceUsd"] = float(ref) if ref else None
+        out_db = dict(out)
+        out_db["priceUsd"] = out_db.pop("_priceUsd")             # price at decision (owner override freshness check)
         c.db.x("INSERT INTO analyses(ts,mint,passed,failed,score,model,input_tokens,output_tokens,json,night) VALUES(?,?,?,?,?,?,?,?,?,?)",
                (c.clock(), mint, 1 if passed else 0, json.dumps(failed), score, model, itok, otok, json.dumps(out_db), c.night))
         h = hashlib.sha256(state.encode()).hexdigest()[:12]
@@ -147,6 +161,21 @@ class Analyst:
             who = "Analyst (rules)" if model == "rules" else "Analyst"
             c.activity("reject", f"Rejected {c.label(mint)}", f"{who} · {failed[0]}", "Skipped", "", mint, "analyst", "red")
             c.skip(mint, "analyst", failed[0])
+        nm = scan.get("name") or c.label(mint)
+        if reentry:                                     # DECISION 46: labelled, own dedupe key, no override buttons
+            txt = (f"🔁 RE-ENTRY · " + stage_pings.analyst_pass_text(nm, score)) if passed else \
+                  f"🔁 RE-ENTRY · Analyst · score {score} (min {s['analyst.min_score']}) · {nm}\nNo re-entry: {', '.join(str(f) for f in (failed or [])[:3]) or 'rejected'}."
+            t = stage_pings.ping(c, "reentry_analyst", mint, txt, stage_pings.coin_button(mint))
+            if passed and t is not None:
+                await asyncio.wait({t}, timeout=stage_pings.WAIT_S)
+        elif passed:
+            t = stage_pings.ping(c, "analyst", mint, stage_pings.analyst_pass_text(nm, score), stage_pings.coin_button(mint))
+            if t is not None:
+                await asyncio.wait({t}, timeout=stage_pings.WAIT_S)     # pass ping lands before the buy push; never blocks > 3s
+        else:
+            txt, btns = stage_pings.analyst_reject(c, mint, nm, score, failed,
+                                                  bool(s["analyst.paper_bypass"]) and c.mode() == "PAPER")
+            stage_pings.ping(c, "analyst", mint, txt, btns)
         self.live.pop(mint, None)
         c.event("analysis", mint)
         return out

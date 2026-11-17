@@ -42,7 +42,7 @@ def test_paper_start_skip_warns(tmp_path):
 
 
 def test_executor_paper_fill_and_skip():
-    c, clock = make_ctx()
+    c, clock = make_ctx(**{"gmgn.dip_enabled": False})
     ex = Executor(c)
     c.net.pairs[M] = pair(M, price=2.0, liq=60000, name="EXC", symbol="EXC")
     out = run(ex.run({"scan": {"mint": M, "name": "EXC", "liquidityUsd": 60000}, "analyst": {"score": 77}, "ref_price": 2.0}))

@@ -1,7 +1,8 @@
 """Plan B writer: builds the app's JSON files, encrypts each (crypto.py), bundles them into the secret gist,
 and dispatches the Pages workflow pinned to that gist revision. Debounced on events + heartbeat; never overlaps."""
 from __future__ import annotations
-import asyncio, json, os, time
+import asyncio, json, os, sys, time, urllib.parse, urllib.request
+import datetime as dt
 from pathlib import Path
 import config, crypto, links, secrets_store
 from ctx import AGENTS, ROOT, iso
@@ -10,6 +11,14 @@ DATA = ROOT / "data"
 REPO = "cdeason12341-cpu/desk"
 DEBOUNCE_S = 20
 MAX_COIN_FILES = 150
+PUBLISH_TIMEOUT_S = 90
+SH_TIMEOUT_S = 45
+WAIT_IDLE_S = 45
+PAGES_ORIGIN = "https://cdeason12341-cpu.github.io/desk"
+STALE_LIVE_S = 15 * 60
+VERIFY_AFTER_DISPATCH_S = 60
+VERIFY_OK_EVERY_S = 300
+ALERT_COOLDOWN_S = 30 * 60
 
 
 class Builder:
@@ -20,7 +29,14 @@ class Builder:
 
     def build(self) -> dict:
         files = {"state.json": self.state(), "chart.json": self.chart(), "activity.json": self.activity(),
-                 "account.json": self.account(), "scores.json": self.scores()}
+                 "account.json": self.account(), "scores.json": self.scores(), "feed.json": self.feed(),
+                 "trades.json": self.trades(), "scanner.json": self.scanner_feed()}
+        sb = self.strat_b()
+        if sb is not None:
+            files["strat_b.json"] = sb
+        sl = self.strat_b_live()
+        if sl is not None:
+            files["strat_b_live.json"] = sl
         for a in AGENTS:
             files[f"agents/{a}.json"] = self.agent(a)
         for m in self.coin_mints():
@@ -29,6 +45,35 @@ class Builder:
             if au:
                 files[f"audit/{m}.json"] = au
         return files
+
+    def strat_b(self):
+        """Strategy B scorecard: its own file, never mixed into trades.json real/paper (DECISION 54). Paper fields at the
+        top level, real-money B LIVE results under 'live' (DECISION 66)."""
+        try:
+            import strat_b
+            return strat_b.scorecard(self.c)
+        except Exception as e:
+            self.c.error("publisher", "strat_b", str(e)[:200])
+            return None
+
+    def strat_b_live(self):
+        """Strategy B live view: newest evaluations tonight + watchlist (DECISION 60)."""
+        try:
+            import strat_b
+            return strat_b.live_feed(self.c)
+        except Exception as e:
+            self.c.error("publisher", "strat_b_live", str(e)[:200])
+            return None
+
+    def strat_b_summary(self):
+        sb = self.strat_b()
+        if sb is None:
+            return None
+        lv = sb.get("live") or {}
+        return {k: sb[k] for k in ("label", "mode", "enabled", "bankroll", "pnlAllUsd", "pnlTonightUsd", "closedAll",
+                                   "wins", "losses", "winRatePct", "watching")} | {"openCount": len(sb["open"])} | \
+            {"live": {k: lv.get(k) for k in ("label", "active", "pnlAllUsd", "pnlTonightUsd", "closedAll", "wins", "losses",
+                                             "winRatePct", "freeSol", "refusedTonight")} | {"openCount": len(lv.get("open") or [])}}
 
     # ---- helpers
     def hb(self):
@@ -77,11 +122,30 @@ class Builder:
                 "counts": self.night_counts(), "ticket": tc, "wsReconnects1h": recon,
                 "layer8Down": bool(self.d.auditor.gpa_down_alerted),
                 "signupUrl": links.SIGNUP_URL,
-                "gmgn": self.gmgn()}
+                "gmgn": self.gmgn(),
+                "realPnl": (lambda side: {"pnlTonightUsd": side["pnlTonightUsd"], "pnlAllUsd": side["pnlAllUsd"],
+                                          "closedTonight": side["closedTonight"], "wins": side["wins"],
+                                          "losses": side["losses"]})(self.trades()["real"]),
+                "stratB": self.strat_b_summary(),
+                "push": self.push_status()}
+
+    def push_status(self):
+        wp = getattr(self.d, "webpush", None)
+        try:
+            return wp.status() if wp is not None else None
+        except Exception as e:
+            self.c.error("publish", "push_status", str(e)[:200])
+            return None
 
     def chart(self):
-        rows = self.c.db.rows("SELECT ts, balance FROM balance WHERE mode=? ORDER BY ts DESC LIMIT 500", (self.c.mode(),))[::-1]
-        marks = self.c.db.rows("SELECT mint,name,opened_at,closed_at,exit_reason,pnl_usd,pct,stop_pct FROM positions WHERE mode=? ORDER BY opened_at DESC LIMIT 100", (self.c.mode(),))
+        since = 0.0
+        if self.c.mode() == "PAPER":                    # paper test restarted (DECISION 58): chart starts there, history kept in the DB
+            try:
+                since = float(self.c.db.meta("paper_test_since") or 0)
+            except (TypeError, ValueError):
+                since = 0.0
+        rows = self.c.db.rows("SELECT ts, balance FROM balance WHERE mode=? AND ts>=? ORDER BY ts DESC LIMIT 500", (self.c.mode(), since))[::-1]
+        marks = self.c.db.rows("SELECT mint,name,opened_at,closed_at,exit_reason,pnl_usd,pct,stop_pct FROM positions WHERE mode=? AND opened_at>=? ORDER BY opened_at DESC LIMIT 100", (self.c.mode(), since))
         return {"v": 1, "ts": iso(), "mode": self.c.mode(),
                 "points": [{"t": iso(r["ts"]), "balance": round(r["balance"], 2)} for r in rows]
                           + [{"t": iso(), "balance": round(self.c.balance(), 2)}],
@@ -135,6 +199,39 @@ class Builder:
                            "positions": [self.position_view(p) for p in pos]}
         return base
 
+    TG_BOT_DEFAULT = "Denarpobot"
+
+    def tg_bot(self):
+        """Desk bot @username for the app's override deep links (getMe, cached in meta). Not a secret."""
+        return self.c.db.meta("tg_username") or self.TG_BOT_DEFAULT
+
+    def _ov_ctx(self):
+        """Inputs for the per-button override flags (DECISION 36/37).
+        hard: mints where BOTH buttons hide: any GMGN order tonight not refused/skipped, any FOMO buy tonight that did not
+              come from the analyst paper bypass, or an owner override already used.
+        paper: mints with an analyst-bypass PAPER buy tonight: only the Paper button hides."""
+        n, db = self.c.night, self.c.db
+        bypass = {r["mint"] for r in db.rows("SELECT mint FROM signals WHERE night=? AND reason LIKE 'analyst bypass%'", (n,))}
+        bypass |= {r["mint"] for r in db.rows("SELECT mint FROM executions WHERE night=? AND reason LIKE 'analyst bypass%'", (n,))}
+        bypass |= {r["mint"] for r in db.rows("SELECT mint FROM positions WHERE night=? AND name LIKE 'BYPASS · %'", (n,))}
+        fomo = {r["mint"] for r in db.rows("SELECT mint FROM positions WHERE night=? UNION "
+                                            "SELECT mint FROM executions WHERE night=? AND status='bought'", (n, n))}
+        gm = {r["mint"] for r in db.rows("SELECT mint FROM gmgn_orders WHERE night=? AND status NOT IN ('refused','skipped')", (n,))}
+        used = self.d.overrides.used_mints() if getattr(self.d, "overrides", None) else set()
+        hard = gm | used | (fomo - bypass)
+        latest = {r["mint"]: r["t"] for r in db.rows("SELECT mint, MAX(ts) t FROM analyses WHERE night=? GROUP BY mint", (n,))}
+        return {"hard": hard, "paper": bypass, "latest": latest}
+
+    def _ov_flags(self, mint, passed, ts, ov):
+        """{'overridable','overridablePaper','overridableReal'}: only on the newest Analyst decision for a coin when it
+        was a reject, at most 30 min old, and not blocked (see _ov_ctx)."""
+        from overrides import REJECT_MAX_AGE_S
+        base = (not passed and ov["latest"].get(mint) == ts and (self.c.clock() - ts) <= REJECT_MAX_AGE_S
+                and mint not in ov["hard"])
+        real = bool(base)
+        paper = bool(base and mint not in ov["paper"])
+        return {"overridable": real or paper, "overridablePaper": paper, "overridableReal": real}
+
     def scores(self):
         """Last ~50 analyst decisions tonight, for the phone app's Analyst scores list."""
         c, s, n = self.c, self.c.s, self.c.night
@@ -144,6 +241,7 @@ class Builder:
             "SELECT mint FROM executions WHERE night=? AND status='bought' UNION "
             "SELECT mint FROM gmgn_orders WHERE night=? AND status NOT IN ('refused','skipped')",
             (n, n, n))}
+        ov = self._ov_ctx()
         items = []
         for r in rows:
             try:
@@ -173,13 +271,241 @@ class Builder:
                             "flush": ans.get("flush"), "chase": ans.get("chase")},
                 "passed": bool(r["passed"]), "failed": failed,
                 "bought": mint in bought, "link": links.coin_url(mint),
+                **self._ov_flags(mint, bool(r["passed"]), r["ts"], ov),
             })
-        return {"v": 1, "ts": iso(), "night": n, "minScore": s["analyst.min_score"], "items": items}
+        return {"v": 1, "ts": iso(), "night": n, "minScore": s["analyst.min_score"], "tgBot": self.tg_bot(), "items": items}
+
+    def feed(self):
+        """Newest-first live evaluation stream for the phone app, last ~100 events tonight."""
+        import re
+        c, s, n = self.c, self.c.s, self.c.night
+        bars = {"alive_6h": s["analyst.min_alive_6h"], "organic": s["analyst.min_organic"],
+                "chase": s["analyst.max_chase"]}
+
+        def short(mint):
+            return (mint[:4] + "…" + mint[-4:]) if mint and len(mint) >= 8 else (mint or "")
+
+        def names(mint, body=None):
+            co = c.coin(mint) or {}
+            body = body if isinstance(body, dict) else {}
+            return co.get("name") or body.get("name"), co.get("symbol") or body.get("symbol")
+
+        def body_of(row):
+            try:
+                b = json.loads(row["json"] or "{}")
+            except Exception:
+                b = {}
+            return b if isinstance(b, dict) else {}
+
+        def recheck_n(reason, body):
+            if body.get("recheck") is not None:
+                try:
+                    return int(body["recheck"])
+                except (TypeError, ValueError):
+                    pass
+            m = re.match(r"recheck\s+(\d+)", reason or "")
+            return int(m.group(1)) if m else None
+
+        def item(ts, mint, body, **kw):
+            name, symbol = names(mint, body)
+            out = {"t": iso(ts), "mint": mint, "mintShort": short(mint), "name": name, "symbol": symbol,
+                   "stage": None, "outcome": None, "reason": None, "recheckN": None,
+                   "layer": None, "layerName": None, "score": None, "answers": None,
+                   "passed": None, "failed": [], "link": links.coin_url(mint), "_ts": ts,
+                   "liq": body.get("liquidityUsd") if isinstance(body, dict) else None,
+                   "mc": body.get("marketCapUsd") if isinstance(body, dict) else None}
+            out.update(kw)
+            return out
+
+        items = []
+        # entered the waiting room (first seen tonight)
+        for r in c.db.rows("SELECT mint,name,symbol,first_seen FROM coins WHERE night=? AND first_seen IS NOT NULL", (n,)):
+            items.append(item(r["first_seen"], r["mint"], {"name": r["name"], "symbol": r["symbol"]},
+                              stage="room", outcome="waiting", reason="waiting room"))
+        for r in c.db.rows("SELECT ts,mint,verdict,reason,json FROM scans WHERE night=?", (n,)):
+            b = body_of(r)
+            reason = r["reason"] or b.get("reason")
+            nchk = recheck_n(reason, b)
+            verdict = r["verdict"]
+            if verdict == "kill":
+                items.append(item(r["ts"], r["mint"], b, stage="scanner", outcome="kill", reason=reason, recheckN=nchk))
+            elif verdict == "pass":
+                stage = "recheck" if nchk else "scanner"
+                items.append(item(r["ts"], r["mint"], b, stage=stage, outcome="pass", reason=reason, recheckN=nchk))
+            elif verdict == "recheck":
+                waiting = reason and "waiting room" in reason
+                items.append(item(r["ts"], r["mint"], b,
+                                  stage="room" if waiting else "recheck",
+                                  outcome="waiting" if waiting else "recheck",
+                                  reason=reason, recheckN=nchk))
+        for r in c.db.rows("SELECT ts,mint,passed,reason,layer,json FROM audits WHERE night=?", (n,)):
+            b = body_of(r)
+            layers = b.get("layers") if isinstance(b.get("layers"), list) else []
+            fail = next((L for L in layers if isinstance(L, dict) and L.get("pass") is False), None)
+            if r["passed"]:
+                items.append(item(r["ts"], r["mint"], b, stage="auditor", outcome="pass",
+                                  reason=None, layer=r["layer"] or 8, layerName="8/8 clean", passed=True))
+            else:
+                layer = (fail or {}).get("n") or r["layer"]
+                layer_name = (fail or {}).get("name")
+                items.append(item(r["ts"], r["mint"], b, stage="auditor", outcome="fail",
+                                  reason=r["reason"] or (fail or {}).get("value"),
+                                  layer=layer, layerName=layer_name, passed=False))
+        ov = self._ov_ctx()
+        for r in c.db.rows("SELECT * FROM analyses WHERE night=?", (n,)):
+            b = body_of(r)
+            ans = b.get("answers") if isinstance(b.get("answers"), dict) else {}
+            failed = b.get("failed")
+            if failed is None:
+                try:
+                    failed = json.loads(r["failed"]) if r["failed"] else []
+                except Exception:
+                    failed = []
+            if not isinstance(failed, list):
+                failed = []
+            passed = bool(r["passed"])
+            score = r["score"] if r["score"] is not None else b.get("score")
+            items.append(item(r["ts"], r["mint"], b, stage="analyst",
+                              outcome="buy" if passed else "no_buy",
+                              reason=None, score=score,
+                              answers={"alive_6h": ans.get("alive_6h"), "organic": ans.get("organic"),
+                                       "flush": ans.get("flush"), "chase": ans.get("chase")},
+                              passed=passed, failed=failed,
+                              **self._ov_flags(r["mint"], passed, r["ts"], ov)))
+        for r in c.db.rows("SELECT * FROM gmgn_dips WHERE night=?", (n,)):
+            drop = None
+            if r["high"] and r["last_price"]:
+                drop = round((1 - r["last_price"] / r["high"]) * 100, 1)
+            if r["status"] in ("watching", "buying"):
+                outcome, why = "watching", (f"need -{s['gmgn.dip_pct']:g}% from high · buy anyway in "
+                                            f"{max(0, int((r['expires'] or 0) - c.clock()))}s")
+            elif r["status"] == "skipped":
+                outcome, why = "skipped", r["reason"] or r["result"]
+            elif r["reason"] == "timeout":
+                outcome, why = "timeout_buy", r["result"] or "no dip · bought at market"
+            else:
+                outcome, why = "dip_buy", r["result"] or (f"down {drop:g}% from the high" if drop is not None else "bought the dip")
+            items.append(item(r["updated"] or r["ts"], r["mint"], {"name": r["name"], "symbol": r["symbol"]},
+                              stage="dip", outcome=outcome, reason=why,
+                              high=r["high"], lastPrice=r["last_price"], dropPct=drop,
+                              expiresAt=iso(r["expires"]) if r["expires"] else None))
+        dips = []
+        for r in c.db.rows("SELECT * FROM gmgn_dips WHERE status IN ('watching','buying') ORDER BY ts DESC"):
+            drop = None
+            if r["high"] and r["last_price"]:
+                drop = round((1 - r["last_price"] / r["high"]) * 100, 1)
+            dips.append({"mint": r["mint"], "name": r["name"], "symbol": r["symbol"],
+                         "high": r["high"], "low": r["low"], "lastPrice": r["last_price"],
+                         "startPrice": r["start_price"], "dropPct": drop, "needPct": s["gmgn.dip_pct"],
+                         "timeoutS": s["gmgn.dip_timeout_s"],
+                         "expiresAt": iso(r["expires"]) if r["expires"] else None,
+                         "since": iso(r["ts"]) if r["ts"] else None,
+                         "link": links.coin_url(r["mint"])})
+        items.sort(key=lambda x: (x["_ts"] is not None, x["_ts"] or 0, x.get("stage") or ""), reverse=True)
+        out_items = []
+        for it in items[:100]:
+            it.pop("_ts", None)
+            out_items.append(it)
+        return {"v": 1, "ts": iso(), "night": n, "minScore": s["analyst.min_score"], "bars": bars,
+                "tgBot": self.tg_bot(), "items": out_items, "dips": dips}
+
+    def scanner_feed(self):
+        """Live Scanner view (owner request 2026-11-15 6:25 PM CT): newest ~100 scanner decisions tonight, each check's
+        value vs its bar (bars read from settings), last-hour counts, current limits. No secrets."""
+        c, s, n = self.c, self.c.s, self.c.night
+        now = c.clock()
+        liq_bar = float(s["scanner.min_liquidity_usd"]); mc_bar = float(s["scanner.min_market_cap_usd"] or 0)
+        top_bar = float(s["scanner.max_top10_pct"]); h1_bar = float(s["scanner.max_h1_change_pct"])
+
+        def chk(key, label, value, bar, op, fmt):
+            if bar is None:
+                ok = None if value is None else bool(value)
+                return {"key": key, "label": label, "value": value, "bar": None, "op": op, "pass": ok, "fmt": fmt}
+            if value is None:
+                ok = None
+            else:
+                ok = value >= bar if op == ">=" else value <= bar
+            return {"key": key, "label": label, "value": value, "bar": bar, "op": op, "pass": ok, "fmt": fmt}
+
+        import sources
+
+        def src_chk(mint, rs, co):
+            """Pump-only: 'Pump mint' (old). All sources: 'Source (<launchpad>)', fails only on an excluded / pump-only kill."""
+            if sources.pump_only(s):
+                ok = mint.endswith("pump")
+                return {"key": "pump", "label": "Pump mint", "value": ok, "bar": None, "op": "is", "pass": ok, "fmt": "bool"}
+            ok = not (rs.startswith("excluded") or rs.startswith("not a pump") or rs.startswith("too big") or rs.startswith("old token"))
+            lbl = sources.launchpad(mint, co.get("pool_label"))
+            return {"key": "pump", "label": f"Source ({lbl})", "value": ok, "bar": None, "op": "is", "pass": ok, "fmt": "bool", "source": lbl}
+
+        items = []
+        for r in c.db.rows("SELECT ts, mint, verdict, reason, json FROM scans WHERE night=? ORDER BY ts DESC, id DESC LIMIT 100", (n,)):
+            try:
+                b = json.loads(r["json"] or "{}")
+            except Exception:
+                b = {}
+            if not isinstance(b, dict):
+                b = {}
+            mint, reason = r["mint"], r["reason"] or b.get("reason")
+            co = c.coin(mint) or {}
+            rs = (reason or "").lower()
+            sol_q = False if rs.startswith("not sol-quoted") else (None if b.get("liquidityUsd") is None and not b.get("pool") else True)
+            num = lambda k: float(b[k]) if isinstance(b.get(k), (int, float)) else None
+            checks = [
+                chk("liq", "Liquidity", num("liquidityUsd"), liq_bar, ">=", "usd"),
+                chk("mc", "Market cap", num("marketCapUsd"), mc_bar if mc_bar > 0 else None, ">=", "usd") if mc_bar > 0
+                else {"key": "mc", "label": "Market cap", "value": num("marketCapUsd"), "bar": None, "op": "off", "pass": None, "fmt": "usd"},
+                chk("top10", "Top 10 hold", num("top10Pct"), top_bar, "<=", "pct"),
+                chk("h1", "1h change", num("h1ChangePct"), h1_bar, "<=", "pct"),
+                src_chk(mint, rs, co),
+                {"key": "sol", "label": "SOL-quoted", "value": sol_q, "bar": None, "op": "is", "pass": sol_q, "fmt": "bool"},
+            ]
+            v = r["verdict"]
+            nchk = b.get("recheck")
+            nxt = b.get("recheckAt")
+            if v == "pass":
+                pill = "pass"
+            elif "waiting room" in rs:
+                pill = "waiting"
+            elif nxt:
+                pill = "recheck"
+            else:
+                pill = "kill"
+            items.append({"t": iso(r["ts"]), "mint": mint, "mintShort": f"{mint[:4]}…{mint[-4:]}",
+                          "name": b.get("name") or co.get("name"), "symbol": b.get("symbol") or co.get("symbol"),
+                          "pill": pill, "verdict": v, "recheckN": nchk, "nextRecheckN": (nchk or 0) + 1 if nxt else None,
+                          "nextAt": nxt, "final": bool(nchk) and not nxt and v != "pass",
+                          "reason": None if v == "pass" else reason, "ageMin": b.get("ageMin"),
+                          "checks": checks, "link": links.coin_url(mint),
+                          "surge": b.get("surge") if isinstance(b.get("surge"), dict) else None})
+        hr = now - 3600
+        one = lambda q, a: c.db.one(q, a)["n"]
+        counts = {
+            "seen": one("SELECT COUNT(DISTINCT mint) n FROM scans WHERE ts>=?", (hr,)),
+            "passed": one("SELECT COUNT(*) n FROM scans WHERE ts>=? AND verdict='pass'", (hr,)),
+            "killed": one("SELECT COUNT(*) n FROM scans WHERE ts>=? AND verdict='kill'", (hr,)),
+            "rechecking": c.db.one("SELECT COUNT(*) n FROM coins WHERE status='recheck'")["n"],     # queued now (as the heartbeat)
+            "surges": one("SELECT COUNT(*) n FROM surges WHERE ts>=?", (hr,)),
+        }
+        limits = {"minLiquidityUsd": liq_bar, "minMarketCapUsd": mc_bar, "maxTop10Pct": top_bar, "maxH1ChangePct": h1_bar,
+                  "minPoolAgeMin": s["scanner.min_pool_age_min"], "maxAgeH": s["scanner.max_age_h"],
+                  "recheckMinutes": s["scanner.recheck_minutes"],
+                  "nearMiss": {"minLiqUsd": s["scanner.recheck_min_liq_usd"], "minMcUsd": s["scanner.recheck_min_mc_usd"],
+                               "maxTop10Pct": s["scanner.recheck_max_top10_pct"], "maxH1Pct": s["scanner.recheck_max_h1_pct"]},
+                  "youngPriorityMin": s["scanner.young_priority_min"],
+                  "surge": {"pct": s["scanner.surge_pct"], "windowS": s["scanner.surge_window_s"],
+                            "watchMax": s["scanner.surge_watch_max"], "pollS": s["scanner.surge_poll_s"]}}
+        re = getattr(self.d, "reentry", None)
+        reentry = re.feed() if re is not None else []
+        limits["reentry"] = {"enabled": s["gmgn.reentry_enabled"], "watchMin": s["gmgn.reentry_watch_min"],
+                             "bouncePct": s["gmgn.reentry_bounce_pct"], "maxPerCoin": s["gmgn.reentry_max_per_coin"],
+                             "pollS": s["gmgn.reentry_poll_s"], "maxLiqDropPct": s["gmgn.reentry_max_liq_drop_pct"]}
+        return {"v": 1, "ts": iso(), "night": n, "counts1h": counts, "limits": limits, "items": items, "reentry": reentry}
 
     def coin_mints(self):
         n = self.c.night
-        rows = self.c.db.q("SELECT DISTINCT mint FROM (SELECT mint FROM audits WHERE night=? UNION SELECT mint FROM positions WHERE night=? OR status IN ('open','exiting') UNION SELECT mint FROM gmgn_orders WHERE night=? OR status IN ('open','exiting','pending','submitting'))",
-                           (n, n, n))
+        rows = self.c.db.q("SELECT DISTINCT mint FROM (SELECT mint FROM audits WHERE night=? UNION SELECT mint FROM positions WHERE night=? OR status IN ('open','exiting') UNION SELECT mint FROM gmgn_orders WHERE night=? OR status IN ('open','exiting','pending','submitting') UNION SELECT mint FROM gmgn_dips WHERE night=? OR status IN ('watching','buying'))",
+                           (n, n, n, n))
         return [r[0] for r in rows][-MAX_COIN_FILES:]
 
     def candles(self, mint, bucket=60):
@@ -254,13 +580,23 @@ class Builder:
             pnl = round(size * (last / entry - 1), 2)
             pct = round((last / entry - 1) * 100, 2)
         attached = bool(o.get("strategy_order_id")) or o.get("mode") == "PAPER"
+        from agents.gmgn_trader import exits_label, grace_is_extended, grace_phase
+        now = self.c.clock()
+        phase = grace_phase(s, o)
+        grace_on = phase == "grace"
+        extended = grace_is_extended(s, o, now)
         return {"id": o["id"], "mint": o["mint"], "name": o["name"], "symbol": o["symbol"],
                 "mode": o["mode"], "status": o["status"], "entryPrice": entry, "lastPrice": last,
                 "peakPrice": o["peak"], "sizeUsd": size, "pct": pct, "pnlUsd": pnl,
                 "openedAt": iso(o["ts"]) if o["ts"] else None,
-                "exits": {"stopPct": s["risk.stop_pct"], "trailPct": s["risk.trail_pct"],
-                          "trailStartPct": s["risk.trail_start_pct"], "attached": bool(attached),
-                          "repair": o.get("repair") or None},
+                "exits": {"stopPct": s["risk.grace_stop_pct"] if grace_on else s["risk.stop_pct"],
+                          "trailPct": s["risk.trail_pct"], "trailStartPct": s["risk.trail_start_pct"],
+                          "attached": bool(attached), "repair": o.get("repair") or None,
+                          "phase": phase, "graceMin": int(s["risk.grace_min"]) if grace_on else 0,
+                          "graceStopPct": s["risk.grace_stop_pct"], "normalStopPct": s["risk.stop_pct"],
+                          "graceUntil": iso(o["grace_until"]) if o.get("grace_until") else None,
+                          "graceExtended": extended,
+                          "label": exits_label(s, phase, o=o, now=now)},
                 "link": links.coin_url(o["mint"]) if o["mint"] else None}
 
     def gmgn_order(self, o):
@@ -300,6 +636,121 @@ class Builder:
                 "open": [self.gmgn_position(r) for r in open_rows],
                 "orders": [self.gmgn_order(r) for r in recent]}
 
+    BYPASS_PREFIX = "BYPASS · "
+    TAG_PREFIXES = ("BYPASS · ", "OVERRIDE · ")
+
+    def _bypass_map(self):
+        """(mint, night) -> (tag, analyst score) for FOMO PAPER fills made through analyst.paper_bypass (DECISION 35,
+        tag BYPASS) or an owner paper override (DECISION 36, tag OVERRIDE)."""
+        rows = self.c.db.rows("SELECT s.mint, s.night, s.reason, (SELECT a.score FROM analyses a WHERE a.mint=s.mint AND a.night=s.night"
+                              " ORDER BY a.id DESC LIMIT 1) score FROM signals s WHERE s.reason LIKE 'analyst bypass%' OR s.reason LIKE 'owner override%'")
+        return {(r["mint"], r["night"]): ("OVERRIDE" if (r["reason"] or "").startswith("owner override") else "BYPASS", r["score"]) for r in rows}
+
+
+    # Home-screen Real P&L can be reset to a timestamp + optional manual seed (meta
+    # gmgn_pnl_baseline_ts / gmgn_pnl_manual_usd) without deleting trade history.
+    def _pnl_baseline(self, mode):
+        """(since_ts, manual_usd, manual_wins, seed_tonight) for LIVE home totals. PAPER: (paper_test_since, 0, 0, 0)
+        once the owner restarted the paper test (DECISION 58), else (None, 0, 0, 0)."""
+        if mode == "PAPER":
+            try:
+                since = float(self.c.db.meta("paper_test_since"))
+            except (TypeError, ValueError):
+                return None, 0.0, 0, 0.0
+            return since, 0.0, 0, 0.0
+        if mode != "LIVE":
+            return None, 0.0, 0, 0.0
+        raw = self.c.db.meta("gmgn_pnl_baseline_ts")
+        if raw is None:
+            return None, 0.0, 0, 0.0
+        try:
+            ts = float(raw)
+        except (TypeError, ValueError):
+            return None, 0.0, 0, 0.0
+        try:
+            adj = float(self.c.db.meta("gmgn_pnl_manual_usd", 0) or 0)
+        except (TypeError, ValueError):
+            adj = 0.0
+        try:
+            wins = int(self.c.db.meta("gmgn_pnl_manual_wins", 0) or 0)
+        except (TypeError, ValueError):
+            wins = 0
+        # Seed counts toward "tonight" only while the night that was open at the reset is still current.
+        night_start = (self.c.db.one("SELECT started_at FROM nights WHERE id=?", (self.c.night,)) or {}).get("started_at")
+        seed_tonight = adj if night_start is None or float(night_start) <= ts else 0.0
+        return ts, adj, wins, seed_tonight
+
+    def trades(self):
+
+        """Real | Paper split for the app. Real = GMGN LIVE orders + LIVE positions (real money). Paper = every PAPER
+        trade: FOMO paper positions (bypass ones flagged with their analyst score) and GMGN PAPER orders. No secrets."""
+        from agents.gmgn_trader import ACTIVE
+        c = self.c
+        bmap = self._bypass_map()
+
+        def pos_row(p):
+            v = self.position_view(p)
+            v.update(source="FOMO", closedAt=iso(p["closed_at"]) if p["closed_at"] else None, pctClosed=p["pct"],
+                     open=p["status"] in ("open", "exiting"), bypass=False, score=None, tag=None)
+            nm = v["name"] or ""
+            pre = next((x for x in self.TAG_PREFIXES if nm.startswith(x)), None)
+            if (p["mint"], p["night"]) in bmap or pre:
+                tag, score = bmap.get((p["mint"], p["night"]), (pre.split(" ")[0] if pre else "BYPASS", None))
+                v.update(bypass=True, tag=tag, score=score)
+                if pre:
+                    v["name"] = nm[len(pre):]
+            if not v["open"] and p["pct"] is not None:
+                v["pct"] = p["pct"]
+            return v
+
+        def gm_row(o):
+            v = self.gmgn_order(o) if o["status"] not in ACTIVE else dict(self.gmgn_order(o), **self.gmgn_position(o))
+            ov = (o["reason"] or "").startswith("owner override")
+            v.update(source="GMGN", open=o["status"] in ACTIVE, bypass=ov, score=None, tag="OVERRIDE" if ov else None)
+            if ov:
+                a = c.db.one("SELECT score FROM analyses WHERE mint=? ORDER BY id DESC LIMIT 1", (o["mint"],))
+                v["score"] = a["score"] if a else None
+            return v
+
+        def side(mode):
+            pos = c.db.rows("SELECT * FROM positions WHERE mode=? ORDER BY opened_at DESC LIMIT 60", (mode,))
+            gm = c.db.rows("SELECT * FROM gmgn_orders WHERE mode=? AND status NOT IN ('refused','failed') ORDER BY id DESC LIMIT 60", (mode,))
+            rows = [pos_row(p) for p in pos] + [gm_row(o) for o in gm]
+            rows.sort(key=lambda r: r.get("openedAt") or r.get("t") or "", reverse=True)
+            closed = [r for r in rows if not r["open"] and r.get("pnlUsd") is not None]
+            since, manual, manual_wins, seed_tonight = self._pnl_baseline(mode)
+            if since is None:
+                tonight_pos = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p, COUNT(*) n FROM positions WHERE mode=? AND night=? AND status='closed'", (mode, c.night))
+                tonight_gm = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p, COUNT(*) n FROM gmgn_orders WHERE mode=? AND night=? AND closed_at IS NOT NULL", (mode, c.night))
+                all_pos = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM positions WHERE mode=? AND status='closed'", (mode,))
+                all_gm = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM gmgn_orders WHERE mode=? AND closed_at IS NOT NULL", (mode,))
+                wins = sum(1 for r in closed if (r["pnlUsd"] or 0) > 0)
+                losses = sum(1 for r in closed if (r["pnlUsd"] or 0) <= 0)
+            else:
+                tonight_pos = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p, COUNT(*) n FROM positions WHERE mode=? AND night=? AND status='closed' AND closed_at>=?", (mode, c.night, since))
+                tonight_gm = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p, COUNT(*) n FROM gmgn_orders WHERE mode=? AND night=? AND closed_at IS NOT NULL AND closed_at>=?", (mode, c.night, since))
+                all_pos = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM positions WHERE mode=? AND status='closed' AND closed_at>=?", (mode, since))
+                all_gm = c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM gmgn_orders WHERE mode=? AND closed_at IS NOT NULL AND closed_at>=?", (mode, since))
+                wl = c.db.one("SELECT COALESCE(SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END),0) w, "
+                              "COALESCE(SUM(CASE WHEN pnl_usd<=0 THEN 1 ELSE 0 END),0) l FROM ("
+                              "SELECT pnl_usd FROM positions WHERE mode=? AND status='closed' AND closed_at>=? "
+                              "UNION ALL SELECT pnl_usd FROM gmgn_orders WHERE mode=? AND closed_at IS NOT NULL AND closed_at>=?)",
+                              (mode, since, mode, since))
+                wins = int(wl["w"] or 0) + int(manual_wins or 0)
+                losses = int(wl["l"] or 0)
+            return {"open": [r for r in rows if r["open"]], "closed": [r for r in rows if not r["open"]][:40],
+                    "pnlTonightUsd": round(seed_tonight + (tonight_pos["p"] or 0) + (tonight_gm["p"] or 0), 2),
+                    "pnlAllUsd": round(manual + (all_pos["p"] or 0) + (all_gm["p"] or 0), 2),
+                    "closedTonight": (tonight_pos["n"] or 0) + (tonight_gm["n"] or 0),
+                    "wins": wins, "losses": losses}
+
+        real, paper = side("LIVE"), side("PAPER")
+        paper["bypassOn"] = bool(c.s["analyst.paper_bypass"])
+        paper["bypassCount"] = sum(1 for r in paper["open"] + paper["closed"] if r["tag"] == "BYPASS")
+        paper["overrideCount"] = sum(1 for r in paper["open"] + paper["closed"] if r["tag"] == "OVERRIDE")
+        real["overrideCount"] = sum(1 for r in real["open"] + real["closed"] if r["tag"] == "OVERRIDE")
+        return {"v": 1, "ts": iso(), "deskMode": c.mode(), "gmgnMode": c.s["gmgn.mode"], "real": real, "paper": paper}
+
 class Publisher:
     def __init__(self, desk):
         self.d, self.c = desk, desk.ctx
@@ -309,6 +760,9 @@ class Publisher:
         self.last_publish = 0.0
         self.last_ok = None
         self.count = 0
+        self.next_verify_at = 0.0
+        self.last_stale_alert = 0.0
+        self.last_live_ts = None
 
     def mark(self):
         self.dirty.set()
@@ -328,40 +782,114 @@ class Publisher:
         (DATA / "_bundle.json").write_text(json.dumps({"v": 1, "files": bundle}))
         return len(files)
 
-    async def sh(self, *args, timeout=120):
+    async def _kill_proc(self, p):
+        if p is None or p.returncode is not None:
+            return
+        try:
+            p.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(p.wait(), 5)
+        except Exception:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    async def sh(self, *args, timeout=SH_TIMEOUT_S):
         p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(ROOT))
         try:
             out, err = await asyncio.wait_for(p.communicate(), timeout)
         except asyncio.TimeoutError:
-            p.kill()
+            await self._kill_proc(p)
             raise RuntimeError(f"timeout {args[:3]}")
+        except asyncio.CancelledError:
+            await self._kill_proc(p)
+            raise
         if p.returncode != 0:
             raise RuntimeError(secrets_store.redact(f"{' '.join(args[:3])} rc={p.returncode} {err.decode()[:300]}"))
         return out.decode()
 
-    async def wait_idle(self, max_s=300):
+    async def wait_idle(self, max_s=WAIT_IDLE_S):
         t0 = time.time()
-        while time.time() - t0 < max_s:
+        while True:
+            self.c.hb("publisher", f"wait_idle count={self.count}")
             out = await self.sh("gh", "run", "list", "-R", REPO, "--workflow", "publish.yml", "--limit", "3", "--json", "status")
             if all(r["status"] == "completed" for r in json.loads(out)):
                 return True
+            if time.time() - t0 >= max_s:
+                return False
             await asyncio.sleep(5)
-        return False
 
     async def refresh_gmgn(self):
         g = getattr(self.d, "gmgn", None)
         if g is None or not hasattr(g, "refresh_wallet"):
             return
         try:
-            await g.refresh_wallet(min_age=60)
+            await asyncio.wait_for(g.refresh_wallet(min_age=60), timeout=25)
         except Exception as e:
             self.c.error("publisher", "gmgn", str(e)[:200])
+
+    def _parse_ts(self, ts):
+        if not ts:
+            return None
+        try:
+            return dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
+        except Exception:
+            return None
+
+    def fetch_live_state(self):
+        """Decrypt the live Pages state.json. Never log the URL (it contains DATA_PATH)."""
+        token, dpath = secrets_store.get("APP_TOKEN"), secrets_store.get("DATA_PATH")
+        url = f"{PAGES_ORIGIN}/d/{urllib.parse.quote(dpath)}/state.json?t={time.time()}"
+        req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = json.load(r)
+        return crypto.decrypt_obj(raw, token)
+
+    async def _alert_stale(self, ts, age):
+        now = time.time()
+        if self.last_stale_alert and now - self.last_stale_alert < ALERT_COOLDOWN_S:
+            return
+        self.last_stale_alert = now
+        mins = max(1, int(age // 60))
+        msg = (f"Phone app data is {mins} min old"
+               + (f" (live ts {ts})" if ts else "")
+               + ". The desk is still publishing; I'm retrying the deploy.")
+        await self.c.notifier.push(msg, kind="info")
+
+    async def verify_live(self):
+        """Read back deployed state.json. Log and alert if it's more than 15 minutes old."""
+        try:
+            obj = await asyncio.to_thread(self.fetch_live_state)
+            ts = obj.get("ts") if isinstance(obj, dict) else None
+            parsed = self._parse_ts(ts)
+            age = (time.time() - parsed) if parsed is not None else 10**9
+            self.last_live_ts = ts
+            if age <= STALE_LIVE_S:
+                self.log.info(f"{iso()}\tdeploy ok\tlive_ts={ts}\tageS={int(age)}")
+                return True
+            self.log.info(f"{iso()}\tdeploy stale\tlive_ts={ts}\tageS={int(age)}")
+            await self._alert_stale(ts, age)
+            self.dirty.set()
+            return False
+        except Exception as e:
+            self.c.error("publisher", "verify", str(e))
+            self.log.info(f"{iso()}\tdeploy verify failed\t{secrets_store.redact(str(e))[:200]}")
+            return False
+
+    async def maybe_verify(self):
+        if not self.count or time.time() < self.next_verify_at:
+            return
+        ok = await self.verify_live()
+        self.next_verify_at = time.time() + (60 if not ok else VERIFY_OK_EVERY_S)
 
     async def publish_once(self):
         await self.refresh_gmgn()
         n = self.write_local()
         gid = secrets_store.get("GIST_ID")
-        await self.wait_idle()                               # never overlapping runs
+        idle = await self.wait_idle()                        # never overlapping runs
         payload = {"files": {"bundle.json": {"content": (DATA / "_bundle.json").read_text()}}}
         cur = json.loads(await self.sh("gh", "api", f"gists/{gid}", "--jq", "{files: (.files|keys)}"))
         for k in cur.get("files", []):
@@ -371,9 +899,16 @@ class Publisher:
         tmp.write_text(json.dumps(payload))
         rev = (await self.sh("gh", "api", "-X", "PATCH", f"gists/{gid}", "--input", str(tmp), "--jq", ".history[0].version")).strip()
         tmp.unlink(missing_ok=True)
+        if not idle:
+            self.dirty.set()
+            self.last_publish = time.time()
+            self.count += 1
+            self.log.info(f"{iso()}\tgist updated, deploy busy, deferred\tfiles={n}\trev={rev[:7]}")
+            return rev
         await self.sh("gh", "workflow", "run", "publish.yml", "-R", REPO, "-f", f"rev={rev}")
         self.last_publish = time.time()
         self.count += 1
+        self.next_verify_at = time.time() + VERIFY_AFTER_DISPATCH_S
         self.log.info(f"{iso()}\tpublished\tfiles={n}\trev={rev[:7]}")
         return rev
 
@@ -381,16 +916,26 @@ class Publisher:
         hb = self.c.s["desk.publish_heartbeat_s"]
         while True:
             try:
-                await asyncio.wait_for(self.dirty.wait(), timeout=max(1, hb - (time.time() - self.last_publish)))
-                await asyncio.sleep(DEBOUNCE_S)              # debounce bursts of events
+                deadline = time.time() + max(1, hb - (time.time() - self.last_publish))
+                while time.time() < deadline and not self.dirty.is_set():
+                    self.c.hb("publisher", f"idle count={self.count}")
+                    await self.maybe_verify()
+                    try:
+                        await asyncio.wait_for(self.dirty.wait(), timeout=min(15, max(0.1, deadline - time.time())))
+                    except asyncio.TimeoutError:
+                        continue
+                if self.dirty.is_set():
+                    await asyncio.sleep(DEBOUNCE_S)          # debounce bursts of events
             except asyncio.TimeoutError:
                 pass
             self.dirty.clear()
             try:
-                await self.publish_once()
+                self.c.hb("publisher", f"starting count={self.count}")
+                await asyncio.wait_for(self.publish_once(), timeout=PUBLISH_TIMEOUT_S)
                 self.last_ok = time.time()
             except Exception as e:
                 self.c.error("publisher", "publish", str(e))
                 self.log.info(f"{iso()}\tpublish failed\t{secrets_store.redact(str(e))[:200]}")
                 await asyncio.sleep(30)
             self.c.hb("publisher", f"count={self.count}")
+            await self.maybe_verify()

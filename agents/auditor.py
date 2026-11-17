@@ -1,7 +1,8 @@
 """AGENT 2 · AUDITOR. 8 layers in order; one red layer and the coin is dead. No data is never a pass."""
 from __future__ import annotations
+import stage_pings
 import asyncio, json, time
-import fields, holders
+import devexit, fields, holders, solana
 from ctx import iso
 
 LAYERS = [(1, "Mint authority"), (2, "Freeze authority"), (3, "Dev wallet"), (4, "Top 10 holders"),
@@ -130,6 +131,9 @@ class Auditor:
                 res = await self.run(scan["mint"], scan)
                 if res and res["passed"] and self.c.bus:
                     self.c.bus.analyst.put_nowait({"scan": scan, "audit": res})
+                sb = getattr(self.c, "strat_b", None)
+                if res and res["passed"] and sb is not None:
+                    sb.offer(scan, res)                      # Strategy B (paper) watches it too; never raises, never blocks
             except Exception as e:
                 self.c.error("auditor", "run", f"{scan.get('mint')} {str(e)[:300]}")
 
@@ -145,7 +149,38 @@ class Auditor:
                     await asyncio.sleep(gap)
         raise last
 
-    async def run(self, mint: str, scan: dict | None, record: bool = True, on_layer=None) -> dict | None:
+    async def dev_exit(self, creator, mint, mi, raw_log) -> tuple[bool, str]:
+        """Owner rule 2026-11-15 12:48 CT: a dev who is fully out, has been out > dev_exit_wait_s, and the price
+        has not fallen more than dev_exit_max_drop_pct since that last sell, is not a red flag."""
+        c = self.c
+        program = fields.get(mi, "value.owner") or solana.TOKEN_PROGRAM
+        try:
+            sold_at, note = await self._src(devexit.last_dev_sell, c.net, creator, mint, program)
+        except Exception as e:
+            sold_at, note = None, f"rpc {str(e)[:80]}"
+        if sold_at is None:
+            raw_log.append(f"dev_exit unknown: {note}")
+            return False, "dev sold (sell time unknown)"
+        now = c.clock()
+        since = now - sold_at
+        rows = [(r["ts"], r["price"]) for r in c.db.rows(
+            "SELECT ts, price FROM prices WHERE mint=? AND ts BETWEEN ? AND ?",
+            (mint, sold_at - devexit.PRICE_WINDOW_S, sold_at + devexit.PRICE_WINDOW_S))]
+        sell_price = devexit.price_near(rows, sold_at)
+        now_price = m5 = h1 = None
+        try:
+            from agents.scanner import pick_pair
+            p = pick_pair(await self._src(c.net.dex_tokens, [mint]), mint)
+            if p:
+                now_price = float(fields.get(p, "priceUsd") or 0) or None
+                m5, h1 = fields.get(p, "priceChange.m5"), fields.get(p, "priceChange.h1")
+        except Exception:
+            pass
+        ok, txt = devexit.judge(c.s, since, sell_price if now_price else None, now_price, m5, h1)
+        raw_log.append(f"dev_exit sold_at={sold_at:.0f} since={since:.0f}s sell_px={sell_price} now_px={now_price} m5={m5} h1={h1} -> {ok} {txt}")
+        return ok, txt
+
+    async def run(self, mint: str, scan: dict | None, record: bool = True, on_layer=None, reentry: bool = False) -> dict | None:
         """scan=None means an on-demand audit (Telegram 'buy X' for a coin the desk never pushed)."""
         c, s = self.c, self.c.s
         if record:
@@ -242,8 +277,14 @@ class Auditor:
                         sold_txt = "sold ? (not on desk)"
                     else:
                         if now_bal < int(at_mig):
-                            raise Red("dev sold", "rpc")
-                        sold_txt = "sold 0"
+                            if pct >= devexit.DEV_OUT_PCT:          # sold some, still holds: unchanged
+                                raise Red("dev sold", "rpc")
+                            ok, txt = await self.dev_exit(creator, mint, await mint_info(), raw_log)
+                            if not ok:
+                                raise Red(txt, "rpc")
+                            sold_txt = txt
+                        else:
+                            sold_txt = "sold 0"
                     L.update(value=f"{pct:.1f}% · {sold_txt}", source="rpc")
                 elif n == 4:
                     try:
@@ -340,6 +381,8 @@ class Auditor:
                    (c.clock(), mint, 1 if passed else 0, out["reason"], state["layersChecked"], json.dumps(out), c.night))
             if state["holders"] is not None:
                 c.db.x("UPDATE coins SET holders=? WHERE mint=?", (state["holders"], mint))
+            if passed:
+                self.ping_pass(mint, scan, out, reentry=reentry)
             if not passed:
                 c.activity("reject", f"Rejected {c.label(mint)}", f"Auditor · {out['reason']}", "Skipped", "", mint, "auditor", "red")
                 c.skip(mint, "auditor", out["reason"])
@@ -349,6 +392,13 @@ class Auditor:
             c.event("audit", mint)
         self.live.pop(mint, None)
         return out
+
+    def ping_pass(self, mint, scan, out, reentry=False):
+        """Owner stage ping (DECISION 38). Notification only; the audit result is unchanged."""
+        nm = (scan or {}).get("name") or self.c.label(mint)
+        if reentry:                                      # DECISION 46: its own dedupe key, labelled
+            return stage_pings.ping(self.c, "reentry_auditor", mint, "🔁 RE-ENTRY · " + stage_pings.auditor_text(nm, out), stage_pings.coin_button(mint))
+        return stage_pings.ping(self.c, "auditor", mint, stage_pings.auditor_text(nm, out), stage_pings.coin_button(mint))
 
     async def gpa_down(self, e):
         self.c.error("auditor", "gpa_down", str(e)[:300])
