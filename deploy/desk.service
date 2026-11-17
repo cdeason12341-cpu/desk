@@ -1,0 +1,21 @@
+[Unit]
+Description=Trading desk (main.py + supervise_desk.py via run_desk.sh keepalive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/desk
+ExecStart=/opt/desk/desk_keepalive.sh
+Restart=always
+RestartSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=America/Chicago
+Environment=HOME=/root
+Environment=GH_CONFIG_DIR=/root/.config/gh
+
+[Install]
+WantedBy=multi-user.target
