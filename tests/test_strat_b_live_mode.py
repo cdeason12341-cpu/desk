@@ -1,7 +1,7 @@
 """DECISION 66: Strategy B LIVE. Same entry logic; real GMGN fills/exits through Strategy A's client, wallet safety and caps.
 Sizing: strat_b.trade_usd when free SOL covers it, else Strategy A's rule (fallback $20, then whatever free SOL covers, $1 floor)."""
 import pytest
-import gmgn, strat_b, strat_b_live
+import config, gmgn, strat_b, strat_b_live
 from agents.gmgn_trader import GmgnTrader, LAMPORTS, pick_size, open_count, committed_lamports, night_usage
 from strat_b import StratB
 from tests.chainsim import ChainSim
@@ -251,3 +251,44 @@ def test_telegram_b_live_owner_only_two_step():
     assert c.s["gmgn.mode"] == "PAPER"                                    # A untouched
     assert "LIVE -> PAPER" in run(tg.command("b paper"))[0] and c.s["strat_b.mode"] == "PAPER"
     assert run(tg.command("b paper"))[0] == "Strategy B is already PAPER."
+
+
+# ---------- DECISION 69: LIVE daily loss is real money (~$20), PAPER stays % of bankroll
+def test_live_daily_loss_limit_is_real_money():
+    c, clock, sb, cl, chain = _live(wallet_sol=5.0)
+    assert sb.daily_loss_limit() == 20.0                      # no wallet cache yet: the $20 setting
+    assert sb.can_buy() is None
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M2, "Paper loss", "closed", 50, -500.0, "PAPER", clock.t, clock.t))
+    assert sb.can_buy() is None                               # paper losses still don't stop LIVE
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M2, "Real small", "closed", 50, -15.0, "LIVE", clock.t, clock.t))
+    assert sb.can_buy() is None                               # -$15 is under the $20 live stop
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M, "Real more", "closed", 50, -5.0, "LIVE", clock.t, clock.t))
+    assert "daily loss stop" in sb.can_buy()                  # -$20 tonight hits the limit
+
+
+def test_live_daily_loss_capped_at_wallet_usd():
+    c, clock, sb, cl, chain = _live(wallet_sol=5.0)
+    c.gmgn._bal = (clock.t, int(0.1 * LAMPORTS))             # 0.1 SOL
+    c.gmgn._sol = (clock.t, 100.0)                           # $10 wallet
+    assert c.gmgn.wallet_snapshot()["usd"] == 10.0
+    assert sb.daily_loss_limit() == pytest.approx(10.0)      # min($20, $10 wallet)
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M2, "Real", "closed", 20, -10.0, "LIVE", clock.t, clock.t))
+    assert "daily loss stop" in sb.can_buy()
+
+
+def test_paper_daily_loss_still_uses_bankroll_pct():
+    c, clock, sb, cl, chain = _live(wallet_sol=5.0, **{"strat_b.mode": "PAPER"})
+    assert sb.daily_loss_limit() == pytest.approx(100.0)     # 10% of $1,000
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M2, "Paper", "closed", 50, -99.0, "PAPER", clock.t, clock.t))
+    assert sb.can_buy() is None
+    c.db.x("UPDATE strat_b_orders SET pnl_usd=-101")
+    assert "daily loss stop" in sb.can_buy()
+    c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,status,size_usd,pnl_usd,mode,closed_at,opened_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           (clock.t, c.night, M, "Live row", "closed", 50, -100.0, "LIVE", clock.t, clock.t))
+    # a leftover LIVE loss must not change the paper limit; already stopped on paper -$101
+    assert sb.daily_loss_limit() == pytest.approx(100.0)

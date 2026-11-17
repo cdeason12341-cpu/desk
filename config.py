@@ -173,6 +173,8 @@ SPECS: list[Spec] = [
     _s("strat_b.trade_usd", 50.0, 1, 10000, aliases=("b trade", "b size"), fmt="${v:,.2f}"),
     _s("strat_b.max_open", 5, 1, 50, aliases=("b max open",), fmt="{v}"),
     _s("strat_b.daily_loss_stop_pct", 10.0, 1, 100, aliases=("b daily loss", "b loss stop"), fmt="-{v:g}%", neg=True),
+    # DECISION 69 (owner 2026-11-17 5:23 PM CT): LIVE daily loss stop is real money, not the paper bankroll.
+    _s("strat_b.live_daily_loss_usd", 20.0, 1, 1_000_000, aliases=("b live daily loss", "b live loss"), fmt="${v:,.2f}"),
     _s("strat_b.min_age_min", 60, 0, 1440, aliases=("b min age", "b wait"), fmt="{v}m"),
     _s("strat_b.watch_max_min", 180, 10, 10080, aliases=("b watch",), fmt="{v}m"),
     # DECISION 63 (owner 2026-11-16 8:23 PM CT): coins up to 7 days old, and B's own feed of older coins (GeckoTerminal trending)

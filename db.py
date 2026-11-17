@@ -83,7 +83,9 @@ class DB:
                   ("strat_b_orders", "mode", "TEXT"), ("strat_b_orders", "lamports", "INTEGER"), ("strat_b_orders", "sol_usd", "REAL"),
                   ("strat_b_orders", "order_id", "TEXT"), ("strat_b_orders", "tx", "TEXT"), ("strat_b_orders", "strategy_order_id", "TEXT"),
                   ("strat_b_orders", "sell_order_id", "TEXT"), ("strat_b_orders", "sell_tx", "TEXT"), ("strat_b_orders", "entry_src", "TEXT"),
-                  ("strat_b_orders", "note", "TEXT"), ("strat_b_orders", "confirm_push_at", "REAL"))
+                  ("strat_b_orders", "note", "TEXT"), ("strat_b_orders", "confirm_push_at", "REAL"),
+                  # DECISION 69: drop watches whose market cap stays under the floor, or whose liquidity is $0
+                  ("strat_b_watch", "under_floor_evals", "INTEGER"), ("strat_b_watch", "under_floor_since", "REAL"))
 
     def _migrate(self):
         for table, col, typ in self.MIGRATIONS:

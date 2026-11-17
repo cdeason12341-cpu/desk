@@ -21,6 +21,9 @@ OPEN, CLOSED = "open", "closed"
 STOP, TP, SPIKE, TRAIL, TIME, PULLED = "stop", "take profit 2x", "spike", "trail", "time stop", "liquidity pulled"
 TEMP_KEY = "strat_b_tonight"   # meta: settings changed for tonight only, reverted at the next night rollover (DECISION 63)
 NO_PRICE_HOLD_S = 1800  # with no price, keep holding (the time stop still applies)
+# DECISION 69: drop watches that stay under the $30K MC floor, or show $0 liquidity
+UNDER_MC_DROP_EVALS = 10
+UNDER_MC_DROP_S = 15 * 60
 
 
 def num(v, default=None):
@@ -229,8 +232,11 @@ def rules(s) -> list[dict]:
         {"k": "Size", "v": (f"LIVE: ${v('strat_b.trade_usd'):,.0f} when free SOL covers it, else Strategy A's rule (${v('gmgn.fallback_trade_usd'):,.0f}, then whatever free SOL covers down to ${v('gmgn.min_trade_usd'):,.0f}) after a {v('gmgn.sol_reserve'):g} SOL reserve"
                             if v("strat_b.mode") == "LIVE" else f"${v('strat_b.trade_usd'):,.0f} flat of a ${v('strat_b.bankroll_usd'):,.0f} paper bankroll") + f", max {v('strat_b.max_open')} open, one buy per coin",
          "why": "1–5% per trade (Trojan); never average down (Memecoin Guru)"},
-        {"k": "Daily loss stop", "v": f"no new buys after -{v('strat_b.daily_loss_stop_pct'):g}% of bankroll in a night",
-         "why": "-10% daily stop (MoonHydra)"},
+        {"k": "Daily loss stop",
+         "v": (f"no new LIVE buys after -${v('strat_b.live_daily_loss_usd'):,.0f} real P&L in a night, capped at the wallet"
+               if v("strat_b.mode") == "LIVE"
+               else f"no new buys after -{v('strat_b.daily_loss_stop_pct'):g}% of bankroll in a night"),
+         "why": "LIVE uses real money, not the paper bankroll (DECISION 69); PAPER stays a -10% daily stop (MoonHydra)"},
         {"k": "Stop", "v": f"-{v('strat_b.stop_pct'):g}% from entry, from the first second" + (" (server-side on GMGN in LIVE)" if v("strat_b.mode") == "LIVE" else ""),
          "why": "Guides cluster at -30% to -40% (three.ws uses -35%)"},
         {"k": "Take profit", "v": f"sell everything at +{v('strat_b.take_profit_pct'):g}%",
@@ -354,6 +360,23 @@ class StratB:
         r = self.c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM strat_b_orders WHERE status='closed' AND night=? AND mode=?", (self.c.night, mode))
         return r["p"] or 0.0
 
+    def daily_loss_limit(self) -> float:
+        """PAPER: daily_loss_stop_pct of the paper bankroll.
+        LIVE: strat_b.live_daily_loss_usd, capped at the cached wallet USD when we have one (DECISION 69)."""
+        s = self.c.s
+        if self.mode() != "LIVE":
+            return float(s["strat_b.bankroll_usd"]) * float(s["strat_b.daily_loss_stop_pct"]) / 100.0
+        lim = float(s["strat_b.live_daily_loss_usd"])
+        import strat_b_live
+        snap, _ = strat_b_live.wallet_view(self.c)
+        usd = (snap or {}).get("usd") if snap else None
+        try:
+            if usd is not None and float(usd) > 0:
+                lim = min(lim, float(usd))
+        except (TypeError, ValueError):
+            pass
+        return lim
+
     def can_buy(self) -> str | None:
         s, mode = self.c.s, self.mode()
         if mode == "LIVE":                               # held or being bought/sold for real
@@ -362,7 +385,7 @@ class StratB:
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE status='open' AND mode='PAPER'")["n"]
         if n >= s["strat_b.max_open"]:
             return f"{n} open (max {s['strat_b.max_open']})"
-        lim = s["strat_b.bankroll_usd"] * s["strat_b.daily_loss_stop_pct"] / 100.0
+        lim = self.daily_loss_limit()
         pnl = self.night_pnl(mode)                       # LIVE: real P&L only
         if pnl <= -lim:
             return f"daily loss stop: ${pnl:,.2f} {'real ' if mode == 'LIVE' else ''}tonight"
@@ -396,13 +419,9 @@ class StratB:
             exp = now - s["strat_b.watch_max_min"] * 60
             old = now - s["strat_b.max_age_min"] * 60
             for w in c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' AND (added_at<? OR grad_at<?)", (exp, old)):
-                c.db.x("UPDATE strat_b_watch SET status='expired', reason=?, updated=? WHERE mint=?",
-                       (self._last_reason.get(w["mint"]) or "no entry", now, w["mint"]))
                 why = (f"older than {s['strat_b.max_age_min'] / 1440:g}d" if w["grad_at"] and w["grad_at"] < old
                        else f"no entry in {s['strat_b.watch_max_min']}m")
-                self._eval(w, "expired", "expired", f"{why} · last: {self._last_reason.get(w['mint']) or 'no entry'}",
-                           json.loads(w.get("checks") or "[]"), w.get("last_price"), now)
-                self.log.info(f"{iso(now)}\texpired\t{w['mint']}\t{w['name']}\tlast: {self._last_reason.pop(w['mint'], 'no entry')}")
+                self._expire_watch(w, why, now, row_reason=self._last_reason.get(w["mint"]) or "no entry")
             watch = c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' ORDER BY added_at DESC LIMIT ?", (int(s["strat_b.max_watch"]),))
             if pairs is None:                            # live: watched coins every watch_poll_s, open positions every tick
                 if now - getattr(self, "_watch_polled", 0.0) < s["strat_b.watch_poll_s"]:
@@ -432,6 +451,42 @@ class StratB:
         n_open = c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE status='open'")["n"]
         return f"open={n_open} watching={len(watch)} bankroll=${self.bankroll():,.2f}"
 
+    def _expire_watch(self, w, why, now, row_reason=None):
+        last = self._last_reason.pop(w["mint"], None) or "no entry"
+        self.c.db.x("UPDATE strat_b_watch SET status='expired', reason=?, updated=? WHERE mint=?",
+                    (row_reason if row_reason is not None else why, now, w["mint"]))
+        ev = why if " · last:" in why else f"{why} · last: {last}"
+        self._eval(w, "expired", "expired", ev, json.loads(w.get("checks") or "[]"), w.get("last_price"), now)
+        self.log.info(f"{iso(now)}\texpired\t{w['mint']}\t{w['name']}\t{why}\tlast: {last}")
+
+    def _stale_watch(self, w, pair, m, now) -> str | None:
+        """Drop a watch whose liquidity is $0, or whose market cap stays under the floor (DECISION 69)."""
+        price = m.get("price")
+        if not price:
+            return None
+        liq_raw = fields.get(pair, "liquidity.usd") if pair else None
+        liq = num(liq_raw)
+        if liq is not None and liq <= 0:
+            return "liquidity $0"
+        mc = m.get("mc")
+        floor = float(self.c.s["strat_b.min_mc_usd"])
+        under = mc is not None and mc < floor
+        if under:
+            n = int(w.get("under_floor_evals") or 0) + 1
+            since = w.get("under_floor_since") or now
+            self.c.db.x("UPDATE strat_b_watch SET under_floor_evals=?, under_floor_since=? WHERE mint=?",
+                        (n, since, w["mint"]))
+            w["under_floor_evals"], w["under_floor_since"] = n, since
+            held = now - since
+            if n >= UNDER_MC_DROP_EVALS or held >= UNDER_MC_DROP_S:
+                if n >= UNDER_MC_DROP_EVALS:
+                    return f"mc ${mc:,.0f} under ${floor:,.0f} for {n} evals"
+                return f"mc ${mc:,.0f} under ${floor:,.0f} for {held / 60:.0f}m"
+        elif w.get("under_floor_evals") or w.get("under_floor_since"):
+            self.c.db.x("UPDATE strat_b_watch SET under_floor_evals=0, under_floor_since=NULL WHERE mint=?", (w["mint"],))
+            w["under_floor_evals"], w["under_floor_since"] = 0, None
+        return None
+
     def _sample(self, mint, now, price):
         h = self.hist.setdefault(mint, collections.deque())
         h.append((now, price))
@@ -453,6 +508,11 @@ class StratB:
         ok, why, m = entry_check(s, w, pair or {}, now)
         ck = checks(s, w, pair, now)
         c.db.x("UPDATE strat_b_watch SET checks=?, eval_at=?, evals=COALESCE(evals,0)+1 WHERE mint=?", (json.dumps(ck), now, w["mint"]))
+        w = dict(w, checks=json.dumps(ck), eval_at=now)
+        drop = self._stale_watch(w, pair, m, now)
+        if drop:
+            self._expire_watch(w, drop, now)
+            return
         if ok:
             block = self.can_buy() or (self.live.blocked_retry(w["mint"], now) if self.mode() == "LIVE" else None)
             if block:

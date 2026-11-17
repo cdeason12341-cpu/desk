@@ -314,3 +314,68 @@ def test_auditor_hands_passed_coins_to_b(monkeypatch):
     run(go())
     assert seen == [M]
     assert c.bus.analyst.qsize() == 1                            # A's analyst still gets the passed coin
+
+
+# ---------- DECISION 69: live daily-loss setting + watchlist hygiene
+def test_live_daily_loss_usd_setting_not_protected():
+    c, _ = make_ctx()
+    assert c.s["strat_b.live_daily_loss_usd"] == 20.0
+    assert "strat_b.live_daily_loss_usd" not in config.PROTECTED
+    c.s.set("strat_b.live_daily_loss_usd", 25, source="test")
+    assert c.s["strat_b.live_daily_loss_usd"] == 25.0
+    paper = [r for r in strat_b.rules(c.s) if r["k"] == "Daily loss stop"][0]
+    assert "10%" in paper["v"] and "bankroll" in paper["v"]
+    c.s.set("strat_b.mode", "LIVE", source="test", force=True)
+    live = [r for r in strat_b.rules(c.s) if r["k"] == "Daily loss stop"][0]
+    assert "$25" in live["v"] and "real P&L" in live["v"]
+
+
+def test_watch_expires_after_ten_under_floor_evals():
+    c, clock, sb = _sb()
+    _watch(c, clock, sb, age_min=90)
+    for i in range(9):
+        _tick(sb, clock, 1.0, mc=10_000)
+        w = c.db.one("SELECT status, under_floor_evals FROM strat_b_watch WHERE mint=?", (M,))
+        assert w["status"] == "watching" and w["under_floor_evals"] == i + 1
+    _tick(sb, clock, 1.0, mc=10_000)
+    w = c.db.one("SELECT * FROM strat_b_watch WHERE mint=?", (M,))
+    ev = c.db.one("SELECT * FROM strat_b_evals ORDER BY id DESC LIMIT 1")
+    assert w["status"] == "expired" and w["under_floor_evals"] == 10
+    assert ev["kind"] == "expired" and "under $30,000 for 10 evals" in ev["reason"]
+
+
+def test_watch_expires_after_15m_under_floor():
+    c, clock, sb = _sb()
+    _watch(c, clock, sb, age_min=90)
+    _tick(sb, clock, 1.0, mc=10_000)
+    assert c.db.one("SELECT status FROM strat_b_watch WHERE mint=?", (M,))["status"] == "watching"
+    clock.t += 15 * 60 - 10
+    _tick(sb, clock, 1.0, mc=10_000)                          # held == 15m, only 2 evals
+    ev = c.db.one("SELECT * FROM strat_b_evals ORDER BY id DESC LIMIT 1")
+    assert c.db.one("SELECT status FROM strat_b_watch WHERE mint=?", (M,))["status"] == "expired"
+    assert ev["kind"] == "expired" and "for 15m" in ev["reason"]
+
+
+def test_watch_under_floor_resets_when_mc_recovers():
+    c, clock, sb = _sb()
+    _watch(c, clock, sb, age_min=90)
+    for _ in range(9):
+        _tick(sb, clock, 1.0, mc=10_000)
+    _tick(sb, clock, 1.0, mc=200_000)
+    w = c.db.one("SELECT status, under_floor_evals, under_floor_since FROM strat_b_watch WHERE mint=?", (M,))
+    assert w["status"] == "watching" and (w["under_floor_evals"] or 0) == 0 and w["under_floor_since"] is None
+    _tick(sb, clock, 1.0, mc=10_000)
+    w = c.db.one("SELECT status, under_floor_evals FROM strat_b_watch WHERE mint=?", (M,))
+    assert w["status"] == "watching" and w["under_floor_evals"] == 1
+
+
+def test_watch_expires_on_zero_liquidity_not_on_missing_price():
+    c, clock, sb = _sb()
+    _watch(c, clock, sb, age_min=90)
+    clock.t += 10
+    run(sb.tick(pairs=[]))                                    # no pair / no price: keep watching
+    assert c.db.one("SELECT status FROM strat_b_watch WHERE mint=?", (M,))["status"] == "watching"
+    _tick(sb, clock, 1.0, liq=0)
+    ev = c.db.one("SELECT * FROM strat_b_evals ORDER BY id DESC LIMIT 1")
+    assert c.db.one("SELECT status FROM strat_b_watch WHERE mint=?", (M,))["status"] == "expired"
+    assert ev["kind"] == "expired" and "liquidity $0" in ev["reason"]
