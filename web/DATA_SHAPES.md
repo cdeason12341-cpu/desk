@@ -191,3 +191,11 @@ Simulated strategy, separate from GMGN and from trades.json. Never real money; t
  "watchlist":[{"mint","name","symbol","addedAt","expiresAt","minLeft":142,"ageMin":51,"price","high","low",
                "checks":[…],"passCount":7,"checkCount":10,"away":["9m left of the wait","needs 6.2% more dip"],"evalAt","link"}]}
 ```
+
+## push (in state.json) — phone notifications (DECISION 62)
+`state.json.push` = `{vapid, subs: [{id, cats, device, lastOk, fails}], cats, last: {t, title} | null}` or `null`.
+`vapid` is the PUBLIC VAPID key (base64url, 65-byte P-256 point) for `pushManager.subscribe`. `subs[].id` = first 16 hex of
+sha256(endpoint), so the app can tell whether the desk has this phone. Categories: trades, approvals, alerts, pipeline, stratb, paper.
+The phone reaches the desk by POSTing a `{"v":1,"iv","ct"}` envelope (same key as the data) to `https://ntfy.sh/gbdesk-<sha256("grok-bot-desk/v1/push:"+token)[:40]>`:
+`{type:"sub", sub, cats, device, ts}` · `{type:"test", endpoint, ts}` · `{type:"unsub", endpoint, ts}` (ts in ms, rejected after 15 min).
+Push payload (JSON, aes128gcm): `{cat, title, body, tag, url, renotify, ts, actions?, aid?, bot?, requireInteraction?}`.

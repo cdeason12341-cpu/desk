@@ -181,3 +181,12 @@ canvas.ring{width:56px;height:56px;flex:none}#disc{width:220px!important;height:
 
 .scan-row .pillcol{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
 .pill.surge{background:rgba(250,204,21,.16);color:#fde047;border-color:rgba(250,204,21,.45)}
+
+/* phone notifications (DECISION 62) */
+.pushcta{border-color:rgba(34,211,238,.55);background:linear-gradient(180deg,rgba(34,211,238,.10),rgba(34,211,238,.02))}
+.pushcta .t1{font-size:18px;font-weight:800;margin-bottom:4px}
+.btn.pushbtn{width:100%;height:56px;font-size:17px;background:linear-gradient(90deg,#22d3ee,#22c55e);color:#00110a;border:0}
+.btn.pushbtn[disabled]{opacity:.6}
+.pushcta .later{display:block;margin:8px auto 0;background:none;border:0;color:var(--muted);font-size:13px}
+label.pcat{cursor:pointer}
+label.pcat input{position:absolute;opacity:0;width:1px;height:1px}

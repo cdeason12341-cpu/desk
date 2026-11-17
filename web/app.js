@@ -35,6 +35,119 @@
     return JSON.parse(new TextDecoder().decode(pt));
   }
 
+  // ---------- phone notifications (DECISION 62). The phone tells the desk where to push through an encrypted note on a
+  // private ntfy.sh topic (a hash of the token, never the token). Nothing here can trade: Approve/Skip open Telegram.
+  const PUSH_SALT = "grok-bot-desk/v1/push:", NTFY = "https://ntfy.sh/";
+  const PCATS = [["trades", "Trades", "GMGN live buys and sells with P&L"], ["approvals", "Approvals", "Big market-cap buys waiting for you, with Approve / Skip"],
+    ["alerts", "Alerts", "Stop or sell failures, out of SOL, desk problems"], ["pipeline", "Pipeline", "A coin passing Scanner → Auditor → Analyst (one notification per coin, updated in place)"],
+    ["stratb", "Strategy B", "Paper buys and sells, labelled PAPER"], ["paper", "FOMO paper test", "Paper test buys and sells"]];
+  const PDEF = { trades: true, approvals: true, alerts: true, pipeline: true, stratb: true, paper: false };
+  const P = { busy: false, msg: "", sub: null, hash: null, checked: false };
+  function pushCats() { try { return Object.assign({}, PDEF, JSON.parse(localStorage.getItem("desk.pushCats") || "{}")); } catch (_) { return Object.assign({}, PDEF); } }
+  let ekeyP = null;
+  function ekey() {
+    if (!ekeyP) ekeyP = crypto.subtle.importKey("raw", enc.encode(TOKEN()), "PBKDF2", false, ["deriveKey"])
+      .then(k => crypto.subtle.deriveKey({ name: "PBKDF2", salt: enc.encode(SALT), iterations: ITER, hash: "SHA-256" }, k, { name: "AES-GCM", length: 256 }, false, ["encrypt"]));
+    return ekeyP;
+  }
+  const toB64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
+  const hex = buf => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+  function b64uBytes(s) { s = s.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(s + "=".repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0)); }
+  async function topicName() { return "gbdesk-" + hex(await crypto.subtle.digest("SHA-256", enc.encode(PUSH_SALT + TOKEN()))).slice(0, 40); }
+  async function relay(msg) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await ekey(), enc.encode(JSON.stringify(Object.assign({}, msg, { ts: Date.now() }))));
+    const r = await fetch(NTFY + await topicName(), { method: "POST", body: JSON.stringify({ v: 1, iv: toB64(iv), ct: toB64(ct) }) });
+    if (!r.ok) throw new Error("relay HTTP " + r.status);
+  }
+  const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const deviceName = () => (/Android/.test(navigator.userAgent) ? "Android" : /iPhone|iPad/.test(navigator.userAgent) ? "iPhone" : "Desktop") + (/Chrome\//.test(navigator.userAgent) ? " Chrome" : "");
+  async function refreshSub() {
+    if (!pushSupported()) { P.checked = true; return; }
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      P.sub = await reg.pushManager.getSubscription();
+      P.hash = P.sub ? hex(await crypto.subtle.digest("SHA-256", enc.encode(P.sub.endpoint))).slice(0, 16) : null;
+    } catch (_) { P.sub = null; P.hash = null; }
+    P.checked = true;
+  }
+  function pushOn() { return pushSupported() && Notification.permission === "granted" && !!P.sub; }
+  function deskHasMe() { const subs = F("state.json")?.push?.subs; return subs && P.hash ? subs.some(s => s.id === P.hash) : null; }
+  async function enablePush() {
+    const vapid = F("state.json")?.push?.vapid;
+    if (!vapid) { P.msg = "The desk hasn't published its notification key yet. Pull down to refresh in a minute and tap again."; render(); return; }
+    P.busy = true; P.msg = ""; render();
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") throw new Error(perm === "denied" ? "blocked" : "dismissed");
+      const reg = await navigator.serviceWorker.ready;
+      const want = b64uBytes(vapid);
+      let sub = await reg.pushManager.getSubscription();
+      const have = sub?.options?.applicationServerKey;
+      if (sub && have && toB64(have) !== toB64(want)) { await sub.unsubscribe(); sub = null; }
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+      await relay({ type: "sub", sub: sub.toJSON(), cats: pushCats(), device: deviceName() });
+      localStorage.setItem("desk.pushSent", String(Date.now()));
+      P.msg = "Done ✓ A “Notifications on ✓” alert should pop up within a few seconds.";
+    } catch (e) {
+      P.msg = e.message === "blocked" ? "Notifications are blocked for this app. In Chrome tap ⋮ → Settings → Site settings → Notifications, allow this site (or long-press the app icon → App info → Notifications → on), then tap the button again."
+        : e.message === "dismissed" ? "The prompt was closed. Tap the button again and choose Allow." : "Couldn't turn on notifications: " + e.message;
+    }
+    P.busy = false; await refreshSub(); render();
+  }
+  async function savePushCats(cats) {
+    localStorage.setItem("desk.pushCats", JSON.stringify(cats));
+    if (P.sub) { try { await relay({ type: "sub", sub: P.sub.toJSON(), cats, device: deviceName() }); P.msg = "Saved ✓"; } catch (e) { P.msg = "Couldn't save: " + e.message; } }
+    render();
+  }
+  async function testPush() {
+    if (!P.sub) return;
+    try { await relay({ type: "test", endpoint: P.sub.endpoint }); P.msg = "Test sent. It should arrive within a few seconds."; } catch (e) { P.msg = "Couldn't send the test: " + e.message; }
+    render();
+  }
+  async function disablePush() {
+    try { if (P.sub) { await relay({ type: "unsub", endpoint: P.sub.endpoint }); await P.sub.unsubscribe(); } P.msg = "Notifications are off on this phone."; } catch (e) { P.msg = "Couldn't turn off: " + e.message; }
+    await refreshSub(); render();
+  }
+  async function pushResync() {                 // the phone is subscribed but the desk doesn't list it: tell it again (max every 10 min)
+    if (!pushOn() || deskHasMe() !== false) return;
+    if (Date.now() - +(localStorage.getItem("desk.pushSent") || 0) < 10 * 60 * 1000) return;
+    try { await relay({ type: "sub", sub: P.sub.toJSON(), cats: pushCats(), device: deviceName() }); localStorage.setItem("desk.pushSent", String(Date.now())); } catch (_) {}
+  }
+  function pushBanner() {
+    if (!P.checked || !pushSupported() || pushOn()) return "";
+    if (+(localStorage.getItem("desk.pushLater") || 0) > Date.now()) return "";
+    const denied = Notification.permission === "denied";
+    return `<div class="card pushcta"><div class="t1">🔔 Get live notifications</div>
+      <div class="sub wrap">Buys, sells with P&amp;L, approvals and alerts pop up on your phone right away. Telegram keeps working as a backup.</div>
+      <button class="btn pushbtn" id="pushOn"${P.busy ? " disabled" : ""}>${P.busy ? "Turning on…" : denied ? "Notifications blocked · how to fix" : "Turn on notifications"}</button>
+      ${P.msg ? `<div class="hint">${esc(P.msg)}</div>` : ""}<button class="later" id="pushLater">Not now</button></div>`;
+  }
+  function pushSection() {
+    if (!pushSupported()) return `<h1>Notifications</h1><div class="card"><div class="sub wrap">This browser can't show notifications. Open the app in Chrome on your phone.</div></div>`;
+    const on = pushOn(), cats = pushCats(), me = deskHasMe(), last = F("state.json")?.push?.last;
+    let h = `<h1>Notifications</h1><div class="card">`;
+    if (!on) {
+      h += `<div class="sub wrap">Off on this phone. Telegram (@Denarpobot) still gets everything.</div>
+        <button class="btn pushbtn" id="pushOn"${P.busy ? " disabled" : ""}>${P.busy ? "Turning on…" : "🔔 Turn on notifications"}</button>`;
+    } else {
+      h += `<div class="row"><div class="grow"><div class="t">On for this phone</div><div class="s wrap">${me === true ? "The desk has this phone ✓" : me === false ? "Waiting for the desk to confirm (next update)" : "Checking…"}${last ? " · last sent " + esc(tm(last.t)) : ""}</div></div><span class="toggle on"></span></div>`;
+      h += PCATS.map(([k, label, sub]) => `<label class="row pcat"><div class="grow"><div class="t">${label}</div><div class="s wrap">${sub}</div></div>
+        <input type="checkbox" class="pchk" data-cat="${k}"${cats[k] ? " checked" : ""}><span class="toggle${cats[k] ? " on" : ""}"></span></label>`).join("");
+      h += `<div class="ovr"><button class="btn ghost" id="pushTest">Send a test</button><button class="btn ghost" id="pushOff">Turn off</button></div>`;
+    }
+    if (P.msg) h += `<div class="hint">${esc(P.msg)}</div>`;
+    return h + `</div>`;
+  }
+  function bindPush() {
+    const on = $("#pushOn");
+    if (on) on.onclick = () => { if (Notification.permission === "denied") { P.msg = "Notifications are blocked for this app. In Chrome tap ⋮ → Settings → Site settings → Notifications, allow this site (or long-press the app icon → App info → Notifications → on), then tap the button again."; render(); return; } enablePush(); };
+    const later = $("#pushLater"); if (later) later.onclick = () => { localStorage.setItem("desk.pushLater", String(Date.now() + 24 * 3600 * 1000)); render(); };
+    const t = $("#pushTest"); if (t) t.onclick = testPush;
+    const off = $("#pushOff"); if (off) off.onclick = disablePush;
+    document.querySelectorAll(".pchk").forEach(cb => cb.onchange = () => { const c = pushCats(); c[cb.dataset.cat] = cb.checked; savePushCats(c); });
+  }
+
   // ---------- data store
   const S = { files: {}, lastGood: null, offline: null, badKey: false, missing: new Set(), loadedOnce: false };
   window.__desk = S;
@@ -63,7 +176,7 @@
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
     const delay = (r.name === "live" || r.name === "scores" || r.name === "scanner" || r.name === "stratblive") ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
-    render();
+    render(); pushResync();
     pollTimer = setTimeout(poll, delay * 1000);
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
@@ -270,7 +383,7 @@
   function home() {
     const g = gate(); if (g) return g;
     const st = F("state.json"), gm = st.gmgn || gmgnState(), tr = F("trades.json");
-    let h = moneyTabs();
+    let h = pushBanner() + moneyTabs();
     if (route().name === "paper") return h + paperView(st, tr) + tonightAndAgents(st);
     // ---- Real money: GMGN LIVE only
     h += gmgnWalletCard(gm);
@@ -781,8 +894,8 @@
       <div class="row"><div class="grow"><div class="t">${a.mode === "PAPER" ? "FOMO practice balance (PAPER, not real money)" : "FOMO LIVE stack"}</div><div class="s">Change in Telegram: stack 1240</div></div><div class="r">${money(a.stack)}</div></div>
       <a class="row" href="${esc(a.profile_url)}" target="_blank" rel="noopener"><div class="grow"><div class="t">FOMO profile</div><div class="s">@${esc(a.fomoHandle)}</div></div><div class="r cyan">Open ›</div></a>
       <button class="row" id="invite" style="width:100%;text-align:left"><div class="grow"><div class="t">Invite a friend</div><div class="s">10% off FOMO fees through your link</div></div><div class="r cyan">Share ›</div></button>
-      <div class="row"><div class="grow"><div class="t">Notifications</div><div class="s wrap">Notifications come through Telegram (@Denarpobot)</div></div></div>
     </div>`;
+    h += pushSection();
     h += `<h1>Agents</h1><div class="card list">${AGENTS.map(n => { const hb = st?.agents?.[n]; return `<div class="row"><div class="grow"><div class="t">${n[0].toUpperCase() + n.slice(1)}</div><div class="s">${hb?.paused ? "paused · resume " : "running · pause "}${n[0].toUpperCase() + n.slice(1)}</div></div><span class="toggle ${hb?.paused ? "" : "on"}" aria-disabled="true"></span></div>`; }).join("")}</div>`;
     const by = {};
     a.settings.forEach(s => { const gk = s.key.split(".")[0]; (by[gk] = by[gk] || []).push(s); });
@@ -827,6 +940,7 @@
     if (cr.name === "audit") { const a = F(`audit/${cr.arg}.json`); const key2 = a && (cr.arg + a.ts);
       if (a) { const fresh = render._audit !== key2; render._audit = key2; discAnim(a, !fresh); } }
     else render._audit = null;
+    bindPush();
     const inv = $("#invite");
     if (inv) inv.onclick = async () => {
       const url = F("account.json")?.SIGNUP_URL; if (!url) return;
@@ -835,6 +949,10 @@
     };
   }
 
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.addEventListener("message", e => { const n = e.data && e.data.nav; if (typeof n === "string" && n.startsWith("#/")) location.hash = n; });
+  }
+  refreshSub().then(() => { render(); pushResync(); });
   render(); poll();
 })();
