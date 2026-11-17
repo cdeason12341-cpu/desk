@@ -4,7 +4,7 @@
   "use strict";
   const POLL_S = 30, LIVE_POLL_S = 15, SALT = "grok-bot-desk/v1/salt", ITER = 200000;
   const AGENTS = ["scanner", "auditor", "analyst", "executor", "risk"];
-  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", "scanner.json", "strat_b.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const CORE = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "feed.json", "trades.json", "scanner.json", "strat_b.json", "strat_b_live.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const $ = s => document.querySelector(s);
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const enc = new TextEncoder();
@@ -61,7 +61,7 @@
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    const delay = (r.name === "live" || r.name === "scores" || r.name === "scanner") ? LIVE_POLL_S : POLL_S;
+    const delay = (r.name === "live" || r.name === "scores" || r.name === "scanner" || r.name === "stratblive") ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
     render();
     pollTimer = setTimeout(poll, delay * 1000);
@@ -86,7 +86,7 @@
     const p = location.hash.replace(/^#\/?/, "").split("/");
     return { name: p[0] || "home", arg: p[1] ? decodeURIComponent(p[1]) : null };
   }
-  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores" || r.name === "scanner") poll(); else render(); });
+  window.addEventListener("hashchange", () => { window.scrollTo(0, 0); const r = route(); if (r.name === "coin" || r.name === "audit" || r.name === "live" || r.name === "scores" || r.name === "scanner" || r.name === "stratblive") poll(); else render(); });
 
   // ---------- chrome
   function statusRow() {
@@ -108,7 +108,7 @@
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || ((r === "scores" || r === "scanner") && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
+    document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || ((r === "scores" || r === "scanner") && a.dataset.tab === "live") || (r === "paper" && a.dataset.tab === "home") || (r === "stratblive" && a.dataset.tab === "stratb") || (r === "coin" || r === "audit") && a.dataset.tab === "home"));
     statusRow();
   }
   $("#bellBtn").onclick = () => { location.hash = "#/activity"; };
@@ -318,10 +318,66 @@
       <div class="grow"><div class="t">${esc(name)} <span class="badge" style="margin-left:6px">PAPER</span></div><div class="s">${sub}</div>${r.why ? `<div class="s" style="white-space:normal">${esc(r.why)}</div>` : ""}</div>
       <div class="r"><div class="${up ? "green" : "red"}">${money(r.pnlUsd)}</div><div class="s">${pct(r.pct)}</div></div></a>`;
   }
+  function stratBTabs() {
+    const live = route().name === "stratblive";
+    return `<div class="seg" role="tablist" aria-label="Strategy B overview or live">
+      <a href="#/stratb" class="${live ? "" : "on paper"}" role="tab" aria-selected="${!live}">Overview</a>
+      <a href="#/stratblive" class="${live ? "on paper" : ""}" role="tab" aria-selected="${live}">Live</a></div>`;
+  }
+  function bCheck(c) {
+    const st = c.pass === true ? `<span class="pf ok">PASS</span>` : c.pass === false ? `<span class="pf bad">FAIL</span>` : `<span class="pf">—</span>`;
+    return `<div class="scheck"><span class="k">${esc(c.label)}</span><span class="v">${esc(c.value)}</span><span class="b">${esc(c.bar)}</span>${st}</div>`;
+  }
+  function bMini(cks) {
+    return `<div class="schecks mini">${(cks || []).map(c => `<span class="${c.pass === true ? "ok" : c.pass === false ? "bad" : ""}">${esc(c.label)} ${esc(c.value)}</span>`).join("")}</div>`;
+  }
+  function bPill(st) {
+    const cls = st === "bought" ? "green" : st === "skipped" ? "red" : st === "watching" ? "amber" : "";
+    return `<span class="pill ${cls}">${esc(st)}</span>`;
+  }
+  function bEvalRow(it) {
+    const label = it.name || it.symbol || short(it.mint);
+    const fails = (it.checks || []).filter(c => c.pass === false).map(c => c.label).join(", ");
+    return `<div class="score-row scan-row">
+      <div class="rowx"><div class="grow"><div class="t">${esc(label)}</div>
+        <div class="s">${tmCT(it.t)}${it.symbol && it.name && it.symbol !== it.name ? " · " + esc(it.symbol) : ""}${it.price ? " · " + price(it.price) : ""}</div>
+        <div class="s ${it.status === "skipped" ? "red" : ""}" style="white-space:normal">${esc(it.reason || "")}</div></div>
+        <div class="pillcol">${bPill(it.status)}</div></div>
+      ${bMini(it.checks)}
+      <div class="detail"><div class="schecks">${(it.checks || []).map(bCheck).join("")}</div>
+        ${fails ? `<div class="sub" style="margin-top:6px">Failed: ${esc(fails)}</div>` : ""}
+        <div class="sub" style="margin-top:6px">${esc(it.mint)}</div>
+        <a class="btn fomo" href="${esc(it.link)}" target="_blank" rel="noopener">Open on FOMO</a></div></div>`;
+  }
+  function bWatchRow(w) {
+    const label = w.name || w.symbol || short(w.mint);
+    return `<div class="score-row scan-row">
+      <div class="rowx"><div class="grow"><div class="t">${esc(label)}</div>
+        <div class="s">${w.minLeft}m left · ${w.ageMin ?? "?"}m since graduation${w.price ? " · " + price(w.price) : ""}</div>
+        <div class="s" style="white-space:normal">${(w.away || []).length ? "Needs: " + esc(w.away.join(" · ")) : "In the buy zone"}</div></div>
+        <div class="pillcol"><span class="pill amber">${w.passCount}/${w.checkCount}</span></div></div>
+      ${bMini(w.checks)}
+      <div class="detail"><div class="schecks">${(w.checks || []).map(bCheck).join("")}</div>
+        <div class="sub" style="margin-top:6px">High ${price(w.high)} · low since high ${price(w.low)} · watching until ${tmCT(w.expiresAt)}</div>
+        <a class="btn fomo" href="${esc(w.link)}" target="_blank" rel="noopener">Open on FOMO</a></div></div>`;
+  }
+  function stratBLive() {
+    const g = gate(); if (g) return g;
+    const L = F("strat_b_live.json");
+    let h = stratBTabs() + `<h1>Strategy B · Live <span class="badge">PAPER</span></h1>`;
+    if (!L) return h + emptyBox("Strategy B live view hasn't published yet", "It shows up after the desk's next publish.");
+    const n = L.counts || {};
+    h += `<div class="pills" style="margin:0 0 12px"><span class="pill amber">${n.watching ?? 0} watching</span><span class="pill green">${n.boughtTonight ?? 0} bought</span><span class="pill red">${n.skippedTonight ?? 0} skipped</span><span class="pill">${n.expiredTonight ?? 0} expired</span><span class="pill">${n.evaluationsTonight ?? 0} evaluations tonight</span></div>`;
+    h += `<h1>Watchlist</h1>` + ((L.watchlist || []).length ? `<div class="card list">${L.watchlist.map(bWatchRow).join("")}</div>`
+      : emptyBox("Nothing on the watchlist", "Coins the auditor passes and B's holder checks clear show up here for up to 3 hours."));
+    h += `<h1>Evaluations tonight</h1>` + ((L.items || []).length ? `<div class="card list">${L.items.map(bEvalRow).join("")}</div>`
+      : emptyBox("No Strategy B evaluations tonight yet", "B looks at every coin the auditor passes."));
+    return h + `<div class="sub" style="margin-top:6px">Newest first. A row is added when a coin's verdict changes. Tap a row for every check. Strategy B is paper only and never places a real order. This app is read-only.</div>`;
+  }
   function stratB() {
     const g = gate(); if (g) return g;
     const b = F("strat_b.json");
-    let h = `<h1>Strategy B <span class="badge">PAPER</span></h1>`;
+    let h = stratBTabs() + `<h1>Strategy B <span class="badge">PAPER</span></h1>`;
     if (!b) return h + emptyBox("Strategy B hasn't published yet", "It shows up after the desk's next publish.");
     const d = b.bankroll - b.bankrollStart;
     h += `<div class="card paper"><div class="rowx"><div class="sub">${esc(b.label)} · simulated, not real money${b.enabled ? "" : " · off"}</div><span class="badge">PAPER</span></div>
@@ -748,7 +804,7 @@
   function render() {
     chrome();
     const r = route();
-    const html = r.name === "stratb" ? stratB() : r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
+    const html = r.name === "stratb" ? stratB() : r.name === "stratblive" ? stratBLive() : r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
       : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg) : (r.name === "scores" || r.name === "live" || r.name === "scanner") ? scores() : home();
     V.innerHTML = html;
     chrome();

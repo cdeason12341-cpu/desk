@@ -180,3 +180,14 @@ Simulated strategy, separate from GMGN and from trades.json. Never real money; t
  "rules":[{"k":"Stop","v":"-35% from entry, from the first second","why":"…"}]}
 ```
 `state.json` also carries `stratB`: `{label, mode, enabled, bankroll, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, watching, openCount}`.
+
+## strat_b_live.json (Strat B → Live) — PAPER ONLY (DECISION 60)
+```json
+{"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","night":"…","enabled":true,
+ "counts":{"watching":3,"skippedTonight":9,"boughtTonight":1,"expiredTonight":2,"evaluationsTonight":41},
+ "items":[{"id":41,"t":"…Z","mint","name","symbol","kind":"offer|wait|buy|expired","status":"watching|skipped|bought|expired",
+           "reason":"top 10 hold 24.5% > 20%","price":0.0001,"link":"…r=savipww…",
+           "checks":[{"k":"top10","label":"Top 10","pass":false,"value":"24.5%","bar":"≤ 20%"}, … 10 checks …]}],
+ "watchlist":[{"mint","name","symbol","addedAt","expiresAt","minLeft":142,"ageMin":51,"price","high","low",
+               "checks":[…],"passCount":7,"checkCount":10,"away":["9m left of the wait","needs 6.2% more dip"],"evalAt","link"}]}
+```
