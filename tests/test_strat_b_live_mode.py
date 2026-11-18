@@ -120,16 +120,22 @@ def test_live_refused_when_wallet_empty_then_cooldown():
     assert len(_orders(c)) == 2 and len([m for m in c.notifier.sent if "Skipped" in m["text"]]) == 1   # pushed once per coin
 
 
-def test_live_respects_halt_and_a_open_cap():
+def test_live_respects_halt_and_own_open_cap():
     c, clock, sb, cl, chain = _live(wallet_sol=5.0)
     c.gmgn.halt(True, "test")
     _signal(c, clock, sb, chain)
     assert _orders(c)[0]["status"] == "refused" and "halted" in _orders(c)[0]["note"]
+    # DECISION 71: A LIVE's open positions no longer take B's slots (A at its max 1 doesn't block B)
     c2, clock2, sb2, cl2, chain2 = _live(wallet_sol=5.0, **{"gmgn.max_open": 1})
     c2.db.x("INSERT INTO gmgn_orders(ts,night,mode,mint,status,size_usd) VALUES(?,?,?,?,?,?)", (clock2.t, c2.night, "LIVE", M2, "open", 10))
     _signal(c2, clock2, sb2, chain2)
-    r = _orders(c2)[0]
-    assert r["status"] == "refused" and "max 1 at once" in r["note"] and not _swaps(cl2)
+    assert _orders(c2)[0]["status"] == "open" and len(_swaps(cl2)) == 1
+    # ...but B's own strat_b.live_max_open does
+    c3, clock3, sb3, cl3, chain3 = _live(wallet_sol=5.0, **{"strat_b.live_max_open": 1})
+    c3.db.x("INSERT INTO strat_b_orders(ts,night,mode,mint,name,status,size_usd,lamports,opened_at,entry_price,peak,last_price) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (clock3.t, c3.night, "LIVE", M2, "Other", "open", 10, int(10 / SOL_USD * LAMPORTS), clock3.t, 1.0, 1.0, 1.0))
+    _signal(c3, clock3, sb3, chain3)
+    assert not _swaps(cl3) and not [o for o in _orders(c3) if o["mint"] == M and o["status"] == "open"]
 
 
 def test_live_take_profit_real_sell_and_chain_close():

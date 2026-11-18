@@ -405,6 +405,11 @@ class Telegram:
                      f"{len(lc['open'])} open · B PAPER bankroll ${sb.bankroll():,.2f}")
             if lc["freeSol"] is not None:
                 line += f" · free {lc['freeSol']:.4f} SOL after the {s['gmgn.sol_reserve']:g} SOL reserve"
+            bb = lc.get("budget") or {}
+            if bb.get("budgetSol") is not None:                     # DECISION 71: B's share of the wallet
+                usd = f" (${bb['budgetUsd']:,.2f})" if bb.get("budgetUsd") is not None else ""
+                line += (f" · B's {bb['sharePct']:g}% share: {bb['budgetSol']:.4f} SOL{usd} free to buy, "
+                         f"{bb['openCount']}/{bb['maxOpen']} open")
         return line
 
     async def cmd_strat_b(self, t, low):

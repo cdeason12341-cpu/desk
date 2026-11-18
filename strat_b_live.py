@@ -6,7 +6,9 @@ same signed client as Strategy A (ctx.gmgn), with A's safety:
 - free SOL = wallet - 0.02 SOL reserve (gmgn.sol_reserve) - SOL in flight (A LIVE + B LIVE); refuse with a reason if short.
 - size: strat_b.trade_usd when free SOL covers it with fees and rent, else A's own rule (pick_size): the
   gmgn.fallback_trade_usd size, else whatever free SOL covers down to gmgn.min_trade_usd (owner 8:15 AM CT, t305u).
-- A's hard caps (check_caps): per-trade cap, max open, night tickets / spend; these are global across A LIVE + B LIVE.
+- A's per-trade cap (gmgn.cap_trade_usd); since DECISION 71 B has its own LIVE slots (strat_b.live_max_open) and night
+  tickets (strat_b.live_max_tickets_night), and sizes against its own share of the wallet (strat_b.live_wallet_share_pct,
+  formula in agents/gmgn_trader.py). A coin held by A LIVE is never bought by B (and vice versa).
 - /halt stops B LIVE buys too.
 - a GMGN server-side loss_stop at -strat_b.stop_pct rides on the buy (survives box sleep). If GMGN doesn't show it
   after the fill, a limit stop_loss is created for the held amount; if that fails, market-sell and alert.
@@ -36,6 +38,14 @@ def b_buy_body(s, mint: str, lamports: int) -> dict:
     body = A.buy_body(s, mint, lamports)
     body["condition_orders"] = b_conditions(s)
     return body
+
+
+def budget(c):
+    """B's DECISION 71 wallet-share view from the cached wallet read (no network call)."""
+    g = getattr(c, "gmgn", None)
+    lam = getattr(g, "_bal", (0, None))[1] if g is not None else None
+    sol = getattr(g, "_sol", (0, None))[1] if g is not None else None
+    return A.budget_view(c.s, c.db, "B", lam, sol)
 
 
 def wallet_view(c):
@@ -123,15 +133,18 @@ class BLive:
         if not sol_usd:
             return await self._refuse(w, "no SOL price from GMGN", 0, now)
         wallet = await t.wallet_lamports(fresh=True)
-        free = A.free_lamports(s, wallet, A.committed_lamports(c.db, "LIVE"))
+        free = A.strategy_free_lamports(s, c.db, "B", wallet)          # DECISION 71: B's share of the wallet only
         pool_cap = (m["liq"] * s["strat_b.max_pool_pct"] / 100.0) if m.get("liq") else None
         size, lamports, short = A.pick_size(s, free, sol_usd, pool_cap, top_usd=s["strat_b.trade_usd"])
         if size is None:
             return await self._refuse(w, short, 0, now, wallet_kind=True)
         try:
-            A.check_caps(s, c.db, c.night, "LIVE", size, lamports, sol_usd, wallet)
+            A.check_caps(s, c.db, c.night, "LIVE", size, lamports, sol_usd, wallet, strategy="B")
         except A.CapError as e:
             return await self._refuse(w, str(e), size, now, wallet_kind=True)
+        held = A.mint_held_live(c.db, mint)          # re-check after the awaits above; nothing awaits from here to the row insert
+        if held:
+            return await self._refuse(w, f"already held by {held} LIVE in the wallet", 0, now)
         body = b_buy_body(s, mint, lamports)
         if body["from_address"] != MAIN_WALLET or body["input_token"] != SOL or int(body["input_amount"]) != lamports:
             return await self._refuse(w, "swap body mismatch", size, now)

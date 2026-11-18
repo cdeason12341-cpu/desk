@@ -612,19 +612,22 @@ class Builder:
 
     def gmgn(self):
         """Read-only GMGN wallet + trades for the phone app. No secrets, no order bodies."""
-        from agents.gmgn_trader import night_usage, ACTIVE, paper_snapshot
+        from agents.gmgn_trader import night_usage, ACTIVE, paper_snapshot, budget_view
         from gmgn import MAIN_WALLET
         c, s = self.c, self.c.s
         g = getattr(self.d, "gmgn", None)
         snap = g.wallet_snapshot() if g and hasattr(g, "wallet_snapshot") else {
             "sol": None, "usd": None, "solUsd": None, "updatedAt": None}
         mode = s["gmgn.mode"]
-        n, used = night_usage(c.db, c.night, mode)
+        n, used = night_usage(c.db, c.night, mode, "A")
         cap = float(s["gmgn.cap_trade_usd"])
         tickets = int(s["gmgn.max_tickets_night"])
         placeholders = ",".join("?" * len(ACTIVE))
         open_rows = c.db.rows(f"SELECT * FROM gmgn_orders WHERE status IN ({placeholders}) ORDER BY ts", ACTIVE)
         recent = c.db.rows("SELECT * FROM gmgn_orders ORDER BY id DESC LIMIT 20")
+        live_recent = c.db.rows("SELECT * FROM gmgn_orders WHERE mode='LIVE' AND status NOT IN ('refused') ORDER BY id DESC LIMIT 20")
+        lam = getattr(g, "_bal", (0, None))[1] if g is not None else None
+        budgets = {k: budget_view(s, c.db, k, lam, snap.get("solUsd")) for k in ("A", "B")}      # DECISION 71
         ps = paper_snapshot(s, c.db)
         paper = {k: ps[k] for k in ("bankrollUsd", "tradeUsd", "pnlUsd", "inPositionsUsd", "freeUsd")}
         paper["since"] = iso(ps["since"]) if ps["since"] else None
@@ -637,7 +640,9 @@ class Builder:
                 "nightSpendUsd": round(used, 2), "nightCapUsd": round(cap * tickets, 2),
                 "reserveSol": s["gmgn.sol_reserve"],
                 "paper": paper,
+                "bMode": s["strat_b.mode"], "budgets": budgets,
                 "open": [self.gmgn_position(r) for r in open_rows],
+                "liveOrders": [self.gmgn_order(r) for r in live_recent],
                 "orders": [self.gmgn_order(r) for r in recent]}
 
     BYPASS_PREFIX = "BYPASS · "

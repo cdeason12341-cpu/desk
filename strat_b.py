@@ -383,8 +383,9 @@ class StratB:
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ('submitting','pending','open','exiting')")["n"]
         else:
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE status='open' AND mode='PAPER'")["n"]
-        if n >= s["strat_b.max_open"]:
-            return f"{n} open (max {s['strat_b.max_open']})"
+        mx = s["strat_b.live_max_open"] if mode == "LIVE" else s["strat_b.max_open"]    # DECISION 71: B LIVE's own slots
+        if n >= mx:
+            return f"{n} open (max {mx})"
         lim = self.daily_loss_limit()
         pnl = self.night_pnl(mode)                       # LIVE: real P&L only
         if pnl <= -lim:
@@ -662,6 +663,7 @@ def live_card(c, limit=40) -> dict:
             "unrealizedUsd": round(sum(_order_view(s, o)["pnlUsd"] or 0 for o in opens), 2),
             "inPositions": round(sum(o["size_usd"] or 0 for o in opens), 2),
             "wallet": wallet, "freeSol": free_sol, "reserveSol": s["gmgn.sol_reserve"],
+            "budget": strat_b_live.budget(c),
             "refusedTonight": len(refused), "lastRefusal": ({"t": iso(refused[0]["ts"]), "name": refused[0]["name"], "reason": refused[0]["note"]} if refused else None),
             "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
             "failed": [_order_view(s, o) for o in failed]}

@@ -144,6 +144,8 @@ SPECS: list[Spec] = [
     _s("gmgn.paper_bankroll_usd", 2500.0, 1, 1_000_000, aliases=("a paper bankroll", "paper bankroll"), fmt="${v:,.2f}"),
     _s("gmgn.paper_trade_usd", 500.0, 1, 10000, aliases=("a paper trade", "paper trade size"), fmt="${v:,.2f}"),
     _s("gmgn.max_open", 4, 1, 20, aliases=("gmgn max open", "max open"), fmt="{v}"),                     # LIVE positions at once (pending+open+exiting)
+    # DECISION 71: share of the one GMGN wallet each strategy may use while LIVE (100 = whole wallet, old behaviour)
+    _s("gmgn.live_wallet_share_pct", 100.0, 0, 100, aliases=("a wallet share", "a share"), fmt="{v:g}%"),
     _s("gmgn.live_gate_h", 2.0, 0.5, 48, aliases=("gmgn gate",), fmt="{v:g}h"),
     _s("gmgn.slippage_pct", 15, 1, 50, aliases=("gmgn slippage", "slippage"), fmt="{v:g}%"),
     _s("gmgn.priority_fee_sol", 0.0002, 0, 0.01, aliases=("gmgn priority fee", "priority fee"), fmt="{v:g} SOL"),
@@ -174,6 +176,10 @@ SPECS: list[Spec] = [
     _s("strat_b.max_open", 5, 1, 50, aliases=("b max open",), fmt="{v}"),
     _s("strat_b.daily_loss_stop_pct", 10.0, 1, 100, aliases=("b daily loss", "b loss stop"), fmt="-{v:g}%", neg=True),
     # DECISION 69 (owner 2026-11-17 5:23 PM CT): LIVE daily loss stop is real money, not the paper bankroll.
+    # DECISION 71: B LIVE's own wallet share and its own LIVE slots / tickets (no longer shared with Strategy A)
+    _s("strat_b.live_wallet_share_pct", 100.0, 0, 100, aliases=("b wallet share", "b share"), fmt="{v:g}%"),
+    _s("strat_b.live_max_open", 4, 1, 20, aliases=("b live max open",), fmt="{v}"),
+    _s("strat_b.live_max_tickets_night", 4, 1, 50, aliases=("b live tickets",), fmt="{v}"),
     _s("strat_b.live_daily_loss_usd", 20.0, 1, 1_000_000, aliases=("b live daily loss", "b live loss"), fmt="${v:,.2f}"),
     _s("strat_b.min_age_min", 60, 0, 1440, aliases=("b min age", "b wait"), fmt="{v}m"),
     _s("strat_b.watch_max_min", 180, 10, 10080, aliases=("b watch",), fmt="{v}m"),
@@ -211,7 +217,9 @@ SPECS: list[Spec] = [
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.
 CAP_KEYS = ("gmgn.cap_trade_usd", "gmgn.max_tickets_night", "gmgn.fallback_trade_usd", "gmgn.min_trade_usd", "gmgn.max_open")
-PROTECTED = {"desk.mode", "gmgn.mode", "gmgn.live_gate_h", "strat_b.mode", *CAP_KEYS}   # strat_b.mode: PAPER|LIVE, owner command only (DECISION 66)
+PROTECTED = {"desk.mode", "gmgn.mode", "gmgn.live_gate_h", "strat_b.mode", *CAP_KEYS,
+             # DECISION 71: wallet split + B's own LIVE caps are money limits too (owner command, force=True)
+             "gmgn.live_wallet_share_pct", "strat_b.live_wallet_share_pct", "strat_b.live_max_open", "strat_b.live_max_tickets_night"}   # strat_b.mode: PAPER|LIVE, owner command only (DECISION 66)
 BY_KEY = {s.key: s for s in SPECS}
 ALIASES: dict[str, str] = {}
 for _sp in SPECS:

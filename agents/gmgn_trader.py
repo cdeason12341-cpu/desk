@@ -203,11 +203,16 @@ def _b_live(db, sql, args=()):
         return None
 
 
-def open_count(db, mode: str) -> int:
-    """GMGN positions held or being bought right now (pending + open + exiting). LIVE includes Strategy B LIVE."""
-    n = int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE mode=? AND status IN ({','.join('?'*len(ACTIVE))})", (mode, *ACTIVE))["n"])
-    if mode == "LIVE":
-        r = _b_live(db, f"SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ({','.join('?'*len(ACTIVE))})", ACTIVE)
+def open_count(db, mode: str, strategy: str | None = None) -> int:
+    """GMGN positions held or being bought right now (pending + open + exiting).
+    strategy=None (old global view): LIVE includes Strategy B LIVE. strategy='A': gmgn_orders only.
+    strategy='B': Strategy B LIVE rows only (DECISION 71: each strategy has its own LIVE slots)."""
+    ph = ','.join('?' * len(ACTIVE))
+    n = 0
+    if strategy in (None, "A"):
+        n += int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE mode=? AND status IN ({ph})", (mode, *ACTIVE))["n"])
+    if mode == "LIVE" and strategy in (None, "B"):
+        r = _b_live(db, f"SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ({ph})", ACTIVE)
         n += int((r or {}).get("n") or 0)
     return n
 
@@ -331,21 +336,105 @@ def pick_paper_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | No
                      f"(bankroll ${s['gmgn.paper_bankroll_usd']:,.2f})")
 
 
-def night_usage(db, night: str, mode: str) -> tuple[int, float]:
-    r = db.one(f"SELECT COUNT(*) n, COALESCE(SUM(size_usd),0) u FROM gmgn_orders WHERE night=? AND mode=? AND status IN ({','.join('?'*len(COUNTED))})",
-               (night, mode, *COUNTED))
-    n, u = int(r["n"]), float(r["u"])
-    if mode == "LIVE":                                   # Strategy B LIVE tickets count toward the same night caps
-        b = _b_live(db, f"SELECT COUNT(*) n, COALESCE(SUM(size_usd),0) u FROM strat_b_orders WHERE night=? AND mode='LIVE' AND status IN ({','.join('?'*len(COUNTED))})",
+def night_usage(db, night: str, mode: str, strategy: str | None = None) -> tuple[int, float]:
+    """Tickets / dollars used tonight. strategy=None: LIVE counts A + B (old global view); 'A' or 'B': that one only."""
+    ph = ','.join('?' * len(COUNTED))
+    n, u = 0, 0.0
+    if strategy in (None, "A"):
+        r = db.one(f"SELECT COUNT(*) n, COALESCE(SUM(size_usd),0) u FROM gmgn_orders WHERE night=? AND mode=? AND status IN ({ph})",
+                   (night, mode, *COUNTED))
+        n, u = int(r["n"]), float(r["u"])
+    if mode == "LIVE" and strategy in (None, "B"):
+        b = _b_live(db, f"SELECT COUNT(*) n, COALESCE(SUM(size_usd),0) u FROM strat_b_orders WHERE night=? AND mode='LIVE' AND status IN ({ph})",
                     (night, *COUNTED))
         n, u = n + int((b or {}).get("n") or 0), u + float((b or {}).get("u") or 0)
     return n, u
 
 
-def check_caps(s, db, night, mode, size_usd, lamports, sol_usd, wallet_lamports) -> None:
-    """Hard caps. Raises CapError with a plain reason. Called before the order row exists."""
-    cap = float(s["gmgn.cap_trade_usd"]); tickets = int(s["gmgn.max_tickets_night"])
+# ---- DECISION 71: Strategy A LIVE and Strategy B LIVE share one wallet, each with its own share of it.
+# Owner 2026-11-17 5:59 PM CT: "Split the wallet 50/50 and run both live."
+#   free       = wallet SOL - gmgn.sol_reserve - SOL promised to in-flight buys (A + B, submitting/pending)
+#   open(X)    = swap input (lamports) of strategy X's LIVE positions still held or being bought/sold
+#   total      = free + open(A) + open(B)                (what the wallet is worth at cost basis)
+#   budget(X)  = share(X)% x total - open(X)              (X's untouched part of its share)
+#   avail(X)   = max(0, min(budget(X), free))             (never more than the SOL really on chain)
+# pick_size sizes against avail(X) ($50, else $20, else down to $1), and check_caps refuses a buy whose full cost
+# (input + GMGN fee + priority/tip + rent) is over avail(X). Cost basis, not mark-to-market: a losing position keeps
+# its slot of the share until it is sold; the sale proceeds return to free SOL and are split again.
+# Shares are gmgn.live_wallet_share_pct (A) and strat_b.live_wallet_share_pct (B). 100 = the whole wallet (old behaviour).
+STRATEGY_SHARE_KEY = {"A": "gmgn.live_wallet_share_pct", "B": "strat_b.live_wallet_share_pct"}
+
+
+def strategy_caps(s, strategy: str) -> tuple[int, int]:
+    """(max open, tickets per night) for one strategy's LIVE buys."""
+    if strategy == "B":
+        return int(s["strat_b.live_max_open"]), int(s["strat_b.live_max_tickets_night"])
+    return int(s["gmgn.max_open"]), int(s["gmgn.max_tickets_night"])
+
+
+def open_cost_lamports(db, strategy: str) -> int:
+    ph = ','.join('?' * len(ACTIVE))
+    if strategy == "B":
+        r = _b_live(db, f"SELECT COALESCE(SUM(lamports),0) l FROM strat_b_orders WHERE mode='LIVE' AND status IN ({ph})", ACTIVE)
+        return int((r or {}).get("l") or 0)
+    return int(db.one(f"SELECT COALESCE(SUM(lamports),0) l FROM gmgn_orders WHERE mode='LIVE' AND status IN ({ph})", ACTIVE)["l"] or 0)
+
+
+def budget_lamports(s, db, strategy: str, wallet_lamports) -> dict | None:
+    """The DECISION 71 numbers for one strategy, in lamports. None when the wallet balance is unknown."""
+    free = free_lamports(s, wallet_lamports, committed_lamports(db, "LIVE"))
+    if free is None:
+        return None
+    own, other = open_cost_lamports(db, strategy), open_cost_lamports(db, "B" if strategy == "A" else "A")
+    share = float(s[STRATEGY_SHARE_KEY[strategy]])
+    total = max(free, 0) + own + other
+    budget = int(math.floor(total * share / 100.0)) - own
+    return {"strategy": strategy, "sharePct": share, "free": free, "open": own, "otherOpen": other, "total": total,
+            "budget": budget, "avail": max(0, min(budget, free))}
+
+
+def strategy_free_lamports(s, db, strategy: str, wallet_lamports) -> int | None:
+    b = budget_lamports(s, db, strategy, wallet_lamports)
+    return None if b is None else b["avail"]
+
+
+def budget_view(s, db, strategy: str, wallet_lamports, sol_usd) -> dict:
+    """Public (app / Telegram) view of one strategy's share of the wallet. No secrets, no network call."""
+    b = budget_lamports(s, db, strategy, wallet_lamports)
+    mx, tickets = strategy_caps(s, strategy)
+    out = {"strategy": strategy, "sharePct": float(s[STRATEGY_SHARE_KEY[strategy]]), "maxOpen": mx, "ticketsMax": tickets,
+           "openCount": open_count(db, "LIVE", strategy), "budgetSol": None, "budgetUsd": None, "inPositionsSol": None,
+           "inPositionsUsd": None, "shareSol": None, "shareUsd": None}
+    if b is None:
+        return out
+    usd = (lambda lam: round(lam / LAMPORTS * sol_usd, 2)) if sol_usd else (lambda lam: None)
+    out.update(budgetSol=round(b["avail"] / LAMPORTS, 6), budgetUsd=usd(b["avail"]),
+               inPositionsSol=round(b["open"] / LAMPORTS, 6), inPositionsUsd=usd(b["open"]),
+               shareSol=round(b["total"] * b["sharePct"] / 100.0 / LAMPORTS, 6), shareUsd=usd(int(b["total"] * b["sharePct"] / 100.0)))
+    return out
+
+
+def mint_held_live(db, mint: str) -> str | None:
+    """'A' or 'B' when that strategy holds (or is buying / selling) this mint LIVE, else None. One coin, one strategy:
+    both sell the whole wallet balance of a mint, so two strategies must never hold the same coin (DECISION 71)."""
+    ph = ','.join('?' * len(ACTIVE))
+    if db.one(f"SELECT id FROM gmgn_orders WHERE mint=? AND mode='LIVE' AND status IN ({ph})", (mint, *ACTIVE)):
+        return "A"
+    if _b_live(db, f"SELECT id FROM strat_b_orders WHERE mint=? AND mode='LIVE' AND status IN ({ph})", (mint, *ACTIVE)):
+        return "B"
+    return None
+
+
+def check_caps(s, db, night, mode, size_usd, lamports, sol_usd, wallet_lamports, strategy: str | None = None) -> None:
+    """Hard caps. Raises CapError with a plain reason. Called before the order row exists.
+    strategy='A'|'B' (DECISION 71): that strategy's own open slots / night tickets, and its share of the wallet."""
+    cap = float(s["gmgn.cap_trade_usd"])
+    if strategy is None:
+        mx, tickets = int(s["gmgn.max_open"]), int(s["gmgn.max_tickets_night"])
+    else:
+        mx, tickets = strategy_caps(s, strategy)
     night_cap = cap * tickets
+    who = "GMGN" if strategy is None else f"{strategy} LIVE"
     if not (size_usd > 0) or not (sol_usd and sol_usd > 0) or lamports <= 0:
         raise CapError("bad size or SOL price")
     if size_usd > cap + 1e-9:
@@ -353,10 +442,10 @@ def check_caps(s, db, night, mode, size_usd, lamports, sol_usd, wallet_lamports)
     spend_usd = lamports / LAMPORTS * sol_usd
     if spend_usd > cap * 1.0001:
         raise CapError(f"{lamports / LAMPORTS:.4f} SOL (${spend_usd:,.2f}) is over the per-trade cap ${cap:,.2f}")
-    mx, op = int(s["gmgn.max_open"]), open_count(db, mode)
+    op = open_count(db, mode, strategy)
     if op >= mx:
-        raise CapError(f"{op}/{mx} GMGN positions already open (max {mx} at once)")
-    n, used = night_usage(db, night, mode)
+        raise CapError(f"{op}/{mx} {who} positions already open (max {mx} at once)")
+    n, used = night_usage(db, night, mode, strategy)
     if n >= tickets:
         raise CapError(f"night ticket cap reached ({n}/{tickets})")
     if used + size_usd > night_cap + 1e-9:
@@ -367,6 +456,13 @@ def check_caps(s, db, night, mode, size_usd, lamports, sol_usd, wallet_lamports)
     if need > wallet_lamports:
         raise CapError(f"wallet has {wallet_lamports / LAMPORTS:.4f} SOL, needs {need / LAMPORTS:.4f} SOL "
                        f"(ticket + fees + {s['gmgn.sol_reserve']:g} SOL reserve)")
+    if strategy is not None and mode == "LIVE":
+        b = budget_lamports(s, db, strategy, wallet_lamports)
+        cost = buy_cost_lamports(s, lamports)
+        if b is None or cost > b["avail"]:
+            av = 0 if b is None else b["avail"]
+            raise CapError(f"{strategy}'s {s[STRATEGY_SHARE_KEY[strategy]]:g}% share has {av / LAMPORTS:.4f} SOL free "
+                           f"(${av / LAMPORTS * sol_usd:,.2f}), this buy needs {cost / LAMPORTS:.4f} SOL with fees")
 
 
 def check_paper_caps(s, db, night, size_usd) -> None:
@@ -647,7 +743,7 @@ class GmgnTrader:
 
     def open_label(self, mode=None):
         mode = mode or self.mode()
-        return f"{open_count(self.c.db, mode)}/{int(self.s['gmgn.max_open'])} open"
+        return f"{open_count(self.c.db, mode, 'A')}/{int(self.s['gmgn.max_open'])} open"
 
     # ---- entry
     async def on_pass(self, mint, name, symbol, price, liq, score=None, reentry=None, *, mc=None, approved=False, from_dip=False):
@@ -814,7 +910,7 @@ class GmgnTrader:
             self._refuse(mint, name, mode, 0, "halted")
             return {"status": "refused", "reason": "halted"}
         import dip as _dip
-        mx, op = int(s["gmgn.max_open"]), open_count(c.db, mode) + (_dip.watching_count(c.db) if not from_dip else 0)
+        mx, op = int(s["gmgn.max_open"]), open_count(c.db, mode, "A") + (_dip.watching_count(c.db) if not from_dip else 0)
         if op >= mx:                                     # 5th buy: refused before anything else is spent
             why = f"{op}/{mx} GMGN positions already open (max {mx} at once)"
             self._refuse(mint, name, mode, 0, why)
@@ -864,14 +960,14 @@ class GmgnTrader:
             c.event("fill", mint)
             return {"status": "paper", "id": oid, "body": body}
         wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every LIVE sizing
-        committed = committed_lamports(c.db, mode)
-        size, lamports, why = pick_size(s, free_lamports(s, wallet, committed), sol_usd, self.pool_cap_usd(liq))
+        # DECISION 71: size against A's share of the wallet (never more than the free SOL on chain)
+        size, lamports, why = pick_size(s, strategy_free_lamports(s, c.db, "A", wallet), sol_usd, self.pool_cap_usd(liq))
         if size is None:
             self._refuse(mint, name, mode, 0, why)
             await self.push(f"{self.prefix()}Skipped {name}: {why}", kind="gmgn_refused", mint=mint)
             return {"status": "refused", "reason": why}
         try:
-            check_caps(s, c.db, c.night, mode, size, lamports, sol_usd, wallet)
+            check_caps(s, c.db, c.night, mode, size, lamports, sol_usd, wallet, strategy="A")
         except CapError as e:
             self._refuse(mint, name, mode, size, str(e))
             await self.push(f"{self.prefix()}Refused {name}: {e}", kind="gmgn_refused", mint=mint)
@@ -900,7 +996,10 @@ class GmgnTrader:
             return {"status": "refused", "reason": "halted"}
         wallet = await self.wallet_lamports(fresh=True)
         try:
-            check_caps(s, c.db, c.night, "LIVE", size, lamports, sol_usd, wallet)
+            check_caps(s, c.db, c.night, "LIVE", size, lamports, sol_usd, wallet, strategy="A")
+            held = mint_held_live(c.db, mint)                # sync with the row insert below: B can't slip in between
+            if held:
+                raise CapError(f"already held by {held} LIVE in the wallet")
             if body["from_address"] != MAIN_WALLET or body["input_token"] != SOL or int(body["input_amount"]) != lamports:
                 raise CapError("swap body mismatch")
         except CapError as e:
@@ -1906,13 +2005,14 @@ class GmgnTrader:
         sol = self._sol[1]
         if wallet is None or not sol:
             return ""
-        mode = self.mode()
-        size, _, why = pick_size(self.s, free_lamports(self.s, wallet, committed_lamports(self.c.db, mode)), sol)
-        free = free_lamports(self.s, wallet, committed_lamports(self.c.db, mode))
-        return f" · free {max(free, 0) / LAMPORTS:.4f} SOL → next ${size:,.2f}" if size else f" · free {max(free, 0) / LAMPORTS:.4f} SOL → next buy skipped"
+        b = budget_lamports(self.s, self.c.db, "A", wallet)
+        size, _, why = pick_size(self.s, b["avail"], sol)
+        head = (f" · A's {b['sharePct']:g}% share: {b['avail'] / LAMPORTS:.4f} SOL (${b['avail'] / LAMPORTS * sol:,.2f}) free"
+                f" of {b['total'] * b['sharePct'] / 100.0 / LAMPORTS:.4f} SOL")
+        return head + (f" → next ${size:,.2f}" if size else " → next buy skipped")
 
     def status_line(self):
-        n, used = night_usage(self.c.db, self.c.night, self.mode())
+        n, used = night_usage(self.c.db, self.c.night, self.mode(), "A")
         s = self.s
         el = (self.c.clock() - (self.paper_since() or self.c.clock())) / 3600
         head = (f"GMGN {self.mode()}{' · HALTED' if self.halted() else ''}{'' if s['gmgn.enabled'] else ' · off'} · ")
