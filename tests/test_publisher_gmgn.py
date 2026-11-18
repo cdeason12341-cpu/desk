@@ -57,7 +57,9 @@ def test_gmgn_section_shape_and_values():
     assert g["walletShort"] == "JAP5…5zC2"
     assert g["sol"] == 1.02 and g["usd"] == 71.4 and g["solUsd"] == 70.0
     assert g["updatedAt"]
-    assert g["capTradeUsd"] == 65.0 and g["ticketsUsed"] == 1 and g["ticketsMax"] == 4
+    assert g["capTradeUsd"] == 65.0 and g["stepTradeUsd"] == 0.0 and g["fallbackTradeUsd"] == 20.0
+    assert g["minTradeUsd"] == 1.0 and g["sizeLabel"] == "$65, then $20"
+    assert g["ticketsUsed"] == 1 and g["ticketsMax"] == 4
     assert g["nightSpendUsd"] == 65.0 and g["nightCapUsd"] == 260.0 and g["reserveSol"] == 0.02
     assert len(g["open"]) == 1 and len(g["orders"]) == 1
     p = g["open"][0]
@@ -149,3 +151,11 @@ def test_publisher_refresh_does_not_block_on_missing_trader():
     from publisher import Publisher
     pub = Publisher(d)
     run(pub.refresh_gmgn())   # must not raise
+
+
+def test_size_ladder_fields_when_step_is_on():
+    d, c, _, _ = _desk(cap=75.0)
+    c.s.set("gmgn.step_trade_usd", 50, source="test", force=True)
+    g = Builder(d).gmgn()
+    assert g["capTradeUsd"] == 75.0 and g["stepTradeUsd"] == 50.0 and g["fallbackTradeUsd"] == 20.0
+    assert g["sizeLabel"] == "$75, then $50, then $20"

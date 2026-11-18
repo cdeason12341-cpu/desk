@@ -96,7 +96,9 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
 {"mode":"LIVE","enabled":true,"halted":false,
  "wallet":"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2","walletShort":"JAP5…5zC2",
  "sol":1.02,"usd":71.40,"solUsd":70.0,"updatedAt":"2026-11-15T02:40:00Z",
- "capTradeUsd":65.0,"ticketsUsed":0,"ticketsMax":4,"nightSpendUsd":0.0,"nightCapUsd":260.0,
+ "capTradeUsd":75.0,"stepTradeUsd":50.0,"fallbackTradeUsd":20.0,"minTradeUsd":1.0,
+ "sizeLabel":"$75, then $50, then $20",
+ "ticketsUsed":0,"ticketsMax":4,"nightSpendUsd":0.0,"nightCapUsd":300.0,
  "reserveSol":0.02,
  "paper":{"bankrollUsd":2500.0,"tradeUsd":500.0,"pnlUsd":0.0,"inPositionsUsd":0.0,"freeUsd":2500.0,"since":"2026-11-17T16:20:00Z"},
  "open":[{"id":1,"mint","name","symbol","mode":"LIVE","status":"open",
@@ -116,6 +118,8 @@ the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real mon
 `paper` is Strategy A's simulated bankroll (DECISION 68): start amount, trade size, realized P&L
 since the bankroll reset, cash in open paper tickets, and free cash. It is not real money and is
 not limited by the wallet or `capTradeUsd`. `since` is an ISO timestamp or null.
+`stepTradeUsd` is the optional middle size between the top cap and the fallback (0 = off).
+`sizeLabel` is the public size text shown in the app and Telegram, e.g. `$75, then $50, then $20` (DECISION 84).
 
 
 ## scores.json (Analyst scores list, newest first, max 50 tonight)

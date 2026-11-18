@@ -291,13 +291,36 @@
     if (st) { const age = (Date.now() - new Date(st.ts)) / 1000; if (age > 600) { el.className = "status info"; el.textContent = `Desk data is ${ago(age)} old · last update ${tm(st.ts)}`; return; } }
     el.className = "status hidden";
   }
+  function aIsLive() { return gmgnState()?.mode === "LIVE"; }
+  function bIsLive(b) {
+    const sb = b || F("strat_b.json");
+    const mode = (F("state.json")?.gmgn || gmgnState())?.bMode || sb?.mode;
+    return mode === "LIVE" && sb?.enabled !== false;
+  }
+  function usdShort(v) {
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    const n = Number(v);
+    if (Math.abs(n - Math.round(n)) < 1e-9) return "$" + Math.round(n).toLocaleString();
+    return money(n);
+  }
+  function sizeLadder(g) {
+    if (!g) return "";
+    if (g.sizeLabel) return g.sizeLabel;
+    const parts = [usdShort(g.capTradeUsd)];
+    if (g.stepTradeUsd > 0 && g.stepTradeUsd < g.capTradeUsd) parts.push(usdShort(g.stepTradeUsd));
+    if (g.fallbackTradeUsd != null) parts.push(usdShort(g.fallbackTradeUsd));
+    const label = parts.filter(Boolean).join(", then ");
+    return label || (g.capTradeUsd != null ? money(g.capTradeUsd) + " max / trade" : "");
+  }
   function chrome() {
     const st = F("state.json");
     const b = $("#modeBadge");
-    const bm = F("strat_b.json")?.mode, am = gmgnState()?.mode;
-    if (bm === "LIVE" || am === "LIVE") { b.classList.remove("hidden"); b.textContent = bm === "LIVE" && am === "LIVE" ? "A+B LIVE" : bm === "LIVE" ? "B LIVE" : "A LIVE"; b.classList.add("live"); }
+    const aOn = aIsLive(), bOn = bIsLive();
+    if (aOn || bOn) { b.classList.remove("hidden"); b.textContent = aOn && bOn ? "A+B LIVE" : bOn ? "B LIVE" : "A LIVE"; b.classList.add("live"); }
     else if (st) { b.classList.remove("hidden"); b.textContent = st.mode; b.classList.toggle("live", st.mode === "LIVE"); }
     else b.classList.add("hidden");
+    document.querySelectorAll(".tabs a[data-tab=strata] .tabbadge").forEach(el => { el.textContent = aOn ? "LIVE" : "OFF"; el.classList.toggle("off", !aOn); });
+    document.querySelectorAll(".tabs a[data-tab=stratb] .tabbadge").forEach(el => { el.textContent = bOn ? "LIVE" : "OFF"; el.classList.toggle("off", !bOn); });
     const act = F("activity.json"); const seen = +(localStorage.getItem("desk.seen") || 0);
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
@@ -390,17 +413,20 @@
 
   function gmgnWalletCard(g) {
     if (!g) return "";
-    const title = `Real wallet · shared by A LIVE and B LIVE`;
+    const bOn = bIsLive();
+    const title = bOn ? "Real wallet · shared by A LIVE and B LIVE" : (g.mode === "LIVE" ? "Real wallet · Strategy A LIVE" : "Real wallet");
     const badges = [`<span class="badge live">LIVE</span>`]
       .concat(g.halted ? [`<span class="badge">HALTED</span>`] : []).join("");
     const usd = g.usd != null ? money(g.usd) : "USD —";
     const when = g.updatedAt ? ` · updated ${tm(g.updatedAt)}` : "";
     const bg = g.budgets || {};
-    const split = (bg.A && bg.B) ? `<span class="pill">A ${bg.A.sharePct}% · B ${bg.B.sharePct}%</span>` : "";
+    const split = (bg.A && bOn && bg.B) ? `<span class="pill">A ${bg.A.sharePct}% · B ${bg.B.sharePct}%</span>`
+      : (bg.A ? `<span class="pill">A ${bg.A.sharePct}% of wallet</span>` : "");
+    const size = sizeLadder(g);
     return `<div class="card real"><div class="rowx"><div class="sub">${title}</div><div class="pills" style="margin:0">${badges}</div></div>
       <div class="big">${solAmt(g.sol)}</div>
       <div class="sub">${usd} · ${esc(g.walletShort || short(g.wallet))}${when} · ${g.reserveSol} SOL kept for fees</div>
-      <div class="pills"><span class="pill">${money(g.capTradeUsd)} max / trade</span>${split}</div></div>`;
+      <div class="pills">${size ? `<span class="pill">${esc(size)}</span>` : ""}${split}</div></div>`;
   }
   function exitsLine(ex) {
     const on = ex && ex.attached ? " · exits on" : " · exits?";
@@ -520,19 +546,27 @@
     if (!gm) return h + emptyBox("Wallet hasn't published yet", "It shows up after the desk's next publish.");
     const bg = gm.budgets || {};
     const usd = gm.usd != null ? money(gm.usd) : "USD —";
-    h += `<div class="card real"><div class="rowx"><div class="sub">Shared by A LIVE and B LIVE</div><div class="pills" style="margin:0"><span class="badge live">LIVE</span>${gm.halted ? `<span class="badge">HALTED</span>` : ""}</div></div>
+    const bOn = bIsLive(b);
+    const size = sizeLadder(gm);
+    const walletTitle = bOn ? "Shared by A LIVE and B LIVE" : (gm.mode === "LIVE" ? "Strategy A LIVE" : "Main wallet");
+    h += `<div class="card real"><div class="rowx"><div class="sub">${walletTitle}</div><div class="pills" style="margin:0"><span class="badge live">LIVE</span>${gm.halted ? `<span class="badge">HALTED</span>` : ""}</div></div>
       <div class="big">${solAmt(gm.sol)}</div>
       <div class="sub">${usd}${gm.solUsd ? " · 1 SOL = " + money(gm.solUsd) : ""} · ${esc(gm.walletShort || short(gm.wallet))}${gm.updatedAt ? " · updated " + tm(gm.updatedAt) : ""}</div>
-      <div class="pills"><span class="pill">${gm.reserveSol} SOL kept for fees</span><span class="pill">${money(gm.capTradeUsd)} max / trade</span></div></div>`;
-    if (bg.A && bg.B) {
+      <div class="pills"><span class="pill">${gm.reserveSol} SOL kept for fees</span>${size ? `<span class="pill">${esc(size)}</span>` : ""}</div></div>`;
+    if (bg.A && bOn && bg.B && (bg.B.sharePct || 0) > 0) {
       const bar = `<div class="splitbar"><i style="width:${Math.max(0, Math.min(100, bg.A.sharePct))}%"></i></div>`;
       h += `<h1>Split · A ${bg.A.sharePct}% · B ${bg.B.sharePct}%</h1><div class="card">${bar}
-        <div class="grid2 split2"><div><div class="sub">A's half</div><div class="sv">${bg.A.shareUsd != null ? money(bg.A.shareUsd) : solAmt(bg.A.shareSol)}</div><div class="sub green">${bg.A.budgetUsd != null ? money(bg.A.budgetUsd) : "—"} free</div><div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions</div></div>
-        <div><div class="sub">B's half</div><div class="sv">${bg.B.shareUsd != null ? money(bg.B.shareUsd) : solAmt(bg.B.shareSol)}</div><div class="sub green">${bg.B.budgetUsd != null ? money(bg.B.budgetUsd) : "—"} free</div><div class="sub">${money(bg.B.inPositionsUsd ?? 0)} in positions</div></div></div></div>`;
+        <div class="grid2 split2"><div><div class="sub">A's share</div><div class="sv">${bg.A.shareUsd != null ? money(bg.A.shareUsd) : solAmt(bg.A.shareSol)}</div><div class="sub green">${bg.A.budgetUsd != null ? money(bg.A.budgetUsd) : "—"} free</div><div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions</div></div>
+        <div><div class="sub">B's share</div><div class="sv">${bg.B.shareUsd != null ? money(bg.B.shareUsd) : solAmt(bg.B.shareSol)}</div><div class="sub green">${bg.B.budgetUsd != null ? money(bg.B.budgetUsd) : "—"} free</div><div class="sub">${money(bg.B.inPositionsUsd ?? 0)} in positions</div></div></div></div>`;
+    } else if (bg.A) {
+      h += `<h1>A ${bg.A.sharePct}% of wallet</h1><div class="card">
+        <div class="sv">${bg.A.shareUsd != null ? money(bg.A.shareUsd) : solAmt(bg.A.shareSol)}</div>
+        <div class="sub green">${bg.A.budgetUsd != null ? money(bg.A.budgetUsd) : "—"} free to buy</div>
+        <div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions${bOn ? "" : " · Strategy B is off"}</div></div>`;
     }
     h += `<h1>Strategies</h1><div class="grid2">` + stratCard("#/strata", "Strat A", aBadge(gm.mode), sf?.pnl?.A, bg.A, bg.A?.openCount)
-      + stratCard("#/stratb", "Strat B", bBadge(gm.bMode || b?.mode), sf?.pnl?.B, bg.B, bg.B?.openCount) + `</div>`;
-    return h + `<div class="hint">Both strategies trade real money from this wallet, each only from its own share. They never hold the same coin. This app is read-only.</div>`;
+      + stratCard("#/stratb", "Strat B", bBadge(bOn ? "LIVE" : "PAPER"), sf?.pnl?.B, bg.B, bg.B?.openCount) + `</div>`;
+    return h + `<div class="hint">${bOn ? "Both strategies trade real money from this wallet, each only from its own share. They never hold the same coin." : "Strategy A trades real money from this wallet. Strategy B is off and places no real orders."} This app is read-only.</div>`;
   }
   function stratA() {
     const g = gate(); if (g) return g;
@@ -631,9 +665,10 @@
     const lr = lv.lastRefusal;
     const p = F("strat_feed.json")?.pnl?.B || { pnlUsd: lv.pnlAllUsd, pnlTonightUsd: lv.pnlTonightUsd, closed: lv.closedAll, wins: lv.wins, losses: lv.losses, winRatePct: lv.winRatePct, sinceLabel: lv.sinceLabel };
     const gb = (F("state.json")?.gmgn || gmgnState())?.budgets?.B;     // same numbers as the Wallet tab
-    let h = profitCard("Strategy B · real money · GMGN", p, b.mode, bBadge("LIVE"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B");
+    const bOn = bIsLive(b);
+    let h = profitCard("Strategy B · real money · GMGN", p, bOn ? "LIVE" : (b.mode || "PAPER"), bBadge(bOn ? "LIVE" : "PAPER"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B");
     if (lr) h += `<div class="sub" style="white-space:normal;margin:-4px 2px 10px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>`;
-    h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox("No B LIVE positions open", "B will buy when a coin qualifies and its share of the wallet can cover it."));
+    h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox(bOn ? "No B LIVE positions open" : "Strategy B is off", bOn ? "B will buy when a coin qualifies and its share of the wallet can cover it." : "B is paused and places no real orders."));
     h += `<h1>B trades ${esc(sinceText(p))}</h1>` + ((lv.closed || []).length ? `<div class="card list">${lv.closed.map(stratBRow).join("")}</div>` : emptyBox("No B trades closed since the reset", "New closes count toward the profit above."));
     h += earlierBlock(lv.earlier || [], stratBRow);
     return h;

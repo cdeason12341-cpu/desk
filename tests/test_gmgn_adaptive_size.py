@@ -23,8 +23,8 @@ def _swaps(fc):
 
 def test_settings_defaults_and_protected():
     c, _ = make_ctx()
-    assert c.s["gmgn.cap_trade_usd"] == 50.0 and c.s["gmgn.fallback_trade_usd"] == 20.0 and c.s["gmgn.min_trade_usd"] == 1.0 and c.s["gmgn.max_open"] == 4
-    for k in ("min trade", "max open", "cap trade", "fallback trade"):
+    assert c.s["gmgn.cap_trade_usd"] == 50.0 and c.s["gmgn.step_trade_usd"] == 0.0 and c.s["gmgn.fallback_trade_usd"] == 20.0 and c.s["gmgn.min_trade_usd"] == 1.0 and c.s["gmgn.max_open"] == 4
+    for k in ("min trade", "max open", "cap trade", "fallback trade", "step trade"):
         with pytest.raises(config.SettingError):
             c.s.set(k, "30")
     c.s.set("gmgn.max_open", 5, source="test", force=True)
@@ -130,6 +130,6 @@ def test_status_line_and_fomo_sizing_unchanged():
     go_live(c)
     run(t.wallet_lamports(fresh=True)); run(t.sol_usd())
     line = t.status_line()
-    assert "size $50.00, then $20.00, then whatever free SOL covers down to $1.00" in line and "next $50.00" in line and "0/4 open" in line
+    assert "size $50, then $20, then whatever free SOL covers down to $1.00" in line and "next $50.00" in line and "0/4 open" in line
     sz = size_ticket(c.s, 100.0, 100.0, 50000)                     # FOMO paper: still the $47.50 min-ticket bump
     assert sz["status"] == "ok" and sz["size"] == 47.5

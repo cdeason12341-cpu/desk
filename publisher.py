@@ -705,7 +705,7 @@ class Builder:
 
     def gmgn(self):
         """Read-only GMGN wallet + trades for the phone app. No secrets, no order bodies."""
-        from agents.gmgn_trader import night_usage, ACTIVE, paper_snapshot, budget_view
+        from agents.gmgn_trader import night_usage, ACTIVE, paper_snapshot, budget_view, size_ladder_text
         from gmgn import MAIN_WALLET
         c, s = self.c, self.c.s
         g = getattr(self.d, "gmgn", None)
@@ -715,6 +715,11 @@ class Builder:
         n, used = night_usage(c.db, c.night, mode, "A")
         cap = float(s["gmgn.cap_trade_usd"])
         tickets = int(s["gmgn.max_tickets_night"])
+        try:
+            step = float(s["gmgn.step_trade_usd"] or 0)
+        except (KeyError, TypeError, ValueError):
+            step = 0.0
+        fallback = float(s["gmgn.fallback_trade_usd"])
         placeholders = ",".join("?" * len(ACTIVE))
         open_rows = c.db.rows(f"SELECT * FROM gmgn_orders WHERE status IN ({placeholders}) ORDER BY ts", ACTIVE)
         recent = c.db.rows("SELECT * FROM gmgn_orders ORDER BY id DESC LIMIT 20")
@@ -729,7 +734,9 @@ class Builder:
                 "wallet": MAIN_WALLET, "walletShort": f"{MAIN_WALLET[:4]}…{MAIN_WALLET[-4:]}",
                 "sol": snap.get("sol"), "usd": snap.get("usd"), "solUsd": snap.get("solUsd"),
                 "updatedAt": snap.get("updatedAt"),
-                "capTradeUsd": cap, "ticketsUsed": n, "ticketsMax": tickets,
+                "capTradeUsd": cap, "stepTradeUsd": step, "fallbackTradeUsd": fallback,
+                "minTradeUsd": float(s["gmgn.min_trade_usd"]), "sizeLabel": size_ladder_text(s),
+                "ticketsUsed": n, "ticketsMax": tickets,
                 "nightSpendUsd": round(used, 2), "nightCapUsd": round(cap * tickets, 2),
                 "reserveSol": s["gmgn.sol_reserve"],
                 "paper": paper,

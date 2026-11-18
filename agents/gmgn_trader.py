@@ -248,10 +248,33 @@ def max_affordable_lamports(s, free: int) -> int:
     return max(lam, 0)
 
 
+def _usd_plain(v) -> str:
+    """Whole dollars as $75, otherwise $75.50. Used in app / Telegram size text."""
+    v = float(v)
+    if abs(v - round(v)) < 1e-9:
+        return f"${int(round(v))}"
+    return f"${v:,.2f}"
+
+
+def size_ladder_text(s) -> str:
+    """Public size text, e.g. '$75, then $50, then $20'. Step is omitted when off or out of range."""
+    top, mid = float(s["gmgn.cap_trade_usd"]), float(s["gmgn.fallback_trade_usd"])
+    try:
+        step = float(s["gmgn.step_trade_usd"] or 0)
+    except (KeyError, TypeError, ValueError):
+        step = 0.0
+    parts = [_usd_plain(top)]
+    if mid < step < top:
+        parts.append(_usd_plain(step))
+    parts.append(_usd_plain(mid))
+    return ", then ".join(parts)
+
+
 def pick_size(s, free: int | None, sol_usd: float, pool_cap_usd: float | None = None, top_usd: float | None = None):
-    """Adaptive LIVE size (owner 2026-11-15 8:33 PM + 8:40 PM CT): the top size (gmgn.cap_trade_usd, $50) when free SOL
-    covers it with fees, else the fallback (gmgn.fallback_trade_usd, $20), else the largest amount free SOL covers,
-    down to the floor gmgn.min_trade_usd ($1). Returns (size_usd, lamports, reason).
+    """Adaptive LIVE size (owner 2026-11-15 8:33 + 8:40 PM CT, step added DECISION 84): the top size
+    (gmgn.cap_trade_usd) when free SOL covers it with fees, else gmgn.step_trade_usd when that sits
+    strictly between the top and the fallback (0 = off), else gmgn.fallback_trade_usd, else the
+    largest amount free SOL covers down to gmgn.min_trade_usd. Returns (size_usd, lamports, reason).
     top_usd: Strategy B LIVE passes strat_b.trade_usd (never above the per-trade cap) and then follows A's same
     fallback / shrink / $1 floor (owner 2026-11-17 8:15 AM CT, DECISION 66)."""
     top, mid, low = float(s["gmgn.cap_trade_usd"]), float(s["gmgn.fallback_trade_usd"]), float(s["gmgn.min_trade_usd"])
@@ -264,7 +287,12 @@ def pick_size(s, free: int | None, sol_usd: float, pool_cap_usd: float | None = 
         return None, 0, "wallet balance unknown"
     if not sol_usd:
         return None, 0, "no SOL price"
-    for t in [x for x in (top, mid) if x <= ceiling + 1e-9]:
+    try:
+        step = float(s["gmgn.step_trade_usd"] or 0)   # DECISION 84: $75 -> $50 -> $20
+    except (KeyError, TypeError, ValueError):
+        step = 0.0
+    tiers = [top] + ([step] if mid < step < top else []) + [mid]
+    for t in [x for x in tiers if x <= ceiling + 1e-9]:
         lam = int(math.floor(t / sol_usd * LAMPORTS))
         if buy_cost_lamports(s, lam) <= free:
             return t, lam, None
@@ -2600,5 +2628,5 @@ class GmgnTrader:
             pass
         return (head +
                 f"tonight {n}/{s['gmgn.max_tickets_night']} tickets, ${used:,.2f}/${s['gmgn.cap_trade_usd'] * s['gmgn.max_tickets_night']:,.2f} · "
-                f"size ${s['gmgn.cap_trade_usd']:,.2f}, then ${s['gmgn.fallback_trade_usd']:,.2f}, then whatever free SOL covers down to ${s['gmgn.min_trade_usd']:,.2f}{self._next_size()} · "
+                f"size {size_ladder_text(s)}, then whatever free SOL covers down to ${s['gmgn.min_trade_usd']:,.2f}{self._next_size()} · "
                 f"{self.open_label()}")

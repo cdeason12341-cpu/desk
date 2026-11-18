@@ -142,6 +142,8 @@ SPECS: list[Spec] = [
     _s("gmgn.mode", "PAPER", kind="choice", choices=("PAPER", "LIVE"), aliases=("gmgn mode",)),
     _s("gmgn.cap_trade_usd", 50.0, 5, 10000, aliases=("gmgn cap", "cap trade"), fmt="${v:,.2f}"),
     _s("gmgn.max_tickets_night", 4, 1, 50, aliases=("gmgn tickets", "cap tickets"), fmt="{v}"),
+    # DECISION 84 (owner 2026-11-18 5:21 PM CT): step between the top size and the fallback ($75 -> $50 -> $20 -> shrink). 0 = off.
+    _s("gmgn.step_trade_usd", 0.0, 0, 10000, aliases=("gmgn step trade", "step trade"), fmt="${v:,.2f}"),
     _s("gmgn.fallback_trade_usd", 20.0, 1, 10000, aliases=("gmgn fallback", "fallback trade"), fmt="${v:,.2f}"),   # 2nd size when the top size doesn't fit
     _s("gmgn.min_trade_usd", 1.0, 0.5, 10000, aliases=("gmgn min trade", "min trade"), fmt="${v:,.2f}"),          # floor: below the fallback, buy what free SOL covers down to this
     # DECISION 68 (owner 2026-11-17 10:20 AM CT): Strategy A PAPER bankroll. Not protected; not used for LIVE or Strategy B.
@@ -224,7 +226,7 @@ SPECS: list[Spec] = [
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.
-CAP_KEYS = ("gmgn.cap_trade_usd", "gmgn.max_tickets_night", "gmgn.fallback_trade_usd", "gmgn.min_trade_usd", "gmgn.max_open")
+CAP_KEYS = ("gmgn.cap_trade_usd", "gmgn.step_trade_usd", "gmgn.max_tickets_night", "gmgn.fallback_trade_usd", "gmgn.min_trade_usd", "gmgn.max_open")
 PROTECTED = {"desk.mode", "gmgn.mode", "gmgn.live_gate_h", "strat_b.mode", *CAP_KEYS,
              # DECISION 71: wallet split + B's own LIVE caps are money limits too (owner command, force=True)
              "gmgn.live_wallet_share_pct", "strat_b.live_wallet_share_pct", "strat_b.live_max_open", "strat_b.live_max_tickets_night"}   # strat_b.mode: PAPER|LIVE, owner command only (DECISION 66)
