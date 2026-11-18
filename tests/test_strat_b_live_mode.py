@@ -2,7 +2,9 @@
 Sizing: strat_b.trade_usd when free SOL covers it, else Strategy A's rule (fallback $20, then whatever free SOL covers, $1 floor)."""
 import pytest
 import config, gmgn, strat_b, strat_b_live
-from agents.gmgn_trader import GmgnTrader, LAMPORTS, pick_size, open_count, committed_lamports, night_usage
+import json, notif_label as nl
+from agents.gmgn_trader import (GmgnTrader, LAMPORTS, pick_size, open_count, committed_lamports,
+                                night_usage, mint_held_live, open_cost_lamports, budget_view)
 from strat_b import StratB
 from tests.chainsim import ChainSim
 from tests.helpers import make_ctx, run
@@ -298,3 +300,101 @@ def test_paper_daily_loss_still_uses_bankroll_pct():
            (clock.t, c.night, M, "Live row", "closed", 50, -100.0, "LIVE", clock.t, clock.t))
     # a leftover LIVE loss must not change the paper limit; already stopped on paper -$101
     assert sb.daily_loss_limit() == pytest.approx(100.0)
+
+
+# ---------- adopt a manual wallet buy into B LIVE (DECISION 77)
+def _adopt_chain(c, clock, sb, mint=M, sigs=None, sol_paid=0.5, tokens=4_000_000_000, supply=1_000_000_000.0):
+    sigs = sigs or ["buy1"]
+    chain = ChainSim(c.net, mint)
+    lam = -int(sol_paid * LAMPORTS)
+    chain.add(sigs[0], clock.t, lam, tokens)
+    for i, sig in enumerate(sigs[1:], 1):
+        chain.add(sig, clock.t + i, lam, tokens)
+    chain.balance = tokens * len(sigs)
+    c.net.rpc_map["getTokenSupply"] = lambda p: {"value": {"uiAmount": supply}}
+    return chain
+
+
+def test_adopt_manual_buy_sets_stop_counts_caps_and_blocks_a():
+    c, clock, sb, cl, _ = _live()
+    chain = _adopt_chain(c, clock, sb)
+    r = run(sb.live.adopt(M, "NOLAW", "NOLAW", ["buy1"], note="owner asked to protect NOLAW"))
+    assert r["status"] == "open"
+    o = c.db.one("SELECT * FROM strat_b_orders WHERE id=?", (r["id"],))
+    assert o["mode"] == "LIVE" and o["status"] == "open" and o["reason"] == "adopted manual buy"
+    audit = json.loads(o["audit"])
+    assert audit["adopted"] is True and audit["buys"][0]["sig"] == "buy1"
+    assert o["entry_src"] == "chain" and o["tx"] == "buy1"
+    assert o["lamports"] == int(0.5 * LAMPORTS)
+    assert o["size_usd"] == round(0.5 * SOL_USD, 2)
+    assert o["entry_price"] == pytest.approx(0.5 * SOL_USD / (4_000_000_000 / 1e6), rel=1e-9)
+    assert o["tokens"] == pytest.approx(4_000_000_000 / 1e6)
+    assert o["mc_entry"] == pytest.approx(o["entry_price"] * 1_000_000_000, rel=1e-6)
+    assert o["note"] == "adopted manual buy; stop_loss strategy created"
+    st = [b for k, b in cl.calls if k == "strategy_create"]
+    assert len(st) == 1 and st[0]["sub_order_type"] == "stop_loss" and st[0]["amount_in_percent"] == "100"
+    assert st[0]["amount_in"] == str(4_000_000_000)
+    assert float(st[0]["check_price"]) == pytest.approx(o["entry_price"] * 0.65, rel=1e-9)
+    assert r["strategy_order_id"] == "s1" and o["strategy_order_id"] == "s1"
+    assert not _swaps(cl)
+    assert mint_held_live(c.db, M) == "B"
+    assert open_count(c.db, "LIVE", "B") == 1 and open_count(c.db, "LIVE", "A") == 0
+    assert open_cost_lamports(c.db, "B") == o["lamports"]
+    assert night_usage(c.db, c.night, "LIVE", "B") == (1, o["size_usd"])
+    bv = budget_view(c.s, c.db, "B", 5 * LAMPORTS, SOL_USD)
+    assert bv["openCount"] == 1 and bv["inPositionsSol"] == pytest.approx(o["lamports"] / LAMPORTS)
+    assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders")["n"] == 0
+    texts = [m["text"] for m in c.notifier.sent]
+    assert any(t.startswith("B LIVE · NOLAW: your manual buy is now managed by Strategy B") for t in texts)
+    assert nl.headline("strat_b", texts[-1])[1] == "Strat B · your manual buy NOLAW is now protected"
+    # already adopted: second call refuses, no extra stop
+    r2 = run(sb.live.adopt(M, "NOLAW", "NOLAW", ["buy1"]))
+    assert r2["status"] == "refused" and "already held by B" in r2["reason"]
+    assert len([b for k, b in cl.calls if k == "strategy_create"]) == 1
+    # B at max_open still lets an adoption through, and the new row is counted
+    c3, clock3, sb3, cl3, _ = _live(**{"strat_b.live_max_open": 1})
+    c3.db.x("INSERT INTO strat_b_orders(ts,night,mode,mint,name,status,size_usd,lamports,opened_at,entry_price,peak,last_price) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (clock3.t, c3.night, "LIVE", M2, "Other", "open", 10, int(10 / SOL_USD * LAMPORTS), clock3.t, 1.0, 1.0, 1.0))
+    assert "open (max" in (sb3.can_buy() or "")
+    _adopt_chain(c3, clock3, sb3)
+    r3 = run(sb3.live.adopt(M, "NOLAW", "NOLAW", ["buy1"]))
+    assert r3["status"] == "open" and open_count(c3.db, "LIVE", "B") == 2
+    assert "open (max" in sb3.can_buy()
+
+
+def test_adopt_refuses_when_a_holds_or_tokens_are_gone():
+    c, clock, sb, cl, _ = _live()
+    c.db.x("INSERT INTO gmgn_orders(ts,night,mode,mint,name,status,size_usd) VALUES(?,?,?,?,?,?,?)",
+           (clock.t, c.night, "LIVE", M, "NOLAW", "open", 50))
+    _adopt_chain(c, clock, sb)
+    r = run(sb.live.adopt(M, "NOLAW", "NOLAW", ["buy1"]))
+    assert r["status"] == "refused" and "already held by A" in r["reason"]
+    assert not [b for k, b in cl.calls if k == "strategy_create"]
+    # sold already
+    c2, clock2, sb2, cl2, _ = _live()
+    chain = _adopt_chain(c2, clock2, sb2)
+    chain.balance = 0
+    r2 = run(sb2.live.adopt(M, "NOLAW", "NOLAW", ["buy1"]))
+    assert r2["status"] == "refused" and "no longer holds" in r2["reason"]
+    assert not [b for k, b in cl2.calls if k == "strategy_create"]
+
+
+def test_adopt_reuses_existing_stop_and_close_sums_multileg_buys():
+    c, clock, sb, cl, _ = _live()
+    cl.open_strats = [{"order_id": "exist1", "base_token": M, "status": "open", "sub_order_type": "stop_loss"}]
+    chain = _adopt_chain(c, clock, sb, sigs=["buy1", "buy2"], sol_paid=0.25, tokens=2_000_000_000)
+    r = run(sb.live.adopt(M, "NOLAW", "NOLAW", ["buy1", "buy2"]))
+    assert r["status"] == "open" and r["strategy_order_id"] == "exist1"
+    assert not [b for k, b in cl.calls if k == "strategy_create"]
+    o = c.db.one("SELECT * FROM strat_b_orders WHERE id=?", (r["id"],))
+    assert "existing GMGN strategy" in o["note"]
+    assert o["lamports"] == int(0.5 * LAMPORTS) and len(json.loads(o["audit"])["buys"]) == 2
+    # sell everything; close P&L must use both buy legs
+    chain.balance = 0
+    chain.add("sell1", clock.t + 10, int(0.6 * LAMPORTS), -4_000_000_000)
+    assert run(sb.live.check_closed(o, clock.t + 10)) is True
+    closed = c.db.one("SELECT * FROM strat_b_orders WHERE id=?", (r["id"],))
+    assert closed["status"] == "closed"
+    assert closed["pnl_usd"] == round((0.6 - 0.5) * SOL_USD, 2)
+    assert closed["pct"] == pytest.approx(20.0, rel=1e-6)

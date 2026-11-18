@@ -84,6 +84,8 @@ class DB:
                   ("strat_b_orders", "order_id", "TEXT"), ("strat_b_orders", "tx", "TEXT"), ("strat_b_orders", "strategy_order_id", "TEXT"),
                   ("strat_b_orders", "sell_order_id", "TEXT"), ("strat_b_orders", "sell_tx", "TEXT"), ("strat_b_orders", "entry_src", "TEXT"),
                   ("strat_b_orders", "note", "TEXT"), ("strat_b_orders", "confirm_push_at", "REAL"),
+                  # DECISION 77: adopted manual buys on B LIVE (reason + audit, same shape as gmgn_orders)
+                  ("strat_b_orders", "reason", "TEXT"), ("strat_b_orders", "audit", "TEXT"),
                   # DECISION 69: drop watches whose market cap stays under the floor, or whose liquidity is $0
                   ("strat_b_watch", "under_floor_evals", "INTEGER"), ("strat_b_watch", "under_floor_since", "REAL"))
 

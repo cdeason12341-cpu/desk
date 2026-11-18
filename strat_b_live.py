@@ -277,6 +277,101 @@ class BLive:
                          f"Open GMGN and sell it yourself now.", mint)
         return {"status": "open", "id": oid, "repair": "failed"}
 
+    # ---------- adopt a manual wallet buy (DECISION 77)
+    async def adopt(self, mint, name, symbol, sigs, *, note=None) -> dict:
+        """Adopt a manual wallet buy into B LIVE with B's normal protection (owner command).
+        Records the real entry from the buy tx(s), places a GMGN limit_order stop at -strat_b.stop_pct
+        for 100% of the tokens held, and marks the row reason='adopted manual buy', audit.adopted=True.
+        Counts toward B's live_max_open and wallet budget. Does not change modes, caps, or settings,
+        and does not spend new SOL. Refuses if A or B already holds the mint LIVE, or if the wallet
+        no longer holds the bought tokens."""
+        c, s, t = self.c, self.c.s, self.t
+        if t is None or t.client is None:
+            return {"status": "refused", "reason": "GMGN client not configured"}
+        held = A.mint_held_live(c.db, mint)
+        if held:
+            return {"status": "refused", "reason": f"already held by {held} LIVE in the wallet"}
+        if not sigs:
+            return {"status": "refused", "reason": "no buy signature"}
+        legs = []
+        for sig in sigs:
+            d = await chain.tx_delta(c.net, sig, MAIN_WALLET, mint, getattr(t, "_txc", None))
+            if not d or d["err"] or d["tok"] <= 0 or d["sol"] >= 0:
+                return {"status": "refused", "reason": f"buy tx is not a wallet buy of this mint ({sig[:8]})"}
+            legs.append(d)
+        legs.sort(key=lambda l: l["ts"] or 0)
+        tok, lam = sum(l["tok"] for l in legs), -sum(l["sol"] for l in legs)
+        ts = min((l["ts"] or 0) for l in legs)
+        dec = legs[0].get("dec") or 6
+        bal = await chain.token_balance(c.net, MAIN_WALLET, mint)
+        if bal is None:
+            return {"status": "refused", "reason": "wallet balance unknown"}
+        if bal < tok * 0.99:
+            return {"status": "refused", "reason": "wallet no longer holds the bought tokens"}
+        sol_usd = await t.sol_usd()
+        if not sol_usd:
+            return {"status": "refused", "reason": "no SOL price from GMGN"}
+        entry = chain.result({"sol": -lam, "tok": tok, "dec": dec}, [], sol_usd)["entry_price"]
+        size = round(lam / 1e9 * sol_usd, 2)
+        tokens = tok / 10 ** dec
+        entry_mc = None
+        try:
+            r = await c.net.rpc("getTokenSupply", [mint])
+            supply_ui = float((r or {}).get("value", {}).get("uiAmount") or 0) or None
+            if entry and supply_ui:
+                entry_mc = round(entry * supply_ui, 2)
+        except Exception:
+            pass
+        stop_pct = float(s["strat_b.stop_pct"])
+        existing = []
+        for tag in ("STMix", "LimitOrder"):
+            try:
+                d = await t.client.strategy_orders(base_token=mint, kind="open", group_tag=tag)
+            except TypeError:
+                d = await t.client.strategy_orders(base_token=mint, kind="open")
+            existing += [x for x in (d or {}).get("list") or []
+                         if (x.get("base_token") or x.get("token_address")) == mint
+                         and (x.get("order_id") or x.get("id"))]
+        if existing:
+            sid = existing[0].get("order_id") or existing[0].get("id")
+            repair = "adopted manual buy; existing GMGN strategy"
+        else:
+            body = A.stop_strategy_body(s, mint, entry, sol_usd, tok, stop_pct=stop_pct)
+            try:
+                r = await t.client.strategy_create(body)
+            except Exception as e:
+                self._log("LIVE adopt stop failed", mint, str(e)[:200])
+                return {"status": "refused", "reason": f"could not create GMGN stop: {str(e)[:160]}"}
+            sid = (r or {}).get("order_id")
+            if not sid:
+                return {"status": "refused", "reason": "could not create GMGN stop"}
+            repair = "adopted manual buy; stop_loss strategy created"
+        held = A.mint_held_live(c.db, mint)
+        if held:
+            return {"status": "refused", "reason": f"already held by {held} LIVE in the wallet"}
+        now = c.clock()
+        opened = float(ts) or now
+        audit = {"adopted": True,
+                 "buys": [{"sig": l["sig"], "ts": l["ts"], "sol": l["sol"], "tok": l["tok"]} for l in legs],
+                 "tok_raw": tok, "sol_lamports": lam, "phase": "normal", "strategy_kind": "limit_order",
+                 "note": note or "adopted manual buy"}
+        oid = self._row(ts=opened, night=c.night, mode="LIVE", mint=mint, name=name, symbol=symbol, status="open",
+                        reason="adopted manual buy", size_usd=size, sol_usd=sol_usd, lamports=lam,
+                        signal_price=entry, entry_price=entry, tokens=tokens, peak=entry, last_price=entry,
+                        mc_entry=entry_mc, trail_armed=0, opened_at=opened, last_seen=now, order_id="",
+                        strategy_order_id=sid, note=repair, tx=legs[-1]["sig"], entry_src="chain",
+                        audit=json.dumps(audit), why=json.dumps({"reason": "adopted manual buy"}))
+        self._log("LIVE adopted", mint, name, f"#{oid}", f"${size:.2f}", f"stop={sid}", repair)
+        await self._push(
+            f"{LIVE_LABEL} · {symbol}: your manual buy is now managed by Strategy B (#{oid}) · "
+            f"${size:,.2f} ({lam / LAMPORTS:.4f} SOL) · server-side -{stop_pct:g}% stop created on GMGN · "
+            f"trail {s['strat_b.trail_pct']:g}% from +{s['strat_b.trail_start_pct']:g}% · "
+            f"take profit +{s['strat_b.take_profit_pct']:g}%, spike rule, {s['strat_b.time_stop_h']:g}h time stop",
+            mint)
+        return {"status": "open", "id": oid, "strategy_order_id": sid, "entry_price": entry,
+                "size_usd": size, "lamports": lam, "tokens": tokens, "mc_entry": entry_mc,
+                "check_price": entry * (1 - stop_pct / 100.0) if entry else None, "note": repair}
+
     # ---------- sells
     async def _market_sell(self, oid, reason) -> str:
         """Guarded market sell: never a 2nd sell while one is pending/done, never with 0 held. sent|already|none_held|failed|unknown."""
@@ -387,7 +482,7 @@ class BLive:
     # ---------- close from the chain only (DECISION 42)
     async def check_closed(self, o, now) -> bool:
         t, c = self.t, self.c
-        buy = await t.buy_delta({"tx": o["tx"], "mint": o["mint"], "audit": None})
+        buy = await t.buy_delta({"tx": o["tx"], "mint": o["mint"], "audit": o.get("audit")})
         if not buy:
             return False
         if o["entry_src"] != "chain":

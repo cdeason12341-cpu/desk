@@ -22,6 +22,8 @@ CASES = [
     ("strat_b", "B LIVE · Sold JALU (stop (GMGN server-side)) · -$9.85 (-19.4%) · held 3.2h\nOn-chain: x", "Strat B sold JALU −$9.85 (−19%) (stop)"),
     ("strat_b", "B LIVE · Bought GM · $18.13 @ $0.000258751 · stop -35% live on GMGN", "Strat B bought GM $18.13"),
     ("strat_b", "B LIVE · Skipped Foo: wallet short", "Strat B skipped Foo"),
+    ("strat_b", "B LIVE · NOLAW: your manual buy is now managed by Strategy B (#9) · $37.79 · server-side -35% stop created on GMGN",
+     "Strat B · your manual buy NOLAW is now protected"),
     ("stage_scanner", "✅ Scanner pass · Sloth · liq $11.9K · MC $31.0K · via pump.fun", "Strat A · Sloth passed the scanner"),
     ("stage_analyst", "🎯 Analyst pass · score 52 · Bags · via pump.fun\nBuy flow next.", "Strat A · Bags passed the analyst (score 52)"),
     ("info", "Phone app data is 55 min old. Retrying.", "Desk · Phone app data is 55 min old. Retrying."),
