@@ -190,7 +190,7 @@
     let r;
     try { r = await fetch(LIVE_URL + "?" + q, { cache: "no-store", headers: { Authorization: "Bearer " + await liveBearer() }, signal: ac.signal, referrerPolicy: "no-referrer" }); }
     finally { clearTimeout(to); }
-    if (!r.ok) throw new Error("live " + r.status);
+    if (!r.ok) throw Object.assign(new Error("live " + r.status), { warm: r.status === 503 });   // 503 = server waking up
     const out = await r.json();
     const dec = await Promise.all(Object.entries(out.files || {}).map(async ([f, env]) => [f, await decrypt(env)]));
     if (out.boot !== L.boot) { L.boot = out.boot; L.seq = {}; }
@@ -207,20 +207,23 @@
     if (document.hidden) return;                      // paused while hidden; visibilitychange resumes
     const r = route();
     const coin = (r.name === "coin" || r.name === "audit") ? r.arg : null;
-    let live = false, changed = 1;
+    let live = false, changed = 1, warm = false;
     if (!L.failAt || Date.now() - L.failAt > LIVE_RETRY_MS) {
-      try { changed = await fetchLive(r.name, coin); live = true; L.failAt = 0; }
-      catch (e) { L.failAt = Date.now(); L.src = "pages"; }
+      try { changed = await fetchLive(r.name, coin); live = true; L.failAt = 0; L.warmN = 0; }
+      catch (e) {
+        if (e && e.warm && (L.warmN = (L.warmN || 0) + 1) <= 5) { warm = true; L.failAt = 0; }
+        else { L.failAt = Date.now(); L.src = "pages"; L.warmN = 0; }
+      }
     }
     let failed = false;
-    const want = live ? [] : CORE.slice();
+    const want = live || (warm && S.files["state.json"]) ? [] : CORE.slice();
     if (coin) for (const f of [`coin/${coin}.json`, `audit/${coin}.json`]) if (!live || !S.files[f]) want.push(f);
     await Promise.all(want.map(f => fetchFile(f).catch(e => { if (e.net && !live) failed = true; })));
     if (!live && !failed) L.src = "pages";
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    const delay = live ? LIVE_S : LIVE_HASH[r.name] ? LIVE_POLL_S : POLL_S;
+    const delay = live ? LIVE_S : warm ? 1 : LIVE_HASH[r.name] ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
     const view = r.name + "/" + (r.arg || "");
     if (!live || changed || want.length || poll._view !== view || !S.rendered) { render(); S.rendered = true; } else chrome();
