@@ -158,11 +158,25 @@ class Net:
             raise SourceError(f"rpc error {method}: {json.dumps(e)[:200]}")
         return d.get("result")
 
+    # DECISION 74: two short retries on getProgramAccounts 429s before the caller declares no data.
+    GPA_RETRY_DELAYS = (1.0, 3.0)
+
     async def token_accounts_for_mint(self, mint, program, timeout=60):
         filters = [{"memcmp": {"offset": 0, "bytes": mint}}]
         if program.startswith("Tokenkeg"):
             filters.insert(0, {"dataSize": 165})
-        return await self.rpc("getProgramAccounts", [program, {"encoding": "jsonParsed", "filters": filters}], timeout=timeout)
+        params = [program, {"encoding": "jsonParsed", "filters": filters}]
+        last = None
+        for i, delay in enumerate((0,) + self.GPA_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await self.rpc("getProgramAccounts", params, timeout=timeout)
+            except RateLimited as e:
+                last = e
+                if i >= len(self.GPA_RETRY_DELAYS):
+                    raise
+        raise last
 
     # ---- Jev
     async def jev(self, key, state, questions, timeout):

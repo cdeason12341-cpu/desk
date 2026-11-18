@@ -115,6 +115,8 @@ def headline(kind: str, text: str) -> tuple[str, str]:
         title += " · paper"
     if "re-entry" in flags and "re-entry" not in title:
         title += " · re-entry"
+    if "L8 skipped" in (text or "") and "L8 skipped" not in title:
+        title += " · ⚠️ L8 skipped (rpc down)"
     return w, title
 
 

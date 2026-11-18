@@ -180,6 +180,8 @@ class Executor:
         return out
 
     async def push(self, text, buttons, mint):
+        from agents.auditor import mint_l8_skipped, tag_l8_skip
+        text = tag_l8_skip(text, mint_l8_skipped(self.c, mint))
         for i in range(3):
             try:
                 if await self.c.notifier.push(text, buttons, kind="buy", mint=mint):

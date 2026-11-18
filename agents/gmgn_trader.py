@@ -657,6 +657,10 @@ class GmgnTrader:
         self.log.info(secrets_store.redact("\t".join([iso()] + [str(p) for p in parts])))
 
     async def push(self, text, kind="gmgn", mint=None):
+        first = (text or "").split("\n", 1)[0]
+        if mint and any(tag in first for tag in ("Bought ", "Buying ", "Buy ")):
+            from agents.auditor import mint_l8_skipped, tag_l8_skip
+            text = tag_l8_skip(text, mint_l8_skipped(self.c, mint))
         try:
             return await self.c.notifier.push(text, None, kind=kind, mint=mint)
         except Exception as e:

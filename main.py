@@ -40,6 +40,8 @@ class Desk:
     def __init__(self, db_path=str(ROOT / "desk.db"), notifier=None, log_files=True, with_telegram=True):
         self.db = DB(db_path)
         self.settings = config.Settings(self.db)
+        self.settings.record_default_source(
+            "auditor.l8_bypass_on_down", "chat: owner asked 2026-11-17 7:15 PM CT")
         self.bus = Bus()
         self.ctx = Ctx(self.db, self.settings, None, self.bus, notifier, log_files)
         self.ctx.net = Net(self.settings)

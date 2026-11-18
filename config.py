@@ -69,6 +69,8 @@ SPECS: list[Spec] = [
     _s("auditor.max_delegated_accounts", 10, 1, 10000, aliases=("delegations", "delegated"), fmt="{v}"),
     _s("auditor.retries", 3, 0, 10, aliases=("retries",), fmt="{v}"),
     _s("auditor.retry_gap_s", 2, 0, 30, aliases=("retry gap",), fmt="{v}s"),
+    # DECISION 74 (owner 2026-11-17 7:15 PM CT): skip layer 8 when getProgramAccounts is down (RPC 429/timeout).
+    _s("auditor.l8_bypass_on_down", True, aliases=("l8 bypass", "layer 8 bypass", "bypass layer 8")),
     # analyst
     _s("analyst.mode", "jev", kind="choice", choices=("jev", "rules"), aliases=("analyst mode", "analyst")),
     _s("analyst.min_alive_6h", 0.70, 0, 1, aliases=("alive", "min alive"), fmt="{v:.2f}"),
@@ -406,6 +408,12 @@ class Settings:
             except Exception:
                 pass
         return msg
+
+    def record_default_source(self, key: str, source: str):
+        """Write the current (usually default) value to change_log once, so a new setting has a source."""
+        if self.db.one("SELECT id FROM change_log WHERE key=?", (key,)):
+            return
+        self.set(key, self[key], source=source)
 
     def as_dict(self):
         return dict(self._cache)

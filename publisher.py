@@ -90,6 +90,10 @@ class Builder:
                     "sizeUsd": None if size is None else round(size, 2), "tone": tone,
                     "link": links.coin_url(mint) if mint else None}
 
+        def l8_note(mint):
+            from agents.auditor import mint_l8_skipped, L8_SKIP_NOTE
+            return f" · {L8_SKIP_NOTE}" if mint and mint_l8_skipped(c, mint) else ""
+
         A = out["A"]
         for o in c.db.rows("SELECT * FROM gmgn_orders WHERE mode='LIVE' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
                            (since_t, since_t)):
@@ -100,7 +104,7 @@ class Builder:
             if o["status"] == "failed":
                 A.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
                 continue
-            A.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else ""),
+            A.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
                         o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
             if o["closed_at"]:
                 stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
@@ -419,8 +423,12 @@ class Builder:
             layers = b.get("layers") if isinstance(b.get("layers"), list) else []
             fail = next((L for L in layers if isinstance(L, dict) and L.get("pass") is False), None)
             if r["passed"]:
+                l8_skip = bool(b.get("l8_skipped"))
                 items.append(item(r["ts"], r["mint"], b, stage="auditor", outcome="pass",
-                                  reason=None, layer=r["layer"] or 8, layerName="8/8 clean", passed=True))
+                                  reason=("⚠️ L8 skipped (rpc down)" if l8_skip else None),
+                                  layer=r["layer"] or 8,
+                                  layerName="8/8 · L8 skipped (rpc down)" if l8_skip else "8/8 clean",
+                                  passed=True, l8Skipped=l8_skip))
             else:
                 layer = (fail or {}).get("n") or r["layer"]
                 layer_name = (fail or {}).get("name")

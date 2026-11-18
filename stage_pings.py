@@ -116,11 +116,15 @@ def scanner_text(out):
 
 
 def auditor_text(name, audit):
+    from agents.auditor import L8_SKIP_NOTE, audit_l8_skipped
     top10 = next((l.get("value") for l in audit.get("layers", []) if l.get("n") == 4), None)
     top = str(top10 or "n/a").split(" ")[0]
     if top != "n/a" and not top.endswith("%"):
         top += "%"
-    return f"🛡️ Audit pass · {name} · top10 {top}"
+    t = f"🛡️ Audit pass · {name} · top10 {top}"
+    if audit_l8_skipped(audit):
+        t += f" · {L8_SKIP_NOTE}"
+    return t
 
 
 def analyst_pass_text(name, score):

@@ -1,4 +1,4 @@
-"""AGENT 2 · AUDITOR. 8 layers in order; one red layer and the coin is dead. No data is never a pass."""
+"""AGENT 2 · AUDITOR. 8 layers in order; one red layer and the coin is dead. No data is never a pass, except layer 8 when auditor.l8_bypass_on_down is on and getProgramAccounts is unavailable (DECISION 74)."""
 from __future__ import annotations
 import stage_pings
 import asyncio, json, time
@@ -108,6 +108,53 @@ def short(addr: str) -> str:
     return f"{addr[:4]}...{addr[-3:]}" if addr and len(addr) > 8 else (addr or "?")
 
 
+L8_SKIP_VALUE = "L8=skipped (rpc down)"
+L8_SKIP_NOTE = "⚠️ L8 skipped (rpc down)"
+
+
+def layer8_verdict(accounts, max_delegated, *, error=None, bypass=False) -> tuple[bool, str, bool]:
+    """Layer 8: (passed, value, skipped). error / missing accounts = no data (bypass → pass-with-warning)."""
+    if accounts is None or error:
+        if bypass:
+            return True, L8_SKIP_VALUE, True
+        return False, "no data: delegations", False
+    groups = holders.delegate_groups(accounts)
+    if groups and groups[0][1] >= max_delegated:
+        return False, f"{groups[0][1]} wallets → {short(groups[0][0])}", False
+    return True, "None" if not groups else f"max {groups[0][1]} → {short(groups[0][0])}", False
+
+
+def audit_l8_skipped(audit) -> bool:
+    if not isinstance(audit, dict):
+        return False
+    if audit.get("l8_skipped"):
+        return True
+    layers = audit.get("layers") or []
+    l8 = next((L for L in layers if isinstance(L, dict) and L.get("n") == 8), None)
+    return bool(l8 and L8_SKIP_VALUE in str((l8 or {}).get("value") or ""))
+
+
+def mint_l8_skipped(ctx, mint) -> bool:
+    try:
+        r = ctx.db.one("SELECT json FROM audits WHERE mint=? ORDER BY id DESC LIMIT 1", (mint,))
+    except Exception:
+        return False
+    if not r:
+        return False
+    try:
+        return audit_l8_skipped(json.loads(r["json"] or "{}"))
+    except Exception:
+        return False
+
+
+def tag_l8_skip(text, skipped) -> str:
+    """Append the L8-skipped warning to the first line of a notification, once."""
+    if not skipped or not text or L8_SKIP_NOTE in text:
+        return text
+    first, sep, rest = text.partition("\n")
+    return first + " · " + L8_SKIP_NOTE + ((sep + rest) if sep else "")
+
+
 class Auditor:
     name = "auditor"
 
@@ -197,6 +244,7 @@ class Auditor:
                  "layers": layers, "holders": None, "reason": None, "running": True}
         self.live[mint] = state
         cache: dict = {}
+        self._acct_cache = cache          # test hook: clear after layer 4 to exercise L8's own no-data path
         bundled = None
         bundle_pct = None
         raw_log = []
@@ -347,16 +395,25 @@ class Auditor:
                         raise Red(value, "rugcheck")
                     L.update(value=value, source="rugcheck")
                 elif n == 8:
+                    acc, err = None, None
                     try:
                         acc = await accounts()
-                    except Exception:
-                        raise Red("no data: delegations", "rpc")
-                    groups = holders.delegate_groups(acc)
-                    state["holders"] = holders.holder_count(acc)
-                    raw_log.append(f"delegates={groups[:3]} holders={state['holders']}")
-                    if groups and groups[0][1] >= s["auditor.max_delegated_accounts"]:
-                        raise Red(f"{groups[0][1]} wallets → {short(groups[0][0])}", "rpc")
-                    L.update(value="None" if not groups else f"max {groups[0][1]} → {short(groups[0][0])}", source="rpc")
+                    except Exception as e:
+                        err = e
+                    ok, value, skipped = layer8_verdict(
+                        acc, s["auditor.max_delegated_accounts"], error=err,
+                        bypass=bool(s["auditor.l8_bypass_on_down"]))
+                    if skipped:
+                        raw_log.append(L8_SKIP_VALUE)
+                        state["l8_skipped"] = True
+                        L.update(value=value, source="rpc")
+                    elif not ok:
+                        raise Red(value, "rpc")
+                    else:
+                        groups = holders.delegate_groups(acc)
+                        state["holders"] = holders.holder_count(acc)
+                        raw_log.append(f"delegates={groups[:3]} holders={state['holders']}")
+                        L.update(value=value, source="rpc")
                 L["pass"] = True
             except Red as r:
                 L.update(**{"pass": False, "value": r.value, "source": r.source})
@@ -374,6 +431,7 @@ class Auditor:
         out["layers"] = [{k: l[k] for k in ("n", "name", "pass", "value", "source")} for l in layers]
         out["bundled"] = bundled
         out["bundle_pct"] = None if bundle_pct is None else round(bundle_pct, 4)
+        out["l8_skipped"] = bool(state.get("l8_skipped"))
         self.log.info(f"{out['ts']}\t{mint}\t" + "\t".join(f"L{l['n']}={l['value']}({l['ms']}ms)" for l in layers if l["ms"] is not None)
                       + f"\t{' | '.join(raw_log)}\tverdict={'pass' if passed else 'red'}")
         if record:
@@ -404,4 +462,10 @@ class Auditor:
         self.c.error("auditor", "gpa_down", str(e)[:300])
         if not self.gpa_down_alerted:
             self.gpa_down_alerted = True
-            await self.c.notifier.push(f"{self.c.prefix()}layer 8 down, every coin is red until rpc_url changes", kind="alert")
+            # Do not use c.prefix() — that is FOMO desk.mode ("PAPER · "), not Strategy A's mode (DECISION 74).
+            # notif_label will headline this as "Desk · …".
+            if self.c.s["auditor.l8_bypass_on_down"]:
+                text = "layer 8 is down and being skipped"
+            else:
+                text = "layer 8 down, every coin is red until rpc_url changes"
+            await self.c.notifier.push(text, kind="alert")
