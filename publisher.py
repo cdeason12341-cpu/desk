@@ -365,8 +365,12 @@ class Builder:
         def short(mint):
             return (mint[:4] + "…" + mint[-4:]) if mint and len(mint) >= 8 else (mint or "")
 
+        coin_cache = {}                                   # one coins-row read per mint per build (was one per event)
+
         def names(mint, body=None):
-            co = c.coin(mint) or {}
+            if mint not in coin_cache:
+                coin_cache[mint] = c.coin(mint) or {}
+            co = coin_cache[mint]
             body = body if isinstance(body, dict) else {}
             return co.get("name") or body.get("name"), co.get("symbol") or body.get("symbol")
 

@@ -82,6 +82,10 @@ class Desk:
         self.ctx.executor = self.executor
         from publisher import Publisher
         self.publisher = Publisher(self)
+        self.live = None                                            # DECISION 75: live app data from this server (read-only)
+        if with_telegram:
+            from live_api import LiveApi
+            self.live = LiveApi(self)
         self.log = self.ctx.logs["desk"]
         self.hb_path = LOGS / "heartbeats.json"
         self.watchdog_log = LOGS / "watchdog.log"
@@ -413,6 +417,8 @@ class Desk:
             jobs["telegram"] = self.tg.loop
         if self.webpush:
             jobs["webpush"] = self.webpush.loop
+        if self.live:
+            jobs["live_api"] = self.live.loop
         self._jobs = jobs
         wd = None
         if with_watchdog:

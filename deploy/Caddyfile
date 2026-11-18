@@ -1,0 +1,17 @@
+# DECISION 75: TLS front for the desk's read-only live endpoint (live_api.py on 127.0.0.1:8787).
+# Only /live/v1/* is proxied; everything else is 404. No access log (default off), so headers are never logged.
+165-227-20-72.sslip.io {
+	encode zstd gzip
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	handle /live/v1/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle {
+		respond 404
+	}
+}

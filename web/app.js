@@ -162,23 +162,76 @@
     try { const obj = await decrypt(env); S.missing.delete(f); S.files[f] = obj; return obj; }
     catch (e) { S.badKey = true; throw e; }
   }
+  // ---------- live source (DECISION 75): the droplet serves the same encrypted files ~2s fresh; Pages is the fallback.
+  // The bearer is a hash of the token (the token itself never leaves the phone); the data stays encrypted end to end.
+  const LIVE_URL = "https://165-227-20-72.sslip.io/live/v1/bundle", LIVE_S = 2, LIVE_TIMEOUT_MS = 4000, LIVE_RETRY_MS = 30000;
+  const L = { cursor: null, builtAtMs: 0, okAt: 0, failAt: 0, src: null, bearer: null, bearerFor: null };
+  window.__deskLive = L;
+  async function liveBearer() {
+    if (L.bearerFor !== TOKEN()) {
+      const h = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode("grok-bot-desk/v1/live:" + TOKEN())));
+      L.bearer = Array.from(h, b => b.toString(16).padStart(2, "0")).join(""); L.bearerFor = TOKEN();
+    }
+    return L.bearer;
+  }
+  async function fetchLive(coin) {
+    const q = new URLSearchParams(); if (L.cursor) q.set("since", L.cursor); if (coin) q.set("coin", coin);
+    const ac = new AbortController(); const to = setTimeout(() => ac.abort(), LIVE_TIMEOUT_MS);
+    let r;
+    try { r = await fetch(LIVE_URL + "?" + q, { cache: "no-store", headers: { Authorization: "Bearer " + await liveBearer() }, signal: ac.signal, referrerPolicy: "no-referrer" }); }
+    finally { clearTimeout(to); }
+    if (!r.ok) throw new Error("live " + r.status);
+    const out = await r.json();
+    const n = Object.keys(out.files || {}).length;
+    const dec = await Promise.all(Object.entries(out.files || {}).map(async ([f, env]) => [f, await decrypt(env)]));
+    for (const [f, obj] of dec) { S.files[f] = obj; S.missing.delete(f); }
+    // a file left out is unchanged apart from its build time, so it is current as of builtAt
+    if (S.files["state.json"] && out.builtAt && !dec.some(([f]) => f === "state.json")) S.files["state.json"].ts = out.builtAt;
+    L.cursor = out.cursor; L.builtAtMs = out.builtAtMs || Date.now(); L.okAt = Date.now(); L.src = "droplet";
+    return n;
+  }
   let pollTimer = null, countdown = null, nextAt = 0;
   async function poll() {
     clearTimeout(pollTimer);
     if (!TOKEN() || !DPATH()) { render(); return; }
-    const want = CORE.slice(); const r = route();
-    if (r.name === "coin") want.push(`coin/${r.arg}.json`, `audit/${r.arg}.json`);
-    if (r.name === "audit") want.push(`audit/${r.arg}.json`, `coin/${r.arg}.json`);
+    if (document.hidden) return;                      // paused while hidden; visibilitychange resumes
+    const r = route();
+    const coin = (r.name === "coin" || r.name === "audit") ? r.arg : null;
+    let live = false, changed = 1;
+    if (!L.failAt || Date.now() - L.failAt > LIVE_RETRY_MS) {
+      try { changed = await fetchLive(coin); live = true; L.failAt = 0; }
+      catch (e) { L.failAt = Date.now(); L.src = "pages"; }
+    }
     let failed = false;
-    await Promise.all(want.map(f => fetchFile(f).catch(e => { if (e.net) failed = true; })));
+    const want = live ? [] : CORE.slice();
+    if (coin) for (const f of [`coin/${coin}.json`, `audit/${coin}.json`]) if (!live || !S.files[f]) want.push(f);
+    await Promise.all(want.map(f => fetchFile(f).catch(e => { if (e.net && !live) failed = true; })));
+    if (!live && !failed) L.src = "pages";
     S.loadedOnce = true;
     if (failed) { S.offline = S.offline || Date.now(); }
     else { S.offline = null; if (S.files["state.json"]) S.lastGood = S.files["state.json"].ts; }
-    const delay = LIVE_HASH[r.name] ? LIVE_POLL_S : POLL_S;
+    const delay = live ? LIVE_S : LIVE_HASH[r.name] ? LIVE_POLL_S : POLL_S;
     nextAt = Date.now() + delay * 1000;
-    render(); pushResync();
+    const view = r.name + "/" + (r.arg || "");
+    if (!live || changed || want.length || poll._view !== view || !S.rendered) { render(); S.rendered = true; } else chrome();
+    poll._view = view;
+    if (!live || Date.now() - (poll._sync || 0) > 30000) { poll._sync = Date.now(); pushResync(); }
     pollTimer = setTimeout(poll, delay * 1000);
   }
+  function srcPill() {
+    const el = $("#srcPill"); if (!el) return;
+    const st = F("state.json");
+    if (L.src === "droplet" && Date.now() - L.okAt < 15000) {
+      const age = Math.max(0, (Date.now() - L.builtAtMs) / 1000);
+      el.className = "srcpill on"; el.textContent = `● live ${ago(age)}`;
+      el.title = "Straight from the desk server";
+    } else if (st) {
+      const age = Math.max(0, (Date.now() - new Date(st.ts)) / 1000);
+      el.className = "srcpill"; el.textContent = `Pages ${ago(age)}`;
+      el.title = "Backup copy via GitHub Pages";
+    } else el.className = "srcpill hidden";
+  }
+  setInterval(srcPill, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
   setInterval(() => { if (S.offline) statusRow(); }, 1000);
 
@@ -1004,11 +1057,19 @@
       : (r.name === "scores" || r.name === "scanner" || r.name === "alive") ? scores()
       : r.name === "strata" ? stratA()
       : wallet();
+    // same view re-rendered by a poll (every ~2s on the live source): keep what the user opened, don't replay animations
+    const same = render._route === r.name + "/" + (r.arg || ""); render._route = r.name + "/" + (r.arg || "");
+    const rowKey = (el, i) => (el.dataset.mint || "") + "#" + i;
+    const openRows = same ? new Set([...V.querySelectorAll(".score-row")].map((el, i) => el.classList.contains("open") ? rowKey(el, i) : null).filter(Boolean)) : null;
+    const closedRows = same ? new Set([...V.querySelectorAll(".score-row")].map((el, i) => el.classList.contains("open") ? null : rowKey(el, i)).filter(Boolean)) : null;
+    const openDet = same ? [...V.querySelectorAll("details")].map(d => d.open) : null;
     V.innerHTML = html;
     chrome();
-    document.querySelectorAll(".score-row").forEach(el => {
+    document.querySelectorAll(".score-row").forEach((el, i) => {
+      if (same) { const k = rowKey(el, i); if (openRows.has(k)) el.classList.add("open"); else if (closedRows.has(k)) el.classList.remove("open"); }
       el.addEventListener("click", e => { if (e.target.closest("a")) return; el.classList.toggle("open"); });
     });
+    if (same) V.querySelectorAll("details").forEach((d, i) => { if (openDet[i] != null) d.open = openDet[i]; });
     // post-render drawing
     const ch = F("chart.json"), st = F("state.json");
     const hc = $("#homeChart");
@@ -1021,7 +1082,7 @@
     if (cc) { const c = F(`coin/${cr.arg}.json`); const ok = c && Charts.candles(cc, c.candles, { riskLine: c.riskLine?.price, marks: c.marks });
       if (!ok) { cc.classList.add("hidden"); $("#coinChartEmpty").classList.remove("hidden"); } }
     document.querySelectorAll("canvas.ring").forEach(cv => Charts.ring(cv, cv.dataset.score === "" ? null : +cv.dataset.score, +cv.dataset.min, 56));
-    document.querySelectorAll(".bar>i").forEach(i => { const v = i.dataset.fill; requestAnimationFrame(() => i.style.width = v + "%"); });
+    document.querySelectorAll(".bar>i").forEach(i => { const v = i.dataset.fill; if (same) { i.style.transition = "none"; i.style.width = v + "%"; } else requestAnimationFrame(() => i.style.width = v + "%"); });
     if (cr.name === "audit") { const a = F(`audit/${cr.arg}.json`); const key2 = a && (cr.arg + a.ts);
       if (a) { const fresh = render._audit !== key2; render._audit = key2; discAnim(a, !fresh); } }
     else render._audit = null;
