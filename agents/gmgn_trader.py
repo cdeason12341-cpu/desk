@@ -3,10 +3,11 @@
 PAPER: on a coin that passed the desk, size it, run every cap check, call the real quote when the plan allows it,
        record a simulated fill + the exact swap body / condition orders that LIVE would send. Never calls swap.
 LIVE:  signed swap from the owner's main wallet ONLY, with server-side exits attached in the same request.
-       With risk.grace_min > 0 (default 5), the first window uses loss_stop at risk.grace_stop_pct (default 30)
-       and profit_stop_trace from trail start; the drawdown trail (loss_stop_trace) is skipped so it can't fire early.
-       After grace_min from the fill, those exits are swapped for the normal set (loss_stop at risk.stop_pct,
-       loss_stop_trace, profit_stop_trace) via GMGN's strategy API, still server-side. If the box was paused past
+       With risk.grace_min > 0 (default 5), the first window uses loss_stop at risk.grace_stop_pct (default 30);
+       the drawdown trail (loss_stop_trace) is skipped so it can't fire early. The take-profit trail is run by the
+       desk (never by profit_stop_trace, which can sell below entry) and will not sell below entry + risk.trail_floor_pct
+       (DECISION 80). After grace_min from the fill, those exits are swapped for the normal set (loss_stop at
+       risk.stop_pct, loss_stop_trace) via GMGN's strategy API, still server-side. If the box was paused past
        the window, the swap runs on resume. With risk.grace_extend_below_stop (default on, DECISION 65), if the
        fast pool price is still below the normal stop but above the grace stop when the window ends, the swap
        waits until price has recovered; the -grace_stop_pct stop stays on in the meantime.
@@ -112,9 +113,12 @@ def grace_due(s, o, now, price=None, *, extended=False, recover_streak=0) -> boo
 
 
 def conditions(s, phase=None) -> list[dict]:
-    """Server-side exits. phase='grace': loss_stop at grace_stop_pct + the take-profit trail;
-    the drawdown trail (loss_stop_trace) is skipped so a 10% peak-to-trough dip can't end grace early.
-    phase=None means whatever a new buy would attach."""
+    """Server-side exits. phase='grace': loss_stop at grace_stop_pct; the drawdown trail
+    (loss_stop_trace) is skipped so a 10% peak-to-trough dip can't end grace early.
+    phase='normal': loss_stop at stop_pct + loss_stop_trace.
+    The take-profit trail is not sent as profit_stop_trace (that order can sell below entry);
+    the desk trail runs it with risk.trail_floor_pct so it never sells below entry + the floor
+    (DECISION 80). phase=None means whatever a new buy would attach."""
     if phase is None:
         phase = "grace" if grace_active(s) else "normal"
     stop = s["risk.grace_stop_pct"] if phase == "grace" else s["risk.stop_pct"]
@@ -122,8 +126,6 @@ def conditions(s, phase=None) -> list[dict]:
     if phase != "grace":
         out.append({"order_type": "loss_stop_trace", "side": "sell", "sell_ratio": "100",
                     "drawdown_rate": f"{s['risk.trail_pct']:g}"})
-    out.append({"order_type": "profit_stop_trace", "side": "sell", "price_scale": f"{s['risk.trail_start_pct']:g}",
-                "sell_ratio": "100", "drawdown_rate": f"{s['risk.trail_pct']:g}"})
     return out
 
 
@@ -145,11 +147,11 @@ def exits_text(s, phase=None) -> str:
     """Full exits sentence for buy pushes."""
     if phase is None:
         phase = "grace" if grace_active(s) else "normal"
+    trail = (f"take-profit trail from +{s['risk.trail_start_pct']:g}%, "
+             f"never below +{s['risk.trail_floor_pct']:g}% (desk)")
     if phase == "grace" and grace_active(s):
-        return (f"{exits_label(s, 'grace')} · trail {s['risk.trail_pct']:g}% after grace · "
-                f"take-profit trail from +{s['risk.trail_start_pct']:g}% (server-side)")
-    return (f"stop -{s['risk.stop_pct']:g}% · trail {s['risk.trail_pct']:g}% · "
-            f"take-profit trail from +{s['risk.trail_start_pct']:g}% (server-side)")
+        return f"{exits_label(s, 'grace')} · trail {s['risk.trail_pct']:g}% after grace · {trail}"
+    return f"stop -{s['risk.stop_pct']:g}% · trail {s['risk.trail_pct']:g}% · {trail}"
 
 
 def grace_fields(s, now) -> dict:
@@ -497,7 +499,7 @@ def sim_exit(s, o, price, now):
     stop = s["risk.grace_stop_pct"] if phase == "grace" else s["risk.stop_pct"]
     if price <= entry * (1 - stop / 100.0):
         return "loss_stop", peak
-    if peak >= entry * (1 + s["risk.trail_start_pct"] / 100.0) and price <= peak * (1 - s["risk.trail_pct"] / 100.0):
+    if peak >= entry * (1 + s["risk.trail_start_pct"] / 100.0) and price <= trail_trigger(s, entry, peak):
         return "profit_stop_trace", peak
     if phase != "grace" and price <= peak * (1 - s["risk.trail_pct"] / 100.0):
         return "loss_stop_trace", peak
@@ -538,10 +540,31 @@ def limit_stop_only(o) -> bool:
     return bool(conds) and not any((c or {}).get("order_type") == "profit_stop_trace" for c in conds)
 
 
+def trail_floor_price(s, entry) -> float:
+    """Lowest price the take-profit trail may sell at: entry * (1 + risk.trail_floor_pct/100)."""
+    return float(entry) * (1 + float(s["risk.trail_floor_pct"] or 0) / 100.0)
+
+
+def trail_trigger(s, entry, peak) -> float:
+    """Armed-trail sell price: trail_pct below the peak, but never below the profit floor."""
+    raw = float(peak) * (1 - float(s["risk.trail_pct"]) / 100.0)
+    return max(raw, trail_floor_price(s, entry))
+
+
+def has_profit_stop_trace(o) -> bool:
+    """True when the stored condition set still includes a server-side take-profit trail."""
+    try:
+        conds = json.loads(o.get("conditions") or "[]")
+    except Exception:
+        return False
+    return any((c or {}).get("order_type") == "profit_stop_trace" for c in conds)
+
+
 def desk_trail_check(s, o, price, now, peak=None):
-    """One price sample for a limit-stop-only position. Returns (reason|None, peak, armed).
+    """One price sample for an open LIVE A position. Returns (reason|None, peak, armed).
     Peak = highest price seen since the buy (row peak, kept by the watcher too). Armed once peak >= entry *
-    (1 + risk.trail_start_pct). Armed + price <= peak * (1 - risk.trail_pct) -> 'desk trail'.
+    (1 + risk.trail_start_pct). Armed + price <= trail_trigger (max of peak*(1-trail_pct) and
+    entry*(1+trail_floor_pct)) -> 'desk trail'. The trail never sells below the floor (DECISION 80).
     Backup hard stop at -stop_pct (-grace_stop_pct inside an order's grace window) -> 'desk stop'.
     All values read live from settings on every call."""
     entry = o["entry_price"]
@@ -551,7 +574,7 @@ def desk_trail_check(s, o, price, now, peak=None):
     armed = peak >= entry * (1 + float(s["risk.trail_start_pct"]) / 100.0)
     if price <= entry * (1 - stop / 100.0):
         return DESK_STOP, peak, armed
-    if armed and price <= peak * (1 - float(s["risk.trail_pct"]) / 100.0):
+    if armed and price <= trail_trigger(s, entry, peak):
         return DESK_TRAIL, peak, armed
     return None, peak, armed
 
@@ -626,6 +649,7 @@ class GmgnTrader:
         self._trail_seen: set = set()    # order ids the desk trail has started watching (logged once)
         self._trail_retry: dict = {}     # order id -> earliest retry after a failed desk-trail sell
         self._trail_peak: dict = {}      # order id -> trail peak (in memory; seeded from the row on first sight)
+        self._strip_retry: dict = {}     # order id -> earliest retry after a failed profit_stop_trace strip
         self.fast = None                 # fastprice.FastPrice for LIVE exit watchers (DECISION 57), set by main.Desk
         self._settling: set = set()      # order ids with a settle/exit-attach in progress (watcher must not race it)
         self._grace_extended: set = set()  # order ids holding the grace stop past the window (DECISION 65)
@@ -1298,7 +1322,7 @@ class GmgnTrader:
         rep_ = o.get("repair") or ""
         return "limit_order" if ("stop_loss strategy created" in rep_ or LIMIT_STOP_MARK in rep_) else "smart_trade"
 
-    def _normal_strategy_body(self, s, mint, amount_in=None) -> dict:
+    def _normal_strategy_body(self, s, mint, amount_in=None, phase="normal") -> dict:
         extra = {"amount_in": str(int(amount_in))} if amount_in else {}
         return {**extra, "chain": gmgn.CHAIN, "from_address": MAIN_WALLET, "base_token": mint, "quote_token": SOL,
                 "order_type": "smart_trade", "sub_order_type": "mix_trade", "amount_in_percent": "100",
@@ -1306,7 +1330,7 @@ class GmgnTrader:
                 "priority_fee": f"{s['gmgn.priority_fee_sol']:g}", "tip_fee": f"{s['gmgn.tip_fee_sol']:g}",
                 "sell_param": {"slippage": max(int(s["gmgn.slippage_pct"]), 25), "is_anti_mev": True,
                                "priority_fee": f"{s['gmgn.priority_fee_sol']:g}", "tip_fee": f"{s['gmgn.tip_fee_sol']:g}"},
-                "condition_orders": conditions(s, "normal")}
+                "condition_orders": conditions(s, phase)}
 
     async def _create_strategy(self, body) -> str:
         r = await self.client.strategy_create(body)
@@ -1362,10 +1386,11 @@ class GmgnTrader:
                     f"stop -{s['risk.stop_pct']:g}%")
         else:
             head = f"GMGN · {self._tag(o)}{o['name']}: {s['risk.grace_min']:g} min grace over · stop -{s['risk.stop_pct']:g}%"
+        trail = (f"take-profit trail {s['risk.trail_pct']:g}% from +{s['risk.trail_start_pct']:g}%, "
+                 f"never below +{s['risk.trail_floor_pct']:g}%, runs from my computer")
         if new_type == "limit_order":
-            return (f"{head} live on GMGN · take-profit trail {s['risk.trail_pct']:g}% from +{s['risk.trail_start_pct']:g}% "
-                    f"runs from my computer")
-        return f"{head} · trail {s['risk.trail_pct']:g}% now live on GMGN"
+            return f"{head} live on GMGN · {trail}"
+        return f"{head} · {trail}"
 
     async def _promote_exits(self, oid):
         o = self.c.db.one("SELECT * FROM gmgn_orders WHERE id=?", (oid,))
@@ -1971,13 +1996,66 @@ class GmgnTrader:
             done.add(xid)
             await self._cancel_strategy(xid, x.get("order_type") or "smart_trade")
 
-    # ---- desk-side trailing take-profit (DECISION 52)
+    # ---- drop leftover server-side take-profit trails (DECISION 80)
+    STRIP_RETRY_S = 30.0
+
+    async def strip_server_trails(self) -> int:
+        """Replace open LIVE smart_trade strategies that still have profit_stop_trace, keeping the
+        same exits_phase and the hard stop (and the drawdown trail in the normal phase). Limit-stop
+        positions are left alone (their live GMGN exit is already the -stop_pct stop only).
+        Create-new then cancel-old, so the stop is never dropped. Returns how many were updated."""
+        rows = self.c.db.rows("SELECT * FROM gmgn_orders WHERE status='open' AND mode='LIVE'")
+        n = 0
+        now = self.c.clock()
+        for o in rows:
+            if o["id"] in self._settling or limit_stop_only(o) or not has_profit_stop_trace(o):
+                continue
+            if now < self._strip_retry.get(o["id"], 0):
+                continue
+            if await self._strip_server_trail(o):
+                n += 1
+        return n
+
+    async def _strip_server_trail(self, o) -> bool:
+        """True if the stored conditions no longer include profit_stop_trace."""
+        oid, s = o["id"], self.s
+        phase = o.get("exits_phase") or "normal"
+        if phase not in ("grace", "normal"):
+            phase = "normal"
+        self._settling.add(oid)
+        try:
+            amount = await self.token_balance(o["mint"])
+            if amount == 0:
+                return False
+            new_conds = conditions(s, phase)
+            try:
+                new_sid = await self._create_strategy(self._normal_strategy_body(s, o["mint"], amount or None, phase=phase))
+            except Exception as e:
+                self._log("LIVE", o["mint"], "trail_floor_strip create failed", str(e)[:200])
+                self._strip_retry[oid] = self.c.clock() + self.STRIP_RETRY_S
+                return False
+            cancelled = await self._cancel_strategy(o.get("strategy_order_id"), self._strategy_type(o))
+            note = "trail_floor_strip" if cancelled else "trail_floor_strip: new stop on, old cancel failed"
+            self._upd(oid, strategy_order_id=new_sid, conditions=json.dumps(new_conds),
+                      repair=(o.get("repair") or "") + (" " + note if o.get("repair") else note))
+            self._log("LIVE", o["mint"], "trail_floor_strip", f"#{oid}", f"phase={phase}",
+                      f"stop kept, profit_stop_trace removed", f"cancelled={cancelled}")
+            if cancelled:
+                await self.push(f"GMGN · {self._tag(o)}{o['name']}: take-profit trail now only sells at a profit "
+                                f"(never below +{s['risk.trail_floor_pct']:g}%). The -{s['risk.stop_pct' if phase == 'normal' else 'risk.grace_stop_pct']:g}% stop is unchanged.",
+                                mint=o["mint"])
+            return True
+        finally:
+            self._settling.discard(oid)
+
+    # ---- desk-side trailing take-profit (DECISION 52, profit floor DECISION 80)
     async def trail_loop(self):
         backoff = 0.0
         while True:
             t0 = time.time()
             try:
                 await self.grace_extend_once()
+                await self.strip_server_trails()
                 n = await self.trail_once()
                 self.c.hb("gmgn_trail", f"watching={n} armed={len(self._trail_armed)}"
                                         + (f" src={self.fast.note()}" if self.fast is not None and n else ""))
@@ -1992,10 +2070,12 @@ class GmgnTrader:
 
     def _trail_rows(self):
         rows = self.c.db.rows("SELECT * FROM gmgn_orders WHERE status='open' AND mode='LIVE'")
-        return [r for r in rows if r.get("entry_price") and not r.get("exit_reason") and limit_stop_only(r)]
+        return [r for r in rows if r.get("entry_price") and not r.get("exit_reason")]
 
     async def trail_once(self, pairs=None) -> int:
-        """One price check on every open LIVE position whose GMGN exit is a limit stop only. Returns how many."""
+        """One price check on every open LIVE A position. Returns how many. The take-profit trail
+        runs on the desk with the profit floor (DECISION 80), including positions that still have a
+        server-side hard stop or drawdown trail."""
         rows = self._trail_rows()
         ids = {r["id"] for r in rows}
         for k in list(self._trail_armed | self._trail_seen | set(self._trail_retry) | set(self._trail_peak)):
@@ -2018,13 +2098,13 @@ class GmgnTrader:
                 self._trail_seen.add(o["id"])
                 seed = max(o.get("peak") or o["entry_price"], price)
                 note = ""
-                if price <= seed * (1 - float(s["risk.trail_pct"]) / 100.0):
+                if price <= trail_trigger(s, o["entry_price"], seed):
                     note = f"old peak {seed:.10g} already {100 * (1 - price / seed):.1f}% back: trail restarts from now"
                     seed = price
                 self._trail_peak[o["id"]] = seed
                 self._log("LIVE", o["mint"], "desk trail watching", f"#{o['id']}", f"entry={o['entry_price']:.10g}",
                           f"price={price:.10g}", f"peak={seed:.10g}", f"start=+{s['risk.trail_start_pct']:g}%",
-                          f"trail={s['risk.trail_pct']:g}%", f"src={src}", note)
+                          f"trail={s['risk.trail_pct']:g}%", f"floor=+{s['risk.trail_floor_pct']:g}%", f"src={src}", note)
             reason, peak, armed = desk_trail_check(s, o, price, now, peak=self._trail_peak.get(o["id"]))
             self._trail_peak[o["id"]] = peak
             if peak > (o.get("peak") or 0):
@@ -2032,7 +2112,8 @@ class GmgnTrader:
             if armed and o["id"] not in self._trail_armed:
                 self._trail_armed.add(o["id"])
                 self._log("LIVE", o["mint"], "desk trail armed", f"#{o['id']}", f"peak={peak:.10g}",
-                          f"+{100 * (peak / o['entry_price'] - 1):.1f}%", f"sell_below={peak * (1 - s['risk.trail_pct'] / 100):.10g}")
+                          f"+{100 * (peak / o['entry_price'] - 1):.1f}%",
+                          f"sell_below={trail_trigger(s, o['entry_price'], peak):.10g}")
             if reason and now >= self._trail_retry.get(o["id"], 0):
                 self._trail_src = src
                 await self.desk_sell(o, reason, price, peak, now)

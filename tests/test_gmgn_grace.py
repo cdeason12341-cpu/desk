@@ -113,11 +113,11 @@ def test_grace_label_and_buy_body():
     c, _ = make_ctx(**{"risk.stop_pct": 15, "risk.trail_pct": 10})
     assert exits_label(c.s) == "stop -30% for first 5 min, then -15%"
     types = [x["order_type"] for x in buy_body(c.s, M, 1000)["condition_orders"]]
-    assert types == ["loss_stop", "profit_stop_trace"]
+    assert types == ["loss_stop"]
     c.s.set("risk.grace_min", 0, source="test")
     assert exits_label(c.s) == "stop -15% · trail 10%"
     assert [x["order_type"] for x in buy_body(c.s, M, 1000)["condition_orders"]] == [
-        "loss_stop", "loss_stop_trace", "profit_stop_trace"]
+        "loss_stop", "loss_stop_trace"]
 
 
 def test_live_buy_attaches_grace_stop_and_states_it(monkeypatch):

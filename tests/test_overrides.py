@@ -171,7 +171,7 @@ def test_ovr_confirm_buys_once_with_exits(monkeypatch):
     assert len(swaps) == 1
     conds = {x["order_type"]: x for x in swaps[0]["condition_orders"]}
     assert conds["loss_stop"]["price_scale"] == "30" and "loss_stop_trace" not in conds
-    assert conds["profit_stop_trace"]["drawdown_rate"] == "20"
+    assert "profit_stop_trace" not in conds
     o = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (M,))
     assert o["mode"] == "LIVE" and o["reason"] == "owner override" and o["size_usd"] == 65.0     # top size: wallet covers it
     assert "OVERRIDE · score 44" in tg.sent[-1]["text"]

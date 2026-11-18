@@ -100,6 +100,8 @@ SPECS: list[Spec] = [
     _s("risk.stop_pct", 6, 1, 50, aliases=("stop", "stop loss", "sl"), fmt="-{v:g}%", neg=True),
     _s("risk.trail_start_pct", 20, 1, 1000, aliases=("trail start",), fmt="+{v:g}%"),
     _s("risk.trail_pct", 12, 1, 90, aliases=("trail", "trailing"), fmt="{v:g}%"),
+    # trailing take-profit floor (owner 2026-11-18 3:49 AM CT, DECISION 80): once armed, never sell below entry + this %.
+    _s("risk.trail_floor_pct", 5, 0, 100, aliases=("trail floor", "trail profit floor"), fmt="+{v:g}%"),
     _s("risk.timeout_h", 3, 0.25, 48, aliases=("timeout",), fmt="{v:g}h"),
     _s("risk.timeout_min_gain_pct", 5, 0, 1000, aliases=("timeout gain",), fmt="+{v:g}%"),
     _s("risk.confirm_window_min", 2, 1, 60, aliases=("sell window",), fmt="{v}m"),

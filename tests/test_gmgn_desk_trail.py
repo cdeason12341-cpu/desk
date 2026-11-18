@@ -1,10 +1,11 @@
-"""DECISION 52: desk-side trailing take-profit for GMGN positions whose live exit is a limit stop only
-(post-grace fallback after GMGN refuses the smart_trade, or an adopted app buy). Owner 2026-11-16 ~6:00 PM CT:
-"Can we keep it the same but make the take profit work". Also: limit-stop check_price is USD."""
+"""DECISION 52: desk-side trailing take-profit for GMGN LIVE positions.
+DECISION 80: the trail still arms at +trail_start_pct, but never sells below entry + trail_floor_pct.
+profit_stop_trace is no longer attached; the -stop_pct hard stop is unchanged."""
 import asyncio, json
-import gmgn
-from agents.gmgn_trader import (DESK_STOP, DESK_TRAIL, EXIT_LABEL, LIMIT_STOP_MARK, desk_trail_check,
-                                limit_stop_only, stop_strategy_body)
+import config, gmgn
+from agents.gmgn_trader import (DESK_STOP, DESK_TRAIL, EXIT_LABEL, LIMIT_STOP_MARK, conditions,
+                                desk_trail_check, has_profit_stop_trace, limit_stop_only,
+                                sim_exit, stop_strategy_body, trail_floor_price, trail_trigger)
 from tests.helpers import make_ctx, pair, run
 from tests.test_gmgn import M
 from tests.test_gmgn_grace import GraceClient, _held, _live, _nosleep
@@ -111,17 +112,19 @@ def test_not_armed_holds_then_backup_stop(monkeypatch):
     assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == DESK_STOP
 
 
-def test_smart_trade_positions_are_not_desk_trailed(monkeypatch):
+def test_smart_trade_positions_are_desk_trailed(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _nosleep)
     fc = GraceClient()
-    c, clock, t = _live(fc, **{"risk.surge_sell_enabled": False})
+    c, clock, t = _live(fc, **{"risk.surge_sell_enabled": False, "risk.trail_pct": 20, "risk.trail_floor_pct": 5})
     _held(t)
     run(t.on_pass(M, "Cat", "CAT", 1.0, 50000, 80))
-    assert _tick(t, clock, 1.5) == 0                          # grace smart_trade has the server-side trail
-    clock.t += 301
-    run(t.watch_once(pairs=[pair(M, price=1.0)]))             # promote to smart_trade succeeds
-    assert _tick(t, clock, 1.5) == 0
+    assert "profit_stop_trace" not in {x["order_type"] for x in json.loads(_row(c)["conditions"])}
+    assert _tick(t, clock, 1.30) == 1                         # desk trail watches smart_trade too
+    assert _row(c)["id"] in t._trail_armed
+    _tick(t, clock, 1.06)                                     # still above the +5% floor
     assert not _sells(fc)
+    _tick(t, clock, 1.05)                                     # floor hit
+    assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == DESK_TRAIL
 
 
 def test_no_surge_adopted_buy_still_trailed_and_zero_held_skips(monkeypatch):
@@ -194,3 +197,114 @@ def test_limit_stop_cancelled_reads_as_manual(monkeypatch):
     fc.strategy_orders = so
     assert run(t.strategy_exit(o)) == "manual"
     assert EXIT_LABEL["manual"] == "sold"
+
+def test_trail_floor_setting_defaults_and_hot_load():
+    c, _ = make_ctx()
+    assert c.s["risk.trail_floor_pct"] == 5
+    assert "risk.trail_floor_pct" not in config.PROTECTED
+    assert config.resolve("trail floor").key == "risk.trail_floor_pct"
+    assert config.resolve("trail profit floor").key == "risk.trail_floor_pct"
+    assert c.s.set("trail floor", "8", source="test") == "trail floor +5% -> +8%"
+    c.s.set("risk.trail_floor_pct", 5, source="test")
+    import pytest
+    with pytest.raises(config.SettingError):
+        c.s.set("risk.trail_floor_pct", -1, source="test")
+    with pytest.raises(config.SettingError):
+        c.s.set("risk.trail_floor_pct", 101, source="test")
+    c.db.x("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+           ("risk.trail_floor_pct", "10"))
+    c.db.x("INSERT INTO change_log(ts,key,old,new,source) VALUES(?,?,?,?,?)",
+           (0, "risk.trail_floor_pct", "5", "10", "chat"))
+    assert "risk.trail_floor_pct" in c.s.sync() and c.s["risk.trail_floor_pct"] == 10
+
+
+def test_trail_trigger_is_max_of_drawdown_and_floor():
+    c, _ = make_ctx(**{"risk.trail_pct": 20, "risk.trail_floor_pct": 5, "risk.trail_start_pct": 20})
+    assert trail_floor_price(c.s, 1.0) == 1.05
+    # just armed at +21%: raw trail is below entry, floor wins
+    assert abs(trail_trigger(c.s, 1.0, 1.21) - 1.05) < 1e-12
+    # +39% peak (JENSEN-shaped): raw trail +11.2% is already above the floor
+    assert abs(trail_trigger(c.s, 1.0, 1.39) - 1.39 * 0.8) < 1e-12
+    c.s.set("risk.trail_floor_pct", 15, source="test")
+    assert abs(trail_trigger(c.s, 1.0, 1.39) - 1.15) < 1e-12   # live setting, floor now above the raw line
+
+
+def test_desk_trail_never_sells_below_floor_and_stop_unchanged():
+    c, _ = make_ctx(**{"risk.trail_start_pct": 20, "risk.trail_pct": 20, "risk.stop_pct": 50,
+                       "risk.trail_floor_pct": 5})
+    o = {"entry_price": 1.0, "peak": 1.0, "exits_phase": "normal", "ts": 0}
+    assert desk_trail_check(c.s, o, 1.19, 10) == (None, 1.19, False)
+    assert desk_trail_check(c.s, {**o, "peak": 1.19}, 1.05, 10)[0] is None   # not armed: floor does not sell
+    r, peak, armed = desk_trail_check(c.s, o, 1.21, 10)                     # Rockstar-shaped: +21%
+    assert armed and r is None and peak == 1.21
+    o = {**o, "peak": 1.21}
+    assert desk_trail_check(c.s, o, 1.06, 10)[0] is None                    # above the +5% floor
+    assert desk_trail_check(c.s, o, 1.05, 10)[0] == DESK_TRAIL              # floor, not the raw -3% line
+    # JENSEN-shaped +39% peak: sell at the 20% trail line (+11.2%), not at the floor
+    o = {**o, "peak": 1.39}
+    trig = trail_trigger(c.s, 1.0, 1.39)
+    assert abs(trig - 1.39 * 0.8) < 1e-12
+    assert desk_trail_check(c.s, o, trig + 0.001, 10)[0] is None
+    assert desk_trail_check(c.s, o, trig, 10)[0] == DESK_TRAIL
+    # -50% hard stop is unchanged, even when the trail never armed
+    assert desk_trail_check(c.s, {"entry_price": 1.0, "peak": 1.0, "exits_phase": "normal", "ts": 0},
+                            0.50, 10)[0] == DESK_STOP
+
+
+def test_sim_exit_take_profit_trail_uses_floor():
+    c, _ = make_ctx(**{"risk.trail_start_pct": 20, "risk.trail_pct": 20, "risk.stop_pct": 50,
+                       "risk.trail_floor_pct": 5, "risk.timeout_h": 48, "risk.grace_min": 0})
+    o = {"entry_price": 1.0, "peak": 1.21, "exits_phase": "normal", "ts": 0}
+    assert sim_exit(c.s, o, 1.06, 10)[0] is None
+    assert sim_exit(c.s, o, 1.05, 10)[0] == "profit_stop_trace"
+
+
+def test_conditions_omit_profit_stop_trace():
+    c, _ = make_ctx(**{"risk.stop_pct": 50, "risk.trail_pct": 20, "risk.trail_start_pct": 20, "risk.grace_min": 5})
+    grace = {x["order_type"] for x in conditions(c.s, "grace")}
+    normal = {x["order_type"] for x in conditions(c.s, "normal")}
+    assert grace == {"loss_stop"}
+    assert normal == {"loss_stop", "loss_stop_trace"}
+    assert conditions(c.s, "normal")[0]["price_scale"] == "50"
+
+
+def test_strip_server_trail_keeps_stop_and_phase(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _nosleep)
+    fc = GraceClient()
+    c, clock, t = _live(fc, **{"risk.surge_sell_enabled": False})
+    _held(t)
+    run(t.on_pass(M, "Cat", "CAT", 1.0, 50000, 80))
+    o = _row(c)
+    stale = json.dumps([{"order_type": "loss_stop", "side": "sell", "price_scale": "30", "sell_ratio": "100"},
+                        {"order_type": "profit_stop_trace", "side": "sell", "price_scale": "20",
+                         "sell_ratio": "100", "drawdown_rate": "20"}])
+    c.db.x("UPDATE gmgn_orders SET conditions=?, exits_phase='grace', strategy_order_id=? WHERE mint=?",
+           (stale, "st-grace", M))
+    o = _row(c)
+    assert has_profit_stop_trace(o) and o["exits_phase"] == "grace"
+    fc.calls.clear()
+    assert run(t.strip_server_trails()) == 1
+    o = _row(c)
+    types = [x["order_type"] for x in json.loads(o["conditions"])]
+    assert types == ["loss_stop"] and not has_profit_stop_trace(o)
+    assert o["exits_phase"] == "grace"                         # not promoted early
+    assert o["strategy_order_id"] == "st-new1"
+    assert "trail_floor_strip" in (o["repair"] or "")
+    creates = [b for k, b in fc.calls if k == "strategy_create"]
+    cancels = [b for k, b in fc.calls if k == "strategy_cancel"]
+    assert len(creates) == 1 and "profit_stop_trace" not in {x["order_type"] for x in creates[0]["condition_orders"]}
+    assert creates[0]["condition_orders"][0]["order_type"] == "loss_stop"
+    assert cancels and cancels[0]["order_id"] == "st-grace"
+    assert run(t.strip_server_trails()) == 0                   # already clean
+
+
+def test_strip_skips_limit_stop_only(monkeypatch):
+    c, clock, t, fc = _promoted_limit(monkeypatch)
+    stale = json.dumps([{"order_type": "loss_stop"}, {"order_type": "profit_stop_trace"}])
+    c.db.x("UPDATE gmgn_orders SET conditions=? WHERE mint=?", (stale, M))
+    fc.calls.clear()
+    assert limit_stop_only(_row(c)) and has_profit_stop_trace(_row(c))
+    assert run(t.strip_server_trails()) == 0
+    assert not any(k == "strategy_create" for k, _ in fc.calls)
+    assert _row(c)["exits_phase"] == "normal"
+    assert LIMIT_STOP_MARK in _row(c)["repair"]

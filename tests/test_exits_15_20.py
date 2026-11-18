@@ -14,7 +14,7 @@ def test_gmgn_conditions_and_texts_follow_settings():
     conds = {x["order_type"]: x for x in gmgn_trader.conditions(c.s)}
     assert conds["loss_stop"]["price_scale"] == "15"
     assert conds["loss_stop_trace"]["drawdown_rate"] == "20"
-    assert conds["profit_stop_trace"]["drawdown_rate"] == "20" and conds["profit_stop_trace"]["price_scale"] == "20"
+    assert "profit_stop_trace" not in conds
     body = gmgn_trader.buy_body(c.s, "M" * 40 + "pump", 1000)
     assert body["condition_orders"] == gmgn_trader.conditions(c.s)
     rep = gmgn_trader.stop_strategy_body(c.s, "M" * 40 + "pump", 1.0, 100.0)
@@ -32,7 +32,7 @@ def test_grace_conditions_skip_drawdown_trail():
     grace = {x["order_type"]: x for x in gmgn_trader.conditions(c.s, "grace")}
     assert grace["loss_stop"]["price_scale"] == "30"
     assert "loss_stop_trace" not in grace
-    assert grace["profit_stop_trace"]["price_scale"] == "20" and grace["profit_stop_trace"]["drawdown_rate"] == "10"
+    assert "profit_stop_trace" not in grace
     assert gmgn_trader.buy_body(c.s, "M" * 40 + "pump", 1000)["condition_orders"] == gmgn_trader.conditions(c.s, "grace")
     assert gmgn_trader.exits_label(c.s) == "stop -30% for first 5 min, then -15%"
     assert "stop -30% for first 5 min, then -15%" in gmgn_trader.exits_text(c.s)

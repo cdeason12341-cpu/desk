@@ -196,8 +196,8 @@ def test_paper_never_swaps_records_conditions():
     assert o["mode"] == "PAPER" and o["size_usd"] == 500 and o["status"] == "open"
     conds = json.loads(o["conditions"])
     assert conds[0] == {"order_type": "loss_stop", "side": "sell", "price_scale": "30", "sell_ratio": "100"}
-    assert [c["order_type"] for c in conds] == ["loss_stop", "profit_stop_trace"]
-    assert conds[1]["drawdown_rate"] == "12" and conds[1]["price_scale"] == "20"
+    assert [c["order_type"] for c in conds] == ["loss_stop"]
+    assert "profit_stop_trace" not in {c["order_type"] for c in conds}
     assert o["exits_phase"] == "grace" and o["grace_until"] == c.clock() + 5 * 60
     assert "stop -30% for first 5 min, then -6%" in c.notifier.sent[-1]["text"]
     assert json.loads(o["body"])["from_address"] == gmgn.MAIN_WALLET
