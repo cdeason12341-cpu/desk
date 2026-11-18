@@ -7,7 +7,7 @@
   Builder only reads the db / in-memory state: no GMGN / RPC / Gecko calls are added.
 * A tiny HTTP server on 127.0.0.1 in a daemon thread serves it; Caddy terminates TLS in front of it.
   GET only. Bearer = sha256(AUTH_SALT + APP_TOKEN) (the raw token never leaves the phone), constant-time compare.
-  CORS for the Pages origin only. Per-IP rate limit. Responses carry only encrypted envelopes + timing numbers.
+  CORS for the Pages origin only. Per-IP rate limit (Caddy overwrites X-Forwarded-For with the real client IP). Responses carry only encrypted envelopes + timing numbers.
 """
 from __future__ import annotations
 import asyncio, hashlib, hmac, json, re, secrets as _pyrand, threading, time
@@ -152,7 +152,8 @@ def make_handler(api: "LiveApi"):
             pass
 
         def _ip(self):
-            return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+            # Caddy (deploy/Caddyfile) overwrites X-Forwarded-For with the real client IP; the last hop is the trusted one
+            return (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[-1].strip()
 
         def _send(self, code, body: bytes = b"", ctype="application/json", extra=None):
             self.send_response(code)

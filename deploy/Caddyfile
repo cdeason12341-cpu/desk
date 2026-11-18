@@ -9,7 +9,9 @@
 		Referrer-Policy no-referrer
 	}
 	handle /live/v1/* {
-		reverse_proxy 127.0.0.1:8787
+		reverse_proxy 127.0.0.1:8787 {
+			header_up X-Forwarded-For {remote_host}   # real client IP only (the rate limit can't be dodged with a forged header)
+		}
 	}
 	handle {
 		respond 404
