@@ -7,6 +7,9 @@ from tests.helpers import make_ctx, run
 from tests.test_publisher_gmgn import _desk, _order, SECRET_NAMES
 
 TOKEN = "test-app-token-0123456789abcdef"
+CORE = ["state", "chart", "activity", "account", "scores", "feed", "trades", "scanner", "strat_b", "strat_b_live", "strat_feed",
+        "agents/scanner", "agents/auditor", "agents/analyst", "agents/executor", "agents/risk"]
+ALL0 = "?w=" + ",".join(f + ".0" for f in CORE)
 GOOD = live_api.ORIGIN
 
 
@@ -22,7 +25,7 @@ def _api(rate=None):
     return api, d, c
 
 
-def _req(api, method="GET", path=live_api.PATH, headers=None, query=""):
+def _req(api, method="GET", path=live_api.PATH, headers=None, query=ALL0):
     url = f"http://127.0.0.1:{api.port}{path}{query}"
     r = urllib.request.Request(url, method=method, headers=headers or {})
     try:
@@ -122,7 +125,7 @@ def test_envelopes_decrypt_and_no_secrets_in_body():
         for name in SECRET_NAMES:
             assert name not in text
         out = json.loads(text)
-        assert set(out) == {"v", "cursor", "full", "builtAt", "builtAtMs", "buildMs", "files"}
+        assert set(out) == {"v", "boot", "full", "builtAt", "builtAtMs", "buildMs", "files", "seqs"}
         assert out["full"] is True and "state.json" in out["files"] and "agents/risk.json" in out["files"]
         for rel, env in out["files"].items():
             assert set(env) == {"v", "iv", "ct"}
@@ -134,21 +137,46 @@ def test_envelopes_decrypt_and_no_secrets_in_body():
         api.server.shutdown()
 
 
-def test_cursor_diff_sends_only_changes():
+def _w(out):
+    return "?b=" + out["boot"] + "&w=" + ",".join(f"{f}.{out['seqs'].get(f + '.json', 0)}" for f in CORE)
+
+
+def test_versions_diff_sends_only_changes():
     api, d, c = _api()
     try:
         _built(api)
         first = json.loads(_req(api, headers=_auth())[2])
-        cur = first["cursor"]
+        assert first["full"] is True and len(first["files"]) == len(first["seqs"]) >= 15
         _built(api)                                              # nothing changed (only ts) -> nothing re-sent
-        again = json.loads(_req(api, headers=_auth(), query=f"?since={cur}")[2])
+        again = json.loads(_req(api, headers=_auth(), query=_w(first))[2])
         assert again["files"] == {} and again["full"] is False and again["builtAtMs"] >= first["builtAtMs"]
         c.db.x("INSERT INTO activity(ts,kind,title,sub,night) VALUES(?,?,?,?,?)", (c.clock(), "info", "hello", "x", c.night))
         _built(api)
-        diff = json.loads(_req(api, headers=_auth(), query=f"?since={again['cursor']}")[2])
+        diff = json.loads(_req(api, headers=_auth(), query=_w(first))[2])
         assert "activity.json" in diff["files"] and "chart.json" not in diff["files"]
-        stale = json.loads(_req(api, headers=_auth(), query="?since=deadbeef.5")[2])   # other boot -> full
-        assert stale["full"] is True and "chart.json" in stale["files"]
+        only = json.loads(_req(api, headers=_auth(), query="?b=" + first["boot"] + "&w=state.0")[2])
+        assert set(only["files"]) == {"state.json"}             # only what the view asked for
+        stale = json.loads(_req(api, headers=_auth(), query="?b=deadbeef&w=chart.99")[2])   # other boot -> resent
+        assert stale["full"] is True and set(stale["files"]) == {"chart.json"}
+        assert json.loads(_req(api, headers=_auth(), query="?w=")[2])["files"] == {}
+    finally:
+        api.server.shutdown()
+
+
+def test_parse_want_rejects_junk():
+    assert live_api.parse_want("state.3,agents/risk.0,../etc.1,state,x.y,AGENTS/x.1,a" * 1) == {"state.json": 3, "agents/risk.json": 0}
+    assert len(live_api.parse_want(",".join(f"f{i}.1".replace("f", "x") for i in range(100)))) <= 40
+
+
+def test_heavy_files_built_only_when_wanted():
+    api, d, c = _api()
+    try:
+        _built(api)
+        assert "feed.json" in api.snap.files                    # first build: everything
+        rels = [r for r, _ in api.parts()]
+        assert "feed.json" not in rels and "agents/risk.json" not in rels and "state.json" in rels
+        api.touch(want={"feed.json": 0})
+        assert "feed.json" in [r for r, _ in api.parts()] and "scanner.json" not in [r for r, _ in api.parts()]
     finally:
         api.server.shutdown()
 
@@ -167,7 +195,7 @@ def test_bad_coin_param_ignored():
     api, d, c = _api()
     try:
         _built(api)
-        code, _, body = _req(api, headers=_auth(), query="?coin=../../etc/passwd&coin=x")
+        code, _, body = _req(api, headers=_auth(), query=ALL0 + "&coin=../../etc/passwd&coin=x")
         assert code == 200 and not any(k.startswith("coin/") for k in json.loads(body)["files"])
         assert api.coins == {}
     finally:

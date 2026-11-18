@@ -26,6 +26,9 @@ ACTIVE_S = 20.0
 RATE_PER_MIN = 120              # per client IP (app polls ~30/min)
 MAX_COINS = 2
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
+REL_RE = re.compile(r"^(?:agents/)?[a-z_]{1,24}$")
+HEAVY = ("feed.json", "scanner.json", "strat_b_live.json", "agents/")   # big + churning: built only when a view wants them
+HEAVY_EVERY_S = 30.0            # ...or at least this often while the app is open (Pages-like background freshness)
 
 
 def auth_token(app_token: str) -> str:
@@ -91,22 +94,34 @@ class Snapshot:
     def cursor(self) -> str:
         return f"{self.boot}.{self.seq}"
 
-    def diff(self, since: str | None, coins=()) -> dict:
+    def diff(self, boot: str | None, have: dict, coins=()) -> dict:
+        """have = {rel: seq the phone already has}. Returns only those wanted files that are newer (all of them when
+        the phone's versions come from another boot), plus the coin page's files."""
         with self.lock:
-            boot, _, n = (since or "").partition(".")
-            try:
-                n = int(n) if boot == self.boot else -1
-            except ValueError:
-                n = -1
-            files = {}
+            fresh = boot != self.boot
+            files, seqs = {}, {}
             for rel, (sq, _, env, _f) in self.files.items():
                 if rel.startswith(("coin/", "audit/")):
                     if rel.split("/", 1)[1][:-5] in coins:      # the coin page being viewed: always sent (small)
-                        files[rel] = env
-                elif sq > n:
-                    files[rel] = env
-            return {"v": 1, "cursor": f"{self.boot}.{self.seq}", "full": n < 0, "builtAt": iso(self.built_at) if self.built_at else None,
-                    "builtAtMs": int(self.built_at * 1000), "buildMs": round(self.build_ms, 1), "files": files}
+                        files[rel], seqs[rel] = env, sq
+                elif rel in have and (fresh or sq > have[rel]):
+                    files[rel], seqs[rel] = env, sq
+            return {"v": 1, "boot": self.boot, "full": fresh, "builtAt": iso(self.built_at) if self.built_at else None,
+                    "builtAtMs": int(self.built_at * 1000), "buildMs": round(self.build_ms, 1), "files": files, "seqs": seqs}
+
+
+def parse_want(raw: str | None, limit=40) -> dict:
+    """'state.12,agents/risk.0' -> {'state.json': 12, 'agents/risk.json': 0}. Anything malformed is ignored."""
+    out = {}
+    for part in (raw or "").split(",")[:limit]:
+        name, _, n = part.rpartition(".")
+        if not REL_RE.match(name or ""):
+            continue
+        try:
+            out[name + ".json"] = max(0, int(n))
+        except ValueError:
+            continue
+    return out
 
 
 class RateLimit:
@@ -177,10 +192,12 @@ def make_handler(api: "LiveApi"):
                 return self._err(401, "unauthorized")
             q = parse_qs(u.query)
             coins = [m for m in q.get("coin", [])[:MAX_COINS] if MINT_RE.match(m)]
-            api.touch(coins)
+            have = parse_want((q.get("w") or [None])[0])
+            api.touch(coins, have)
             if not api.snap.built_at:
                 return self._err(503, "warming up")
-            self._send(200, json.dumps(api.snap.diff((q.get("since") or [None])[0], coins), separators=(",", ":")).encode())
+            body = api.snap.diff((q.get("b") or [None])[0], have, coins)
+            self._send(200, json.dumps(body, separators=(",", ":")).encode())
 
         def _no(self):
             self._err(405, "read only")
@@ -200,6 +217,8 @@ class LiveApi:
         self.snap, self.rate = Snapshot(), RateLimit()
         self.last_client = 0.0
         self.coins: dict[str, float] = {}
+        self.wanted: dict[str, float] = {}                  # heavy file -> last time a phone view asked for it
+        self.heavy_at: dict[str, float] = {}                # heavy file -> last build
         self.server = None
         self._lock = threading.Lock()
         self.builds = 0
@@ -212,10 +231,13 @@ class LiveApi:
             return False
         return hmac.compare_digest(header[7:].strip().encode(), auth_token(tok).encode())
 
-    def touch(self, coins=()):
+    def touch(self, coins=(), want=()):
         now = time.time()
         with self._lock:
             self.last_client = now
+            for rel in want:
+                if rel.startswith(HEAVY):
+                    self.wanted[rel] = now
             for m in coins:
                 self.coins[m] = now
             for m in [m for m, t in self.coins.items() if now - t > ACTIVE_S]:
@@ -238,6 +260,18 @@ class LiveApi:
                ("scores.json", b.scores), ("feed.json", b.feed), ("trades.json", b.trades), ("scanner.json", b.scanner_feed),
                ("strat_b.json", b.strat_b), ("strat_b_live.json", b.strat_b_live), ("strat_feed.json", b.strat_feed)]
         out += [(f"agents/{a}.json", (lambda a=a: b.agent(a))) for a in AGENTS]
+        now = time.time()
+        with self._lock:
+            wanted = dict(self.wanted)
+        keep = []
+        for rel, fn in out:
+            if rel.startswith(HEAVY) and rel in self.snap.files and now - wanted.get(rel, 0) > ACTIVE_S \
+                    and now - self.heavy_at.get(rel, 0) < HEAVY_EVERY_S:
+                continue                                          # not on screen: refreshed every HEAVY_EVERY_S only
+            if rel.startswith(HEAVY):
+                self.heavy_at[rel] = now
+            keep.append((rel, fn))
+        out = keep
         if coins:
             known = set(b.coin_mints())
             for m in coins:

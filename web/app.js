@@ -165,8 +165,13 @@
   // ---------- live source (DECISION 75): the droplet serves the same encrypted files ~2s fresh; Pages is the fallback.
   // The bearer is a hash of the token (the token itself never leaves the phone); the data stays encrypted end to end.
   const LIVE_URL = "https://165-227-20-72.sslip.io/live/v1/bundle", LIVE_S = 2, LIVE_TIMEOUT_MS = 4000, LIVE_RETRY_MS = 30000;
-  const L = { cursor: null, builtAtMs: 0, okAt: 0, failAt: 0, src: null, bearer: null, bearerFor: null };
+  const L = { boot: null, seq: {}, heavyAt: 0, builtAtMs: 0, okAt: 0, failAt: 0, src: null, bearer: null, bearerFor: null };
   window.__deskLive = L;
+  // small files every poll; the big, constantly changing ones only for the view on screen (+ all of them every 30s)
+  const LIGHT = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "trades.json", "strat_b.json", "strat_feed.json"];
+  const HEAVY_ALL = ["feed.json", "scanner.json", "strat_b_live.json", ...AGENTS.map(a => `agents/${a}.json`)];
+  const VIEW_HEAVY = { alive: ["feed.json"], scores: ["feed.json"], scanner: ["scanner.json"], bwatch: ["strat_b_live.json"],
+    agents: AGENTS.map(a => `agents/${a}.json`), coin: ["feed.json", "agents/analyst.json"], audit: ["feed.json", "agents/analyst.json"] };
   async function liveBearer() {
     if (L.bearerFor !== TOKEN()) {
       const h = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode("grok-bot-desk/v1/live:" + TOKEN())));
@@ -174,20 +179,26 @@
     }
     return L.bearer;
   }
-  async function fetchLive(coin) {
-    const q = new URLSearchParams(); if (L.cursor) q.set("since", L.cursor); if (coin) q.set("coin", coin);
+  async function fetchLive(view, coin) {
+    const all = !S.files["feed.json"] || Date.now() - L.heavyAt > 30000;
+    const want = LIGHT.concat(all ? HEAVY_ALL : (VIEW_HEAVY[view] || []));
+    const q = new URLSearchParams();
+    if (L.boot) q.set("b", L.boot);
+    q.set("w", want.map(f => f.replace(/\.json$/, "") + "." + (L.seq[f] || 0)).join(","));
+    if (coin) q.set("coin", coin);
     const ac = new AbortController(); const to = setTimeout(() => ac.abort(), LIVE_TIMEOUT_MS);
     let r;
     try { r = await fetch(LIVE_URL + "?" + q, { cache: "no-store", headers: { Authorization: "Bearer " + await liveBearer() }, signal: ac.signal, referrerPolicy: "no-referrer" }); }
     finally { clearTimeout(to); }
     if (!r.ok) throw new Error("live " + r.status);
     const out = await r.json();
-    const n = Object.keys(out.files || {}).length;
     const dec = await Promise.all(Object.entries(out.files || {}).map(async ([f, env]) => [f, await decrypt(env)]));
-    for (const [f, obj] of dec) { S.files[f] = obj; S.missing.delete(f); }
-    // a file left out only differs by ticking clock fields (ages grow from its own ts), so it is kept as is
-    L.cursor = out.cursor; L.builtAtMs = out.builtAtMs || Date.now(); L.okAt = Date.now(); L.src = "droplet";
-    return n;
+    if (out.boot !== L.boot) { L.boot = out.boot; L.seq = {}; }
+    for (const [f, obj] of dec) { S.files[f] = obj; S.missing.delete(f); L.seq[f] = (out.seqs || {})[f] || 0; }
+    // a file left out is unchanged, or only its clock fields ticked (ages grow from its own ts), so it is kept as is
+    if (all) L.heavyAt = Date.now();
+    L.builtAtMs = out.builtAtMs || Date.now(); L.okAt = Date.now(); L.src = "droplet";
+    return dec.length;
   }
   let pollTimer = null, countdown = null, nextAt = 0;
   async function poll() {
@@ -198,7 +209,7 @@
     const coin = (r.name === "coin" || r.name === "audit") ? r.arg : null;
     let live = false, changed = 1;
     if (!L.failAt || Date.now() - L.failAt > LIVE_RETRY_MS) {
-      try { changed = await fetchLive(coin); live = true; L.failAt = 0; }
+      try { changed = await fetchLive(r.name, coin); live = true; L.failAt = 0; }
       catch (e) { L.failAt = Date.now(); L.src = "pages"; }
     }
     let failed = false;
