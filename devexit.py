@@ -46,7 +46,7 @@ async def last_dev_sell(net, creator: str, mint: str, program: str) -> tuple[flo
         if looked >= TX_LIMIT:
             break
         looked += 1
-        tx = await net.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+        tx = await net.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}])
         meta = (tx or {}).get("meta") or {}
         pre = owner_balance(meta.get("preTokenBalances"), mint, creator)
         post = owner_balance(meta.get("postTokenBalances"), mint, creator)

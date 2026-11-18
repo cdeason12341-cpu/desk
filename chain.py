@@ -3,7 +3,7 @@ A LIVE order is closed only from the chain: the wallet's token balance for the m
 Exit / P&L come from the wallet's real SOL deltas in the buy and sell txs (fees and rent included)."""
 from __future__ import annotations
 
-TX_OPTS = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}
+TX_OPTS = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1, "commitment": "confirmed"}  # 1: v1 txs (DECISION 79); 0 only covers legacy + v0
 
 
 def parse_delta(t: dict | None, wallet: str, mint: str) -> dict | None:
@@ -60,7 +60,10 @@ async def wallet_sells(net, wallet, mint, since_ts, skip=(), cache=None, limit=4
         sig = s.get("signature")
         if not sig or sig in skip or s.get("err") or (s.get("blockTime") or 0) < (since_ts or 0) - 5:
             continue
-        d = await tx_delta(net, sig, wallet, mint, cache)
+        try:
+            d = await tx_delta(net, sig, wallet, mint, cache)
+        except Exception:
+            continue                               # one unreadable sig must not block a close (DECISION 79)
         if d and not d["err"] and d["tok"] < 0:
             out.append(d)
     return sorted(out, key=lambda d: d["ts"] or 0)
