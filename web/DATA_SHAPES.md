@@ -213,6 +213,15 @@ Every order row also has `mode` ("PAPER"|"LIVE") and `label` ("B PAPER"|"B LIVE"
                "checks":[…],"passCount":7,"checkCount":10,"away":["9m left of the wait","needs 6.2% more dip"],"evalAt","link"}]}
 ```
 
+## strat_feed.json (Wallet / Strat A / Strat B tabs) — DECISION 72
+```
+{v, ts,
+ pnl: {A: {strategy, since, sinceLabel, pnlUsd, pnlTonightUsd, closed, closedTonight, wins, losses, winRatePct}, B: {...same}},
+ A: [{t, kind: buy|sell|stop|skip|fail|approval, title, sub, mint, name, symbol, pnlUsd, pct, sizeUsd, tone, link}],   // last 24h, newest first, max 80
+ B: [...same, no approvals]}
+```
+Profit counts only trades closed at/after `since` (settings gmgn.pnl_since / strat_b.pnl_since). Display only. trades.json `real.since` and strat_b.json `live.since/sinceLabel/earlier/earlierClosed/earlierPnlUsd` follow the same baseline.
+
 ## push (in state.json) — phone notifications (DECISION 62)
 `state.json.push` = `{vapid, subs: [{id, cats, device, lastOk, fails}], cats, last: {t, title} | null}` or `null`.
 `vapid` is the PUBLIC VAPID key (base64url, 65-byte P-256 point) for `pushManager.subscribe`. `subs[].id` = first 16 hex of

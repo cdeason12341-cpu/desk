@@ -38,7 +38,7 @@ def main():
         except Exception: pass
     mint_c = mint_c or (cands[0] if cands else None)
     out["checks"]["audit_mint_found"] = bool(mint_a); out["checks"]["coin_file_found"] = bool(mint_c)
-    screens = [("home", "#/home"), ("agents", "#/agents"), ("auditor", f"#/audit/{mint_a}" if mint_a else "#/audit/none"),
+    screens = [("wallet", "#/wallet"), ("agents", "#/agents"), ("auditor", f"#/audit/{mint_a}" if mint_a else "#/audit/none"),
                ("coin", f"#/coin/{mint_c}" if mint_c else "#/coin/none"), ("account", "#/account"), ("activity", "#/activity")]
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--no-sandbox"])
@@ -51,7 +51,7 @@ def main():
         pg.wait_for_function("window.__desk && window.__desk.files['state.json']", timeout=60000)
         pg.wait_for_timeout(1500)
         h = pg.evaluate("location.href")
-        out["checks"]["fragment_stripped"] = (TOK not in h and DP not in h and h.endswith("#/home"))
+        out["checks"]["fragment_stripped"] = (TOK not in h and DP not in h and h.endswith("#/wallet"))
         out["checks"]["localStorage_saved"] = pg.evaluate("!!localStorage.getItem('desk.t') && !!localStorage.getItem('desk.d')")
         txt = pg.inner_text("#view")
         bal = f"${st['balance']:,.2f}"

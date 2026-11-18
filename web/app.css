@@ -191,3 +191,23 @@ canvas.ring{width:56px;height:56px;flex:none}#disc{width:220px!important;height:
 .pushcta .later{display:block;margin:8px auto 0;background:none;border:0;color:var(--muted);font-size:13px}
 label.pcat{cursor:pointer}
 label.pcat input{position:absolute;opacity:0;width:1px;height:1px}
+
+/* DECISION 72: Wallet / Strat A / Strat B tabs (shell v27) */
+.seg.seg4{grid-template-columns:repeat(4,1fr)}
+.seg.seg4 a{font-size:13px}
+.k2{color:var(--muted);font-size:12px;font-weight:600;margin-top:6px;text-transform:uppercase;letter-spacing:.4px}
+.sv{font:700 20px var(--mono);margin-top:6px;font-variant-numeric:tabular-nums}
+.scard{display:block;margin:0}
+.scard .t1{font-weight:700}
+.scard .badge{font-size:9px}
+.splitbar{height:8px;border-radius:999px;background:rgba(251,191,36,.35);overflow:hidden;margin:2px 0 12px}
+.splitbar>i{display:block;height:100%;background:var(--cyan)}
+.split2>div:first-child .sub:first-child{color:var(--cyan)}
+.split2>div:last-child .sub:first-child{color:var(--amber)}
+details.earlier{padding:0}
+details.earlier>summary{cursor:pointer;padding:14px 16px;color:var(--muted);font-size:13px;font-weight:600;list-style:none}
+details.earlier>summary::before{content:"▸ "}
+details.earlier[open]>summary::before{content:"▾ "}
+.row .s.wrap{white-space:normal}
+.badge{white-space:nowrap}
+.card.real .rowx>.sub{flex:1;min-width:0;margin-right:8px}

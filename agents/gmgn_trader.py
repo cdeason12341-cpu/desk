@@ -2023,6 +2023,11 @@ class GmgnTrader:
                     f"size ${snap['tradeUsd']:,.2f}, then whatever paper free covers down to ${s['gmgn.min_trade_usd']:,.2f} · "
                     f"tonight {n}/{s['gmgn.max_tickets_night']} tickets · {self.open_label('PAPER')}" +
                     (f" · PAPER {el:.1f}h of {s['gmgn.live_gate_h']:g}h"))
+        try:                                             # DECISION 72: A's profit since the owner's reset (display only)
+            import pnl_since
+            head += pnl_since.telegram_line(pnl_since.a_live(self.c.db, s, self.c.night), "A") + " · "
+        except Exception:
+            pass
         return (head +
                 f"tonight {n}/{s['gmgn.max_tickets_night']} tickets, ${used:,.2f}/${s['gmgn.cap_trade_usd'] * s['gmgn.max_tickets_night']:,.2f} · "
                 f"size ${s['gmgn.cap_trade_usd']:,.2f}, then ${s['gmgn.fallback_trade_usd']:,.2f}, then whatever free SOL covers down to ${s['gmgn.min_trade_usd']:,.2f}{self._next_size()} · "

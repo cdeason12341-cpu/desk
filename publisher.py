@@ -37,6 +37,7 @@ class Builder:
         sl = self.strat_b_live()
         if sl is not None:
             files["strat_b_live.json"] = sl
+        files["strat_feed.json"] = self.strat_feed()
         for a in AGENTS:
             files[f"agents/{a}.json"] = self.agent(a)
         for m in self.coin_mints():
@@ -64,6 +65,81 @@ class Builder:
         except Exception as e:
             self.c.error("publisher", "strat_b_live", str(e)[:200])
             return None
+
+    # ---- DECISION 72: per-strategy tabs. Profit since each strategy's reset + each strategy's own event feed
+    # (A: GMGN LIVE buys / exits / refusals / market-cap approvals; B: B LIVE buys / exits / refusals). No ids, no tx.
+    FEED_WINDOW_S = 24 * 3600
+
+    def strat_feed(self):
+        import pnl_since
+        c, s = self.c, self.c.s
+        since_t = time.time() - self.FEED_WINDOW_S
+        out = {"v": 1, "ts": iso(), "pnl": {}, "A": [], "B": []}
+        try:
+            out["pnl"]["A"] = pnl_since.a_live(c.db, s, c.night)
+        except Exception as e:
+            c.error("publisher", "strat_feed A pnl", str(e)[:200])
+        try:
+            out["pnl"]["B"] = pnl_since.b_live(c.db, s, c.night)
+        except Exception as e:
+            c.error("publisher", "strat_feed B pnl", str(e)[:200])
+
+        def ev(t, kind, title, sub, mint, name=None, symbol=None, pnl=None, pct=None, size=None, tone=None):
+            return {"t": iso(t) if t else None, "kind": kind, "title": title, "sub": sub, "mint": mint, "name": name,
+                    "symbol": symbol, "pnlUsd": None if pnl is None else round(pnl, 2), "pct": pct,
+                    "sizeUsd": None if size is None else round(size, 2), "tone": tone,
+                    "link": links.coin_url(mint) if mint else None}
+
+        A = out["A"]
+        for o in c.db.rows("SELECT * FROM gmgn_orders WHERE mode='LIVE' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
+                           (since_t, since_t)):
+            nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
+            if o["status"] == "refused":
+                A.append(ev(o["ts"], "skip", f"Skipped {nm}", o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                continue
+            if o["status"] == "failed":
+                A.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
+                continue
+            A.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else ""),
+                        o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
+            if o["closed_at"]:
+                stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
+                A.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
+                            (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
+                            pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
+        try:
+            for a in c.db.rows("SELECT * FROM gmgn_approvals WHERE ts>=? ORDER BY id DESC LIMIT 30", (since_t,)):
+                nm = a["name"] or a["symbol"] or (a["mint"] or "")[:6]
+                A.append(ev(a["ts"], "approval", f"Approval {a['status']} · {nm}",
+                            f"market cap ${(a['mc'] or 0):,.0f}" + (f" · score {a['score']}" if a["score"] is not None else ""),
+                            a["mint"], a["name"], a["symbol"], tone="amber"))
+        except Exception:
+            pass
+        B = out["B"]
+        try:
+            rows = c.db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
+                             (since_t, since_t))
+        except Exception:
+            rows = []
+        for o in rows:
+            nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
+            t0 = o.get("opened_at") or o.get("ts")
+            if o["status"] == "refused":
+                B.append(ev(o.get("ts") or t0, "skip", f"Skipped {nm}", o.get("note") or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                continue
+            if o["status"] in ("failed", "unknown"):
+                B.append(ev(o.get("ts") or t0, "fail", f"Buy {o['status']} · {nm}", (o.get("note") or "")[:160], o["mint"], o["name"], o["symbol"], tone="red"))
+                continue
+            B.append(ev(t0, "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}", o["mint"], o["name"], o["symbol"],
+                        size=o["size_usd"], tone="cyan"))
+            if o["status"] == "closed" and o.get("closed_at"):
+                stop = "stop" in (o.get("exit_reason") or "") and "time" not in (o.get("exit_reason") or "")
+                B.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
+                            (o.get("exit_reason") or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
+                            pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
+        for k in ("A", "B"):
+            out[k] = sorted(out[k], key=lambda e: e["t"] or "", reverse=True)[:80]
+        return out
 
     def strat_b_summary(self):
         sb = self.strat_b()
@@ -669,6 +745,10 @@ class Builder:
             return since, 0.0, 0, 0.0
         if mode != "LIVE":
             return None, 0.0, 0, 0.0
+        import pnl_since                                     # DECISION 72: owner reset of A's profit; replaces the old meta seed
+        ts72 = pnl_since.since(self.c.s, "A")
+        if ts72 is not None:
+            return ts72, 0.0, 0, 0.0
         raw = self.c.db.meta("gmgn_pnl_baseline_ts")
         if raw is None:
             return None, 0.0, 0, 0.0
@@ -751,7 +831,8 @@ class Builder:
                     "pnlTonightUsd": round(seed_tonight + (tonight_pos["p"] or 0) + (tonight_gm["p"] or 0), 2),
                     "pnlAllUsd": round(manual + (all_pos["p"] or 0) + (all_gm["p"] or 0), 2),
                     "closedTonight": (tonight_pos["n"] or 0) + (tonight_gm["n"] or 0),
-                    "wins": wins, "losses": losses}
+                    "wins": wins, "losses": losses,
+                    "since": (__import__("pnl_since").iso(since) if (mode == "LIVE" and since is not None) else None)}
 
         real, paper = side("LIVE"), side("PAPER")
         paper["bypassOn"] = bool(c.s["analyst.paper_bypass"])

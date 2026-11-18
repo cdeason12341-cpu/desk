@@ -149,9 +149,9 @@ def render(kind: str, text: str, mint: str | None = None, ctx=None) -> dict | No
     kind = kind or "info"
     text = (text or "").strip()
     first = _first(text)
-    route = {"pipeline": "#/live", "stratb": "#/stratb", "paper": "#/paper"}
+    route = {"pipeline": "#/alive", "stratb": "#/stratb", "paper": "#/paper"}   # DECISION 72: pipeline = A's feed
     n = lambda cat, title, body="", tag=None, url=None, **kw: dict(cat=cat, title=_clip(title, 70), body=_clip(body, 160),
-                                                                      tag=tag, url=url or route.get(cat, "#/home"),
+                                                                      tag=tag, url=url or route.get(cat, "#/wallet"),
                                                                       renotify=kw.pop("renotify", True), **kw)
     # ---- pipeline (one notification per coin, updated in place)
     if kind.startswith("stage_"):

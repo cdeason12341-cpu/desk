@@ -199,7 +199,7 @@ def test_pipeline_push_titles_and_live_feed(monkeypatch):
     watch = next(m for m in c.notifier.sent if m["kind"] == "stage_dip" and "Dip watch" in m["text"])
     n = webpush.render("stage_dip", watch["text"], M)
     assert n["cat"] == "pipeline" and n["tag"] == f"pipe-{M}"
-    assert n["title"] == "Dip · waiting for a dip" and "need -5%" in n["body"] and n["url"] == "#/live"
+    assert n["title"] == "Dip · waiting for a dip" and "need -5%" in n["body"] and n["url"] == "#/alive"
     fd = Builder(DeskStub(c)).build()["feed.json"]
     assert fd["dips"] and fd["dips"][0]["mint"] == M and fd["dips"][0]["needPct"] == 5
     assert "r=savipww" in fd["dips"][0]["link"]

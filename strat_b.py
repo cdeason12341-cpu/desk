@@ -646,7 +646,11 @@ def live_card(c, limit=40) -> dict:
     """Real-money Strategy B results (DECISION 66): only mode='LIVE' rows, P&L from the chain. Never the paper bankroll."""
     s, db = c.s, c.db
     opens = db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND status IN ('submitting','pending','open','exiting') ORDER BY opened_at DESC")
-    closed = db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND status='closed' ORDER BY closed_at DESC")
+    closed_all = db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND status='closed' ORDER BY closed_at DESC")
+    import pnl_since                                     # DECISION 72: display baseline (owner reset); risk code doesn't use live_card
+    since_ts = pnl_since.since(s, "B")
+    closed = [o for o in closed_all if since_ts is None or (o["closed_at"] or 0) >= since_ts]
+    earlier = [o for o in closed_all if since_ts is not None and (o["closed_at"] or 0) < since_ts]
     failed = db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND status IN ('failed','unknown') ORDER BY ts DESC LIMIT 10")
     refused = db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND status='refused' AND night=? ORDER BY ts DESC", (c.night,))
     wins = [o for o in closed if (o["pnl_usd"] or 0) > 0]
@@ -665,7 +669,10 @@ def live_card(c, limit=40) -> dict:
             "wallet": wallet, "freeSol": free_sol, "reserveSol": s["gmgn.sol_reserve"],
             "budget": strat_b_live.budget(c),
             "refusedTonight": len(refused), "lastRefusal": ({"t": iso(refused[0]["ts"]), "name": refused[0]["name"], "reason": refused[0]["note"]} if refused else None),
+            "since": pnl_since.iso(since_ts), "sinceLabel": pnl_since.label(since_ts),
+            "earlierClosed": len(earlier), "earlierPnlUsd": round(sum(o["pnl_usd"] or 0 for o in earlier), 2),
             "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
+            "earlier": [_order_view(s, o) for o in earlier[:10]],
             "failed": [_order_view(s, o) for o in failed]}
 
 

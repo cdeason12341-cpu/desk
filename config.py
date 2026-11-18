@@ -146,6 +146,9 @@ SPECS: list[Spec] = [
     _s("gmgn.max_open", 4, 1, 20, aliases=("gmgn max open", "max open"), fmt="{v}"),                     # LIVE positions at once (pending+open+exiting)
     # DECISION 71: share of the one GMGN wallet each strategy may use while LIVE (100 = whole wallet, old behaviour)
     _s("gmgn.live_wallet_share_pct", 100.0, 0, 100, aliases=("a wallet share", "a share"), fmt="{v:g}%"),
+    # DECISION 72 (owner 2026-11-17 6:20 PM CT "reset the profits for a and b"): display-only P&L baseline, UTC ISO ("" = none).
+    # App + Telegram profit, W/L and closed counts use only trades closed at/after it. Risk / daily-loss logic never reads it.
+    _s("gmgn.pnl_since", "", kind="str", aliases=("a pnl since", "a profit since")),
     _s("gmgn.live_gate_h", 2.0, 0.5, 48, aliases=("gmgn gate",), fmt="{v:g}h"),
     _s("gmgn.slippage_pct", 15, 1, 50, aliases=("gmgn slippage", "slippage"), fmt="{v:g}%"),
     _s("gmgn.priority_fee_sol", 0.0002, 0, 0.01, aliases=("gmgn priority fee", "priority fee"), fmt="{v:g} SOL"),
@@ -181,6 +184,7 @@ SPECS: list[Spec] = [
     _s("strat_b.live_max_open", 4, 1, 20, aliases=("b live max open",), fmt="{v}"),
     _s("strat_b.live_max_tickets_night", 4, 1, 50, aliases=("b live tickets",), fmt="{v}"),
     _s("strat_b.live_daily_loss_usd", 20.0, 1, 1_000_000, aliases=("b live daily loss", "b live loss"), fmt="${v:,.2f}"),
+    _s("strat_b.pnl_since", "", kind="str", aliases=("b pnl since", "b profit since")),    # DECISION 72, display only
     _s("strat_b.min_age_min", 60, 0, 1440, aliases=("b min age", "b wait"), fmt="{v}m"),
     _s("strat_b.watch_max_min", 180, 10, 10080, aliases=("b watch",), fmt="{v}m"),
     # DECISION 63 (owner 2026-11-16 8:23 PM CT): coins up to 7 days old, and B's own feed of older coins (GeckoTerminal trending)
@@ -303,6 +307,11 @@ def parse_value(spec: Spec, raw) -> object:
                 raise SettingError("rpc_url must start with https://")
             if spec.key == "scanner.recheck_minutes":
                 return normalize_recheck_minutes(raw)
+            if spec.key in ("gmgn.pnl_since", "strat_b.pnl_since"):
+                import pnl_since
+                if pnl_since.parse(r) is None:
+                    raise SettingError(f"{spec.key} must be a UTC ISO time like 2026-11-18T00:20:00Z")
+                return r
             return raw.strip()
         mult = 1.0
         if spec.key.endswith("_usd") and r[-1:].lower() in ("k", "m"):   # "30k" / "1.5m"

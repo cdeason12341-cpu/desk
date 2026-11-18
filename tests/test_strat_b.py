@@ -95,7 +95,7 @@ def test_module_reaches_gmgn_only_through_strat_b_live():
     order is strat_b_live, which uses Strategy A's client and never touches keys."""
     src, mods = _imports(strat_b.__file__)
     assert mods <= {"__future__", "asyncio", "collections", "json", "time", "fields", "links", "ctx", "agents.scanner",
-                    "strat_b_live", "agents"}, mods
+                    "strat_b_live", "agents", "pnl_since"}, mods   # pnl_since: display-only baseline (DECISION 72)
     code = src.split('"""', 2)[2]
     for bad in ("import gmgn", "gmgn_trader", "import solana", "secrets_store", "keypair", "private", "swap(", "notifier.send"):
         assert bad not in code, bad

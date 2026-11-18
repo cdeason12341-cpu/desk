@@ -401,7 +401,8 @@ class Telegram:
         if sb is not None:
             import strat_b
             lc = strat_b.live_card(self.c)
-            line += (f" · B LIVE {lc['closedAll']} closed, P&L ${lc['pnlAllUsd']:+,.2f} (tonight ${lc['pnlTonightUsd']:+,.2f}), "
+            since = f" since {lc['sinceLabel']}" if lc.get("sinceLabel") else ""        # DECISION 72 profit reset
+            line += (f" · B LIVE {lc['closedAll']} closed{since}, P&L ${lc['pnlAllUsd']:+,.2f} (tonight ${lc['pnlTonightUsd']:+,.2f}), "
                      f"{len(lc['open'])} open · B PAPER bankroll ${sb.bankroll():,.2f}")
             if lc["freeSol"] is not None:
                 line += f" · free {lc['freeSol']:.4f} SOL after the {s['gmgn.sol_reserve']:g} SOL reserve"

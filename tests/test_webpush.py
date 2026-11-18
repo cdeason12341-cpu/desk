@@ -171,7 +171,7 @@ def test_pipeline_one_tag_per_coin_through_the_stages():
     assert au["title"] == "Auditor passed Share Bags" and "⚡ +39% in 1m" in au["body"]
     assert an["title"] == "Share Bags · Analyst score 52: buy" and an["renotify"] is True
     assert rj["title"] == "Share Bags · Analyst score 41: skip" and "alive_6h 0.53" in rj["body"] and rj["renotify"] is False
-    assert sc["renotify"] is False and au["renotify"] is False and sc["url"] == "#/live"
+    assert sc["renotify"] is False and au["renotify"] is False and sc["url"] == "#/alive"
 
 
 # ---------------------------------------------------------------- relay + sending
