@@ -310,6 +310,35 @@ def render(kind: str, text: str, mint: str | None = None, ctx=None) -> dict | No
     return None
 
 
+def labelled(kind: str, text: str, mint: str | None = None, ctx=None) -> dict | None:
+    """DECISION 73: render(), then put "who did what" in the title (Strat A / Strat B / Desk, see notif_label).
+    Strategy messages render() skips ("Buying…", adopted manual buys, stops created, confirming…) still get a push."""
+    import notif_label
+    text = (text or "").strip()
+    if notif_label.is_labelled(text):                    # already labelled (e.g. a test note)
+        first, _, rest = text.partition("\n")
+        return dict(cat="alerts", title=_clip(first, 70), body=_clip(rest, 160), tag=None, url="#/wallet", renotify=True)
+    who, title = notif_label.headline(kind, text)
+    note = render(kind, text, mint, ctx)
+    first, _, rest = text.partition("\n")
+    core, _ = notif_label.strip_tags(first)
+    if note is None:
+        if who == "Desk":
+            return None
+        cat = "stratb" if who == "Strat B" else "pipeline" if (kind or "").startswith("stage_") else "trades"
+        quiet = bool(re.search(r"^(Buying |.+ sold, confirming result)", core))
+        tag = (("b-" if who == "Strat B" else "trade-") + mint) if mint else None
+        body = core if not title.endswith(core) else _first(rest)
+        note = dict(cat=cat, title=_clip(title, 70), body=_clip(body, 160), tag=tag,
+                    url={"stratb": "#/stratb", "pipeline": "#/alive"}.get(cat, "#/strata"), renotify=not quiet)
+        return note
+    old = note.get("title") or ""
+    if note.get("cat") == "approvals" and old and old not in (note.get("body") or ""):
+        note["body"] = _clip(f"{old} · {note.get('body') or ''}".strip(" ·"), 160)
+    note["title"] = _clip(title if who != "Desk" else ("Desk · " + (old or core)), 70)
+    return note
+
+
 def _bot(ctx) -> str:
     try:
         b = ctx.db.meta("tg_username") if ctx is not None else None
@@ -362,7 +391,7 @@ class WebPush:
     def mirror(self, kind, text, mint=None):
         """Called for every Telegram push. Never blocks, never raises."""
         try:
-            note = render(kind, text, mint, self.c)
+            note = labelled(kind, text, mint, self.c)
         except Exception as e:
             self.c.error("webpush", "render", f"{kind} {str(e)[:200]}")
             return None

@@ -198,7 +198,7 @@
   // Owner 2026-11-17 5:59 PM CT: paper views hidden (data kept); old paper routes land on the LIVE views.
   // Owner 2026-11-17 6:20 PM CT (DECISION 72): Wallet / Strat A / Strat B tabs, each strategy with its own feed. Home folds into Wallet.
   const ALIAS = { home: "wallet", live: "bwatch", stratblive: "bwatch", paper: "strata", apaper: "strata", bpaper: "stratb" };
-  const LIVE_HASH = { scores: 1, scanner: 1, alive: 1, bfeed: 1, bwatch: 1 };
+  const LIVE_HASH = { scores: 1, scanner: 1, alive: 1, bfeed: 1, bwatch: 1, wallet: 1, strata: 1, stratb: 1 };   // 15s polls: wallet + budgets stay fresh
   function applyAlias() {
     const raw = location.hash.replace(/^#\/?/, "");
     const name = raw.split("/")[0] || "wallet";

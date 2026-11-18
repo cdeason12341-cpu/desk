@@ -68,6 +68,11 @@ class Telegram:
         wp = getattr(self.c, "webpush", None)
         if wp is not None and mirror:
             wp.mirror(kind, text, mint)              # phone notification first (background task); Telegram is the backup
+        try:                                         # DECISION 73: "Strat A bought X" / "Strat B sold Y" / "Desk · …" headline
+            import notif_label
+            text = notif_label.telegram(kind, text)
+        except Exception as e:
+            self.c.error("telegram", "label", str(e)[:200])
         ok = True
         try:
             await self.send(text, buttons, mentions=self.mentions([mint] if mint else []))

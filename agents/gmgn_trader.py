@@ -612,6 +612,7 @@ class GmgnTrader:
         self.lock = asyncio.Lock()
         self._sol = (0.0, None)          # (ts, usd)
         self._bal = (0.0, None)          # (ts, lamports)
+        self._bal_stale = False          # DECISION 73: set on every LIVE fill / exit (A or B) so the next refresh re-reads at once
         self.plan_blocked_at = 0.0
         self._txc: dict = {}             # (sig, mint) -> parsed wallet delta (chain truth cache)
         self._surge: dict = {}           # order id -> surge_check state (in memory; rebuilt from entry after a restart)
@@ -698,7 +699,12 @@ class GmgnTrader:
                 v = None
         if v is not None:
             self._bal = (time.time(), v)
+            self._bal_stale = False
         return v
+
+    def mark_wallet_stale(self):
+        """A LIVE buy filled or a position closed: the cached balance is out of date (no network call here)."""
+        self._bal_stale = True
 
     def wallet_snapshot(self):
         """Last cached wallet SOL + USD. Never calls the API. Used by the read-only publisher."""
@@ -720,7 +726,7 @@ class GmgnTrader:
         now = time.time()
         if self._sol[1] is None or now - self._sol[0] >= min_age:
             await self.sol_usd()
-        if self._bal[1] is None or now - self._bal[0] >= min_age:
+        if self._bal[1] is None or getattr(self, "_bal_stale", False) or now - self._bal[0] >= min_age:
             await self.wallet_lamports(fresh=True)
         return self.wallet_snapshot()
 

@@ -189,7 +189,7 @@ def test_subscribe_via_relay_then_send_respects_categories():
         await asyncio.gather(*wp.tasks)
         return [json.loads(webpush.decrypt(p["content"], k, auth)) for p in http.posts]
     got = run(go())
-    assert [g["title"] for g in got] == ["Notifications on ✓", "Sold X +$1.00 (+2.0%)"]
+    assert [g["title"] for g in got] == ["Notifications on ✓", "Strat A sold X +$1.00 (+2.0%) (surge top)"]   # DECISION 73 headline
     h = http.posts[-1]["headers"]
     assert h["Content-Encoding"] == "aes128gcm" and h["Authorization"].startswith("vapid t=") and h["Urgency"] == "high"
     assert json.loads(c.db.one("SELECT cats FROM push_subs")["cats"])["pipeline"] is False

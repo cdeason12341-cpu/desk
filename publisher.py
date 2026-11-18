@@ -912,14 +912,33 @@ class Publisher:
                 return False
             await asyncio.sleep(5)
 
+    WALLET_REFRESH_S = 45            # DECISION 73: wallet + SOL price re-read at least this often, and right after any fill / exit
+
     async def refresh_gmgn(self):
         g = getattr(self.d, "gmgn", None)
         if g is None or not hasattr(g, "refresh_wallet"):
             return
         try:
-            await asyncio.wait_for(g.refresh_wallet(min_age=60), timeout=25)
+            await asyncio.wait_for(g.refresh_wallet(min_age=self.WALLET_REFRESH_S), timeout=25)
         except Exception as e:
             self.c.error("publisher", "gmgn", str(e)[:200])
+
+    async def idle_wallet(self):
+        """While idle: refresh the wallet when it's stale (>= WALLET_REFRESH_S or after a fill / exit) and publish when
+        the balance or SOL price changed, so the Wallet / Strat cards follow the real wallet."""
+        g = getattr(self.d, "gmgn", None)
+        if g is None or not hasattr(g, "refresh_wallet") or getattr(g, "client", None) is None:
+            return False
+        ts, before = getattr(g, "_bal", (0.0, None))
+        sol_before = getattr(g, "_sol", (0.0, None))[1]
+        if not getattr(g, "_bal_stale", False) and before is not None and time.time() - ts < self.WALLET_REFRESH_S:
+            return False
+        await self.refresh_gmgn()
+        after, sol_after = g._bal[1], g._sol[1]
+        changed = after != before or (sol_before and sol_after and abs(sol_after / sol_before - 1) > 0.002)
+        if changed:
+            self.dirty.set()
+        return bool(changed)
 
     def _parse_ts(self, ts):
         if not ts:
@@ -1010,6 +1029,7 @@ class Publisher:
                 while time.time() < deadline and not self.dirty.is_set():
                     self.c.hb("publisher", f"idle count={self.count}")
                     await self.maybe_verify()
+                    await self.idle_wallet()
                     try:
                         await asyncio.wait_for(self.dirty.wait(), timeout=min(15, max(0.1, deadline - time.time())))
                     except asyncio.TimeoutError:

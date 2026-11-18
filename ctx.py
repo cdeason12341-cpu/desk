@@ -91,6 +91,13 @@ class Ctx:
                   (self.clock(), kind, title, sub, right1, right2, mint, agent, tone, self.night))
 
     def event(self, kind, mint=None):
+        if kind in ("fill", "exit"):                     # DECISION 73: wallet moved, re-read it on the next refresh
+            g = getattr(self, "gmgn", None)
+            if g is not None and hasattr(g, "mark_wallet_stale"):
+                try:
+                    g.mark_wallet_stale()
+                except Exception:
+                    pass
         if self.bus:
             self.bus.event(kind, mint)
 
