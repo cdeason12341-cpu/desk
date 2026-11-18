@@ -3,7 +3,7 @@
 market-sells the whole position (exit_reason 'surge top') and cancels the server-side exits."""
 import asyncio
 import config
-from agents.gmgn_trader import EXIT_LABEL, SURGE_TOP, surge_check
+from agents.gmgn_trader import EXIT_LABEL, SURGE_TOP, surge_check, trail_net_floor_price, trail_sol_in
 from tests.helpers import make_ctx, pair, run
 from tests.test_gmgn import M, trader
 from tests.test_gmgn_grace import GraceClient, _held, _live, _nosleep
@@ -189,21 +189,27 @@ def _armed(c, peak=1.21):
 
 
 def test_surge_check_floor_fires_before_top():
-    """Small surge (+21%). A jump straight to +4.9% crosses both the floor and the 8% drop line (+11.3%) on one
-    tick; price is still >= entry, so it sells, labelled as the floor."""
+    """Small surge (+21%). A jump under the net floor holds; a bounce back to the net floor sells as floor."""
     c, _ = make_ctx()
     st = _armed(c)
-    assert surge_check(c.s, st, 33, 1.15, 1.0) is None          # -5% from peak, +15% vs entry: hold
-    assert surge_check(c.s, st, 36, 1.049, 1.0) == "floor"      # <= entry x 1.05
+    floor_px = trail_net_floor_price(c.s, {"entry_price": 1.0})
+    assert floor_px > 1.05
+    assert surge_check(c.s, st, 33, 1.15, 1.0) is None          # -5% from peak, still above the net floor and top
+    assert surge_check(c.s, st, 36, 1.049, 1.0) is None         # under the net floor: hold, hope for a bounce
+    assert st.get("below_floor") is True
+    assert surge_check(c.s, st, 39, floor_px, 1.0) == "floor"
 
 
 def test_surge_check_floor_alone_without_8pct_drop():
-    """Big peak far above, floor raised: the floor sells even though the 8% drop from the peak hasn't happened."""
+    """A gap under the net floor, then a bounce back to it, sells as the floor even if the 8% top hasn't
+    been the last print (the bounce lands on the floor line)."""
     c, _ = make_ctx()
-    c.s.set("risk.surge_floor_pct", 30, source="test")
     st = _armed(c, peak=1.32)
-    assert surge_check(c.s, st, 33, 1.31, 1.0) is None
-    assert surge_check(c.s, st, 36, 1.29, 1.0) == "floor"       # -2.3% from peak, at +29% <= +30% floor
+    floor_px = trail_net_floor_price(c.s, {"entry_price": 1.0})
+    assert surge_check(c.s, st, 33, 1.31, 1.0) is None          # only -0.8% from peak: hold
+    assert surge_check(c.s, st, 36, 0.98, 1.0) is None          # under the net floor: hold
+    assert st.get("below_floor") is True
+    assert surge_check(c.s, st, 39, floor_px, 1.0) == "floor"
 
 
 def test_surge_check_top_first_when_peak_is_high():
@@ -214,12 +220,17 @@ def test_surge_check_top_first_when_peak_is_high():
     assert surge_check(c.s, st, 39, 1.47, 1.0) == "top"         # -8.1% from 1.60, still +47%
 
 
-def test_surge_check_missed_under_entry_does_not_fire():
-    """Fast crash past both lines to under entry: the surge rule stands down."""
+def test_surge_check_under_entry_holds_for_bounce():
+    """Fast crash past both lines to under entry: no surge sell; a bounce to the net floor sells."""
     c, _ = make_ctx()
     st = _armed(c)
-    assert surge_check(c.s, st, 33, 0.95, 1.0) == "missed"
-    assert surge_check(c.s, st, 36, 1.0, 1.0) == "floor"        # back at entry exactly: floor (not under entry)
+    peak = st["peak"]
+    floor_px = trail_net_floor_price(c.s, {"entry_price": 1.0})
+    assert surge_check(c.s, st, 33, 0.95, 1.0) is None
+    assert st.get("below_floor") is True and st["peak"] == peak
+    assert surge_check(c.s, st, 36, 1.0, 1.0) is None           # back at entry, still under the net floor
+    assert surge_check(c.s, st, 39, floor_px, 1.0) == "floor"
+    assert st["peak"] == peak
 
 
 def test_surge_check_floor_off():
@@ -231,14 +242,19 @@ def test_surge_check_floor_off():
 
 
 def test_live_floor_sells_whole_position(monkeypatch):
+    """After a surge, a gap under the net floor holds; a bounce back to the net floor market-sells."""
     c, clock, t, fc = _open(monkeypatch)
-    c.s.set("risk.surge_floor_pct", 20, source="test")          # floor above the 8% line so it fires first
     for p in (1.1, 1.26):                                       # +26%: armed
         _tick(t, clock, p)
     assert t._surge[_row(c)["id"]]["armed_at"] is not None
-    _tick(t, clock, 1.22)                                       # -3.2% from peak, +22%: hold
+    peak = t._surge[_row(c)["id"]]["peak"]
+    _tick(t, clock, 1.22)                                       # small dip, still above the top line: hold
     assert not _sells(fc)
-    _tick(t, clock, 1.19)                                       # +19% <= +20% floor, only -5.6% from peak
+    _tick(t, clock, 0.98)                                       # gapped under the net floor: hold
+    assert not _sells(fc)
+    assert t._surge[_row(c)["id"]]["below_floor"] and t._surge[_row(c)["id"]]["peak"] == peak
+    floor_px = trail_net_floor_price(c.s, _row(c))
+    _tick(t, clock, floor_px)                                   # bounce to the net floor
     assert len(_sells(fc)) == 1 and _sells(fc)[0]["input_amount_bps"] == "10000"
     o = _row(c)
     assert o["status"] == "exiting" and o["exit_reason"] == SURGE_FLOOR and o["last_check"] == 0
@@ -278,10 +294,13 @@ def test_live_crash_under_entry_leaves_it_to_stops(monkeypatch):
 def test_paper_floor_closes(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _nosleep)
     c, clock, t = trader()
-    c.s.set("risk.surge_floor_pct", 25, source="test")
     run(t.on_pass(M, "Cat", "CAT", 1.0, 50000, 80))
-    for p in (1.3, 1.32, 1.24):                                 # +24% <= +25% floor, -6% from peak
+    for p in (1.3, 1.32):
         _tick(t, clock, p)
+    _tick(t, clock, 0.98)                                       # under the net floor: hold
+    assert _row(c)["status"] == "open"
+    floor_px = trail_net_floor_price(c.s, _row(c))
+    _tick(t, clock, floor_px)
     o = _row(c)
     assert o["status"] == "closed" and o["exit_reason"] == SURGE_FLOOR
 
@@ -340,3 +359,65 @@ def test_live_entry_gate_off_restores_old_arming(monkeypatch):
     for p in (0.86, 1.089):
         _tick(t, clock, p, dt=10)
     assert t._surge[_row(c)["id"]]["armed_at"] is not None
+
+# ---- DECISION 82: surge uses the same net floor as the trail (owner 2026-11-18 4:37 AM CT)
+def test_surge_top_below_net_floor_holds_then_bounces():
+    """An 8% top that would fill under the net floor does not sell; a bounce to the net floor does."""
+    c, _ = make_ctx(**{"gmgn.fee_pct": 1.0, "gmgn.priority_fee_sol": 0, "gmgn.tip_fee_sol": 0,
+                       "risk.trail_floor_pct": 5})
+    c.s.set("risk.surge_min_entry_pct", 0, source="test")
+    st = {}
+    assert surge_check(c.s, st, 0, 1.0, 1.0) is None
+    assert surge_check(c.s, st, 30, 1.21, 1.0) == "armed"
+    floor_px = trail_net_floor_price(c.s, {"entry_price": 1.0})
+    assert floor_px > 1.05
+    assert surge_check(c.s, st, 33, 1.02, 1.0) is None          # 8%+ off the peak but under the net floor
+    assert st.get("below_floor") is True and st["peak"] == 1.21
+    assert surge_check(c.s, st, 36, floor_px, 1.0) == "floor"
+
+
+def test_mark_plus_five_is_not_enough_after_fees():
+    c, _ = make_ctx(**{"gmgn.fee_pct": 1.0, "gmgn.priority_fee_sol": 0, "gmgn.tip_fee_sol": 0})
+    st = _armed(c)
+    from agents.gmgn_trader import trail_net_ok
+    assert not trail_net_ok(c.s, {"entry_price": 1.0}, 1.05)
+    assert surge_check(c.s, st, 33, 1.05, 1.0) is None
+    assert st.get("below_floor") is True
+
+
+def test_strong_bounce_above_top_line_keeps_trailing():
+    c, _ = make_ctx(**{"gmgn.fee_pct": 0, "gmgn.priority_fee_sol": 0, "gmgn.tip_fee_sol": 0,
+                       "risk.trail_floor_pct": 5})
+    st = _armed(c, peak=1.40)
+    assert surge_check(c.s, st, 33, 0.90, 1.0) is None
+    assert st.get("below_floor") is True
+    # 1.35 is above the 8% top line (1.40*0.92=1.288) and above the net floor: resume trailing
+    assert surge_check(c.s, st, 36, 1.35, 1.0) is None
+    assert st.get("below_floor") is False
+    assert st["peak"] == 1.40
+    assert surge_check(c.s, st, 39, 1.288, 1.0) == "top"
+
+
+def test_live_quote_under_net_floor_blocks_surge_sell(monkeypatch):
+    c, clock, t, fc = _open(monkeypatch)
+    fc.plan_blocked = False
+    for p in (1.1, 1.30):
+        _tick(t, clock, p)
+    sol_in = trail_sol_in(c.s, _row(c))
+    assert sol_in and sol_in > 0
+
+    async def cheap_quote(input_token, output_token, amount, slippage):
+        fc.calls.append(("quote", (input_token, output_token, amount, slippage)))
+        return {"output_amount": str(int(sol_in * 1.01 * 1e9)), "min_output_amount": "1"}
+    fc.quote = cheap_quote
+    _tick(t, clock, 1.19)                                       # would be a top sell on the mark
+    assert not _sells(fc)
+    assert t._surge[_row(c)["id"]].get("below_floor")
+
+    async def good_quote(input_token, output_token, amount, slippage):
+        fc.calls.append(("quote", (input_token, output_token, amount, slippage)))
+        return {"output_amount": str(int(sol_in * 1.06 * 1e9)), "min_output_amount": "1"}
+    fc.quote = good_quote
+    floor_px = trail_net_floor_price(c.s, _row(c))
+    _tick(t, clock, floor_px)
+    assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == SURGE_FLOOR

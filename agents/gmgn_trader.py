@@ -725,18 +725,27 @@ SURGE_FAST_S = 60.0
 SURGE_RETRY_S = 15.0             # after a failed surge sell, wait before trying again
 
 
-def surge_check(s, st: dict, now: float, price: float, entry: float):
+def _surge_order(o, entry):
+    """Order row for net-floor helpers; a stub with entry_price when the caller has no row."""
+    return o if o is not None else {"entry_price": entry}
+
+
+def surge_check(s, st: dict, now: float, price: float, entry: float, o=None,
+                below_floor=False, quote_sol_out=None):
     """Feed one price sample into a position's surge state `st` (mutated in place).
-    st = {'hist': [(ts, price)...], 'armed_at': ts|None, 'peak': float|None, 'gain': float|None}.
+    st = {'hist': [(ts, price)...], 'armed_at': ts|None, 'peak': float|None, 'gain': float|None,
+          'below_floor': bool}.
     Surge = price at least risk.surge_min_entry_pct above entry (DECISION 61; 0 = just above entry) AND either
     up >= risk.surge_min_pct from the lowest price in the last risk.surge_window_s, or up >= SURGE_FAST_PCT from
     the lowest price in the last SURGE_FAST_S.
     Once armed, track the post-surge peak; top = price falls risk.surge_top_drop_pct from that peak.
-    Profit floor (DECISION 56): once armed, price <= entry * (1 + risk.surge_floor_pct) also sells; whichever
-    of floor / top comes first wins. If price is already below entry when either would fire, the surge rule
-    stands down ('missed') and the normal stop / trail handle the coin, the same as a non-surged one.
-    Returns 'armed' on the tick a surge is first seen, 'floor' / 'top' when it should sell, 'missed' when it
-    would have sold but price is under entry, else None."""
+    Profit floor (DECISION 82): every surge sell also requires expected net SOL >= +risk.trail_floor_pct
+    (same net floor as the trail: fees, priority/tip, and a GMGN quote's impact when provided). If the net
+    is under that floor, surge does not sell; it holds, keeps the peak, and waits for a bounce. It sells
+    later when the net is back at or above the floor and either the top line still applies or the price has
+    recovered to the floor (when the floor line is on). risk.surge_floor_pct == 0 still turns the floor
+    *line* off (top-only), but a top sell is still blocked when net is under the trail floor.
+    Returns 'armed' on the tick a surge is first seen, 'floor' / 'top' when it should sell, else None."""
     win = float(s["risk.surge_window_s"])
     hist = st.setdefault("hist", [])
     hist.append((now, price))
@@ -757,14 +766,31 @@ def surge_check(s, st: dict, now: float, price: float, entry: float):
             return "armed"
         return None
     st["peak"] = max(st.get("peak") or price, price)
-    floor_pct = float(s["risk.surge_floor_pct"])
-    hit_floor = floor_pct > 0 and bool(entry) and price <= entry * (1 + floor_pct / 100.0)
+    row = _surge_order(o, entry)
+    floor_px = trail_net_floor_price(s, row)
+    net_ok = trail_net_ok(s, row, price, quote_sol_out=quote_sol_out)
+    floor_on = float(s["risk.surge_floor_pct"] or 0) > 0
     hit_top = price <= st["peak"] * (1 - float(s["risk.surge_top_drop_pct"]) / 100.0)
-    if not (hit_floor or hit_top):
+    under = floor_px is not None and price < floor_px
+    if under or not net_ok:
+        if under:
+            st["below_floor"] = True
         return None
-    if entry and price < entry:
-        return "missed"                 # missed both: leave it to the normal stop / trail
-    return "floor" if hit_floor else "top"
+    was_below = bool(below_floor or st.get("below_floor"))
+    at_floor = floor_on and floor_px is not None and price <= floor_px and net_ok
+    if at_floor:
+        st["below_floor"] = False
+        return "floor"
+    if was_below and floor_on and net_ok and floor_px is not None and price >= floor_px:
+        if hit_top:
+            st["below_floor"] = False
+            return "top"
+        st["below_floor"] = False          # bounced above the top line: keep trailing
+        return None
+    if hit_top and net_ok:
+        st["below_floor"] = False
+        return "top"
+    return None
 
 
 class GmgnTrader:
@@ -2046,15 +2072,20 @@ class GmgnTrader:
                 fill_ts = (o["grace_until"] - float(self.s["risk.grace_min"]) * 60) if o.get("grace_until") else o["ts"]
                 if fill_ts and now - fill_ts <= float(self.s["risk.surge_window_s"]):
                     st["hist"].append((fill_ts, o["entry_price"]))      # the buy counts as the surge's starting low
-            res = surge_check(self.s, st, now, price, o["entry_price"])
+            res = surge_check(self.s, st, now, price, o["entry_price"], o=o,
+                              below_floor=bool(st.get("below_floor")))
             if res == "armed":
                 self._log(o["mode"], o["mint"], "surge armed", f"+{st['gain']:.1f}%", f"price={price:.10g}", f"entry={o['entry_price']:.10g}", f"src={src}")
-            elif res == "missed":
-                if not st.get("missed_logged"):
-                    st["missed_logged"] = True
-                    self._log(o["mode"], o["mint"], "surge missed", "under entry: left to the normal stop/trail",
-                              f"price={price:.10g}", f"entry={o['entry_price']:.10g}", f"peak={st.get('peak') or 0:.10g}", f"src={src}")
+            elif st.get("below_floor") and not st.get("below_logged"):
+                st["below_logged"] = True
+                self._log(o["mode"], o["mint"], "surge hold", "under net floor: waiting for a bounce",
+                          f"price={price:.10g}", f"entry={o['entry_price']:.10g}", f"peak={st.get('peak') or 0:.10g}", f"src={src}")
             elif res in ("top", "floor") and now >= self._surge_retry.get(o["id"], 0):
+                qsol = await self._trail_sell_quote_sol(o)
+                if qsol is not None and not trail_net_ok(self.s, o, price, quote_sol_out=qsol):
+                    st["below_floor"] = True
+                    self._log(o["mode"], o["mint"], "surge hold", f"quote {qsol:.6f} SOL under net floor")
+                    continue
                 st["src"] = src
                 await self.surge_sell(o, st, price, now, floor=(res == "floor"))
         return len(rows)
@@ -2105,7 +2136,7 @@ class GmgnTrader:
             if floor:
                 up = 100 * (price / o["entry_price"] - 1) if o["entry_price"] else 0
                 await self.push(f"GMGN · {self._tag(o)}{o['name']}: surged +{gain:.0f}% then fell to the "
-                                f"+{float(self.s['risk.surge_floor_pct']):g}% profit floor ({up:+.1f}% vs entry), market-selling",
+                                f"+{float(self.s['risk.trail_floor_pct']):g}% net profit floor ({up:+.1f}% vs entry), market-selling",
                                 mint=o["mint"])
             else:
                 await self.push(f"GMGN · {self._tag(o)}{o['name']}: surged +{gain:.0f}% then topped "
