@@ -1,5 +1,5 @@
 """DECISION 73 (owner 2026-11-17 7:06 PM CT): the wallet read, and so A's / B's 50/50 budgets, follow the real wallet.
-Re-read at least every 45 s while idle, right after any LIVE fill / exit, and fresh before every LIVE buy."""
+Re-read at least every 30 s, right after any LIVE fill / exit, and fresh before every LIVE buy."""
 import asyncio, time
 import gmgn
 from agents.gmgn_trader import GmgnTrader, budget_view
@@ -57,7 +57,7 @@ def test_publisher_idle_refresh_publishes_on_change():
         p.dirty.clear()
         assert await p.idle_wallet() is False                # fresh: nothing to do
         cl.wallet_sol = 3.0
-        t._bal = (time.time() - 46, t._bal[1])               # 46 s old
+        t._bal = (time.time() - 46, t._bal[1])               # older than WALLET_REFRESH_S
         assert await p.idle_wallet() is True and p.dirty.is_set()
         assert t._bal[1] == 3 * gmgn.LAMPORTS
     run(go())

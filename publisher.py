@@ -912,7 +912,7 @@ class Publisher:
                 return False
             await asyncio.sleep(5)
 
-    WALLET_REFRESH_S = 45            # DECISION 73: wallet + SOL price re-read at least this often, and right after any fill / exit
+    WALLET_REFRESH_S = 30            # DECISION 73: wallet + SOL price re-read at least this often, and right after any fill / exit
 
     async def refresh_gmgn(self):
         g = getattr(self.d, "gmgn", None)
@@ -1021,15 +1021,26 @@ class Publisher:
         self.log.info(f"{iso()}\tpublished\tfiles={n}\trev={rev[:7]}")
         return rev
 
+    async def wallet_loop(self):
+        """DECISION 73: runs beside the publish loop (also while a publish is in flight): wallet re-read every
+        WALLET_REFRESH_S, or within 5 s after a fill / exit; a change triggers a publish."""
+        while True:
+            try:
+                await self.idle_wallet()
+            except Exception as e:
+                self.c.error("publisher", "wallet_loop", str(e)[:200])
+            await asyncio.sleep(5)
+
     async def loop(self):
         hb = self.c.s["desk.publish_heartbeat_s"]
+        if getattr(self, "_wallet_task", None) is None:
+            self._wallet_task = asyncio.create_task(self.wallet_loop())
         while True:
             try:
                 deadline = time.time() + max(1, hb - (time.time() - self.last_publish))
                 while time.time() < deadline and not self.dirty.is_set():
                     self.c.hb("publisher", f"idle count={self.count}")
                     await self.maybe_verify()
-                    await self.idle_wallet()
                     try:
                         await asyncio.wait_for(self.dirty.wait(), timeout=min(15, max(0.1, deadline - time.time())))
                     except asyncio.TimeoutError:
