@@ -21,9 +21,6 @@ OPEN, CLOSED = "open", "closed"
 STOP, TP, SPIKE, TRAIL, TIME, PULLED = "stop", "take profit 2x", "spike", "trail", "time stop", "liquidity pulled"
 TEMP_KEY = "strat_b_tonight"   # meta: settings changed for tonight only, reverted at the next night rollover (DECISION 63)
 NO_PRICE_HOLD_S = 1800  # with no price, keep holding (the time stop still applies)
-# DECISION 69: drop watches that stay under the $30K MC floor, or show $0 liquidity
-UNDER_MC_DROP_EVALS = 10
-UNDER_MC_DROP_S = 15 * 60
 
 
 def num(v, default=None):
@@ -460,34 +457,6 @@ class StratB:
         self._eval(w, "expired", "expired", ev, json.loads(w.get("checks") or "[]"), w.get("last_price"), now)
         self.log.info(f"{iso(now)}\texpired\t{w['mint']}\t{w['name']}\t{why}\tlast: {last}")
 
-    def _stale_watch(self, w, pair, m, now) -> str | None:
-        """Drop a watch whose liquidity is $0, or whose market cap stays under the floor (DECISION 69)."""
-        price = m.get("price")
-        if not price:
-            return None
-        liq_raw = fields.get(pair, "liquidity.usd") if pair else None
-        liq = num(liq_raw)
-        if liq is not None and liq <= 0:
-            return "liquidity $0"
-        mc = m.get("mc")
-        floor = float(self.c.s["strat_b.min_mc_usd"])
-        under = mc is not None and mc < floor
-        if under:
-            n = int(w.get("under_floor_evals") or 0) + 1
-            since = w.get("under_floor_since") or now
-            self.c.db.x("UPDATE strat_b_watch SET under_floor_evals=?, under_floor_since=? WHERE mint=?",
-                        (n, since, w["mint"]))
-            w["under_floor_evals"], w["under_floor_since"] = n, since
-            held = now - since
-            if n >= UNDER_MC_DROP_EVALS or held >= UNDER_MC_DROP_S:
-                if n >= UNDER_MC_DROP_EVALS:
-                    return f"mc ${mc:,.0f} under ${floor:,.0f} for {n} evals"
-                return f"mc ${mc:,.0f} under ${floor:,.0f} for {held / 60:.0f}m"
-        elif w.get("under_floor_evals") or w.get("under_floor_since"):
-            self.c.db.x("UPDATE strat_b_watch SET under_floor_evals=0, under_floor_since=NULL WHERE mint=?", (w["mint"],))
-            w["under_floor_evals"], w["under_floor_since"] = 0, None
-        return None
-
     def _sample(self, mint, now, price):
         h = self.hist.setdefault(mint, collections.deque())
         h.append((now, price))
@@ -509,11 +478,6 @@ class StratB:
         ok, why, m = entry_check(s, w, pair or {}, now)
         ck = checks(s, w, pair, now)
         c.db.x("UPDATE strat_b_watch SET checks=?, eval_at=?, evals=COALESCE(evals,0)+1 WHERE mint=?", (json.dumps(ck), now, w["mint"]))
-        w = dict(w, checks=json.dumps(ck), eval_at=now)
-        drop = self._stale_watch(w, pair, m, now)
-        if drop:
-            self._expire_watch(w, drop, now)
-            return
         if ok:
             block = self.can_buy() or (self.live.blocked_retry(w["mint"], now) if self.mode() == "LIVE" else None)
             if block:

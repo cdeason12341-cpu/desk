@@ -8,10 +8,9 @@ up to strat_b.feed_checks_per_poll new coins: mint/freeze authority revoked, top
 StratB.offer like any other coin. Never places an order, never signs, never touches a wallet.
 """
 from __future__ import annotations
-import asyncio, datetime as dt, random
+import asyncio, datetime as dt
 import fields, holders, sources
 from ctx import iso
-from net import RateLimited, retry_after_s
 
 GECKO = "https://api.geckoterminal.com/api/v2/networks/solana/"
 SOURCES = (("gecko trending 1h", "trending_pools", {"duration": "1h", "page": 1}),
@@ -23,9 +22,6 @@ SOURCES = (("gecko trending 1h", "trending_pools", {"duration": "1h", "page": 1}
            ("gecko trending 24h", "trending_pools", {"duration": "24h", "page": 3}))
 CALL_GAP_S = 2.5          # between GeckoTerminal calls (public limit ~30/min; B makes 7 per 5 min)
 RETRY_FAILED_S = 6 * 3600  # a coin whose holder data couldn't be read is retried after 6h
-BACKOFF_START_S = 60.0
-BACKOFF_MAX_S = 15 * 60    # 15 min cap on the exponential; Retry-After may go up to 2x this
-BACKOFF_JITTER = 0.25
 WSOL = "So11111111111111111111111111111111111111112"
 
 
@@ -34,20 +30,6 @@ def _num(v):
         return float(v)
     except (TypeError, ValueError):
         return None
-
-
-def backoff_wait(n, retry_after=None, start=BACKOFF_START_S, cap=BACKOFF_MAX_S, jitter=BACKOFF_JITTER, rng=None) -> float:
-    """Seconds to wait after the nth consecutive 429 (1-based). Exponential with jitter; honors Retry-After."""
-    n = max(1, int(n))
-    base = min(cap, start * (2 ** (n - 1)))
-    spin = (rng or random.random)()
-    wait = max(1.0, base * (1.0 + jitter * (2 * spin - 1)))
-    if retry_after is not None:
-        try:
-            wait = max(wait, float(retry_after))
-        except (TypeError, ValueError):
-            pass
-    return min(wait, cap * 2)          # Retry-After can exceed the exponential cap, but not forever
 
 
 def _rel_id(p, name):
@@ -95,7 +77,6 @@ class BFeed:
         self.sb, self.c, self.log = sb, sb.c, sb.log
         self.last = 0.0
         self.backoff_until = 0.0
-        self._429_n = 0
         self.failed: dict[str, float] = {}
         self.stats = {"pulled": 0, "candidates": 0, "checked": 0, "offered": 0}
 
@@ -109,18 +90,12 @@ class BFeed:
             self.c.hb("strat_b_feed", note or "")
             await asyncio.sleep(15)
 
-    def _arm_backoff(self, now, retry_after=None) -> float:
-        self._429_n += 1
-        wait = backoff_wait(self._429_n, retry_after=retry_after)
-        self.backoff_until = now + wait
-        self.last = now - self.c.s["strat_b.feed_poll_s"]   # ready to poll again the moment backoff ends
-        return wait
-
     async def gecko(self, path, params):
         net = self.c.net
         r = await net._send(net.http.get(GECKO + path, params=params, headers={"Accept": "application/json"}, timeout=20), 22, "gecko " + path)
         if r.status_code == 429:
-            raise RateLimited("gecko 429", retry_after=retry_after_s(getattr(r, "headers", None), now=self.c.clock()))
+            from net import RateLimited
+            raise RateLimited("gecko 429")
         if r.status_code != 200:
             raise RuntimeError(f"gecko {path} {r.status_code}")
         d = r.json()
@@ -134,23 +109,20 @@ class BFeed:
         if payloads is None and (now - self.last < s["strat_b.feed_poll_s"] or now < self.backoff_until):
             return f"idle · {self.stats}"
         self.last = now
-        pools, errs, hit_429 = [], [], False
+        pools, errs = [], []
         for i, (label, path, params) in enumerate(SOURCES):
             try:
                 d = payloads[i] if payloads is not None else await self.gecko(path, params)
             except Exception as e:
                 errs.append(f"{params.get('duration')}p{params.get('page')}:{str(e)[:40]}")
-                if isinstance(e, RateLimited):              # stop this round; exponential backoff, honor Retry-After
-                    wait = self._arm_backoff(now, getattr(e, "retry_after", None))
-                    self.log.info(f"{iso(now)}\tfeed\t429 backoff {wait:.0f}s\tn={self._429_n}\tretry_after={getattr(e, 'retry_after', None)}")
-                    hit_429 = True
+                if type(e).__name__ == "RateLimited":       # polite: stop this round, try again in 60s
+                    self.backoff_until = now + 60
+                    self.last = now - s["strat_b.feed_poll_s"] + 60
                     break
                 continue
             pools += parse_pools(d, label, now)
             if payloads is None:
                 await asyncio.sleep(CALL_GAP_S)
-        if not hit_429:
-            self._429_n = 0
         self.stats["pulled"] = len(pools)
         seen, cands = set(), []
         for p in pools:

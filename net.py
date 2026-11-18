@@ -1,41 +1,11 @@
 """HTTP clients: DexScreener, RugCheck, Solana RPC, Jev. Errors are explicit; nothing is invented."""
 from __future__ import annotations
 import asyncio, json, time
-from email.utils import parsedate_to_datetime
 import httpx
 
 
 class RateLimited(Exception):
-    """A 429 from an upstream API. retry_after is seconds to wait when the response sent Retry-After."""
-    def __init__(self, msg="rate limited", retry_after=None):
-        super().__init__(msg)
-        self.retry_after = retry_after
-
-
-def retry_after_s(headers, now=None) -> float | None:
-    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date). None if missing or invalid."""
-    if not headers:
-        return None
-    raw = headers.get("Retry-After")
-    if raw is None:
-        try:
-            raw = headers.get("retry-after")
-        except Exception:
-            raw = None
-    if raw is None:
-        return None
-    raw = str(raw).strip()
-    if not raw:
-        return None
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        pass
-    try:
-        ts = parsedate_to_datetime(raw).timestamp()
-        return max(0.0, ts - (time.time() if now is None else now))
-    except Exception:
-        return None
+    pass
 
 
 class SourceError(Exception):

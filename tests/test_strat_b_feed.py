@@ -137,7 +137,7 @@ def test_feed_module_never_reaches_gmgn_or_wallet():
             mods |= {a.name for a in n.names}
         elif isinstance(n, ast.ImportFrom):
             mods.add(n.module)
-    assert mods <= {"__future__", "asyncio", "datetime", "random", "fields", "holders", "sources", "ctx", "net", "agents.auditor"}, mods
+    assert mods <= {"__future__", "asyncio", "datetime", "fields", "holders", "sources", "ctx", "net", "agents.auditor"}, mods
     code = src.split('"""', 2)[2]
     for bad in ("gmgn", "safe_sell", "on_pass", "secrets", "keypair", "wallet_", "swap", "bus.analyst", "bus.executor"):
         assert bad not in code, bad
@@ -149,50 +149,24 @@ def test_desk_runs_feed(tmp_path):
     assert d.strat_b_feed.sb is d.strat_b and main.HB_JOBS["strat_b_feed"] == ("strat_b_feed",)
 
 
-# ---------- DECISION 69: GeckoTerminal 429 exponential backoff + Retry-After
-def test_retry_after_and_backoff_wait():
-    from email.utils import formatdate
-    from net import retry_after_s
-    from strat_b_feed import backoff_wait
-    assert retry_after_s({"Retry-After": "120"}) == 120
-    assert retry_after_s({"retry-after": "9.5"}) == 9.5
-    assert retry_after_s({}) is None and retry_after_s({"Retry-After": "nope"}) is None
-    now = 1_800_000_000
-    hdr = formatdate(now + 30, usegmt=True)
-    assert abs(retry_after_s({"Retry-After": hdr}, now=now) - 30) < 1
-    mid = lambda: 0.5
-    assert backoff_wait(1, rng=mid) == 60
-    assert backoff_wait(2, rng=mid) == 120
-    assert backoff_wait(5, rng=mid) == 900                    # 60 * 16 = 960, capped at 15m
-    assert backoff_wait(1, retry_after=200, rng=mid) == 200   # honors Retry-After
-    assert backoff_wait(1, retry_after=2000, rng=mid) == 1800 # generous cap (2x 15m)
-    for _ in range(30):
-        w = backoff_wait(1)
-        assert 45 <= w <= 75
-
-
-def test_feed_429_exponential_backoff_pauses_and_honors_retry_after(monkeypatch):
+# ---------- DECISION 76: Gecko 429 backoff is a fixed 60s again (pre-5:23 PM behavior)
+def test_feed_429_backs_off_60s_and_pauses(monkeypatch):
     from net import RateLimited
     c, clock, sb, f = _feed(monkeypatch)
-    monkeypatch.setattr(strat_b_feed.random, "random", lambda: 0.5)
     calls = {"n": 0}
 
     async def boom(path, params):
         calls["n"] += 1
-        raise RateLimited("gecko 429", retry_after=200)
+        raise RateLimited("gecko 429")
 
     f.gecko = boom
     run(f.poll_once())
-    assert calls["n"] == 1 and f._429_n == 1
-    assert f.backoff_until == pytest.approx(clock.t + 200)    # Retry-After 200s > 60s exponential
+    assert calls["n"] == 1
+    assert f.backoff_until == pytest.approx(clock.t + 60)
     n = calls["n"]
     assert run(f.poll_once()).startswith("idle")              # paused: no gecko calls during backoff
     assert calls["n"] == n
     clock.t = f.backoff_until
     run(f.poll_once())
-    assert calls["n"] == n + 1 and f._429_n == 2
-    assert f.backoff_until == pytest.approx(clock.t + 200)    # 2nd 429 is ~120s, Retry-After still wins
-
-    clock.t = f.backoff_until + 1
-    run(f.poll_once(payloads=_payloads()))                    # a clean round (no 429) resets the streak
-    assert f._429_n == 0
+    assert calls["n"] == n + 1
+    assert f.backoff_until == pytest.approx(clock.t + 60)     # still a flat 60s, not exponential
