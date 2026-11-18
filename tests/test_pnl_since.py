@@ -12,7 +12,7 @@ M4 = "Pnl4111111111111111111111111111111111pump"
 
 
 def _b(c, mint, pnl, closed_at, opened_at, status="closed", mode="LIVE", **kw):
-    cols = dict(ts=opened_at, night=c.night, mode=mode, mint=mint, name=kw.pop("name", mint[:4]), status=status, size_usd=50.0,
+    cols = dict(ts=opened_at, night=kw.pop("night", c.night), mode=mode, mint=mint, name=kw.pop("name", mint[:4]), status=status, size_usd=50.0,
                 pnl_usd=pnl, pct=(pnl or 0) * 2, opened_at=opened_at, closed_at=closed_at, entry_price=1.0, last_price=1.0,
                 signal_price=1.0, peak=1.0, **kw)
     return c.db.x(f"INSERT INTO strat_b_orders({','.join(cols)}) VALUES({','.join('?' * len(cols))})", tuple(cols.values())).lastrowid
@@ -108,3 +108,58 @@ def test_strat_feed_per_strategy_events_and_no_leaks():
     assert "strat_ok" not in blob and "ord_secretish" not in blob and "SHOULD_NOT_PUBLISH" not in blob
     for k in LEAK_FIELDS:
         assert f'"{k}"' not in blob, k
+
+
+def test_tonight_resets_with_night_total_stays_since_baseline():
+    """DECISION 83: main figure is the current 8 AM CT night; Total is LIVE since pnl_since."""
+    d, c, clock, t = _desk(mode="LIVE")
+    base = clock.t - 1000
+    c.s.set("gmgn.pnl_since", pnl_since.iso(base), source="test")
+    c.s.set("strat_b.pnl_since", pnl_since.iso(base), source="test")
+    last = "2026-11-17-0800"
+    _order(c, mint=M2, status="closed", pnl_usd=10.00, pct=20.0, closed_at=clock.t - 100, night=last, name="YestA")
+    _order(c, mint=M3, status="closed", pnl_usd=5.25, pct=10.5, closed_at=clock.t + 10, name="TodayA")
+    _order(c, mint=M4, status="closed", pnl_usd=99.0, pct=99.0, closed_at=clock.t + 20, mode="PAPER", name="PaperA")
+    _b(c, M2, -4.00, clock.t - 100, clock.t - 200, name="YestB", night=last)
+    _b(c, M3, 2.50, clock.t + 10, clock.t, name="TodayB")
+    _b(c, M4, 50.0, clock.t + 20, clock.t, mode="PAPER", name="PaperB")
+    files = Builder(d).build()
+    pa, pb = files["strat_feed.json"]["pnl"]["A"], files["strat_feed.json"]["pnl"]["B"]
+    assert pa["pnlTonightUsd"] == 5.25 and pa["pnlUsd"] == 15.25
+    assert pa["closedTonight"] == 1 and pa["closed"] == 2
+    assert pa["winsTonight"] == 1 and pa["lossesTonight"] == 0 and pa["winRateTonightPct"] == 100.0
+    assert pa["wins"] == 2 and pa["losses"] == 0
+    assert pb["pnlTonightUsd"] == 2.50 and pb["pnlUsd"] == -1.50
+    assert pb["closedTonight"] == 1 and pb["closed"] == 2
+    assert pb["winsTonight"] == 1 and pb["lossesTonight"] == 0
+    assert pb["wins"] == 1 and pb["losses"] == 1
+    assert files["trades.json"]["real"]["pnlTonightUsd"] == 5.25
+    assert files["trades.json"]["real"]["pnlAllUsd"] == 15.25
+    # after the 8 AM CT rollover, tonight is $0 and the total is unchanged
+    c.night = "2026-11-19-0800"
+    rolled = Builder(d).build()
+    ra, rb = rolled["strat_feed.json"]["pnl"]["A"], rolled["strat_feed.json"]["pnl"]["B"]
+    assert ra["pnlTonightUsd"] == 0 and ra["pnlUsd"] == 15.25 and ra["closedTonight"] == 0
+    assert ra["winsTonight"] == 0 and ra["lossesTonight"] == 0 and ra["winRateTonightPct"] is None
+    assert rb["pnlTonightUsd"] == 0 and rb["pnlUsd"] == -1.50 and rb["closedTonight"] == 0
+
+
+def test_app_shows_tonight_main_and_total_aside():
+    """Shell v32: big number is pnlTonightUsd; muted Total $X sits beside it on A, B, and Wallet."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "web" / "app.js").read_text()
+    css = (root / "web" / "app.css").read_text()
+    html = (root / "web" / "index.html").read_text()
+    sw = (root / "web" / "sw.js").read_text()
+    assert 'const V = "desk-shell-v32"' in sw
+    assert "app.js?v=32" in html and "app.css?v=32" in html
+    assert "desk-shell-v31" not in sw and "v=31" not in html
+    assert "function profitCard" in js and "function stratCard" in js
+    assert "const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0" in js
+    assert "Total ${money(tot)}" in js
+    assert js.count("Total ${money(tot)}") == 2          # Strat overview card and Wallet summary card
+    assert "<div class=\"k2\">Tonight</div>" in js
+    assert "Profit ${esc(sinceText(p))}" not in js        # old main label is gone
+    assert "tonight ${money(p?.pnlTonightUsd ?? 0)}" not in js
+    assert ".pnltotal" in css and "pnltotal" in js and "pnlrow" in js

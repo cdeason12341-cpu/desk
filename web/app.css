@@ -211,6 +211,13 @@ details.earlier[open]>summary::before{content:"▾ "}
 .row .s.wrap{white-space:normal}
 .badge{white-space:nowrap}
 .card.real .rowx>.sub{flex:1;min-width:0;margin-right:8px}
+
+/* DECISION 83: tonight is the main profit figure; all-time total is small muted print beside it */
+.pnlrow{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.pnltotal{color:var(--muted);font:600 12px/1.2 var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.card.real .pnltotal{font-size:13px}
+.scard .pnltotal{font-size:11px}
+
 /* DECISION 75: data source pill (live droplet vs Pages backup) */
 .srcpill{margin-left:8px;font:600 10px/1 var(--mono);padding:4px 6px;border-radius:6px;color:var(--dim);border:1px solid var(--line);white-space:nowrap}
 .srcpill.on{color:var(--green);border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.08)}

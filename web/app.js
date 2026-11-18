@@ -474,12 +474,16 @@
   }
   // DECISION 72: profit since the owner's reset (strat_feed.json pnl.A / pnl.B), history kept below it
   function sinceText(p) { return p && p.sinceLabel ? `since ${p.sinceLabel}` : "all time"; }
+  // DECISION 83: the big number is tonight's LIVE profit (8 AM CT night). Total since the
+  // owner's pnl_since reset sits in small print beside it.
   function profitCard(label, p, mode, badge, budget, who) {
-    const v = p?.pnlUsd ?? 0;
+    const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
+    const closed = p?.closedTonight ?? 0, wins = p?.winsTonight ?? 0, losses = p?.lossesTonight ?? 0;
+    const wr = p?.winRateTonightPct;
     return `<div class="card real"><div class="rowx"><div class="sub">${label}${mode === "LIVE" ? "" : " · not active"}</div>${badge}</div>
-      <div class="k2">Profit ${esc(sinceText(p))}</div>
-      <div class="big ${v >= 0 ? "green" : "red"}">${money(v)}</div>
-      <div class="sub">${p?.closed ?? 0} closed · ${p?.wins ?? 0}W ${p?.losses ?? 0}L${p?.winRatePct == null ? "" : " · " + p.winRatePct + "% win rate"} · tonight ${money(p?.pnlTonightUsd ?? 0)}</div>
+      <div class="k2">Tonight</div>
+      <div class="pnlrow"><div class="big ${t >= 0 ? "green" : "red"}">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
+      <div class="sub">${closed} closed · ${wins}W ${losses}L${wr == null ? "" : " · " + wr + "% win rate"}</div>
       ${shareLine(budget, who)}</div>`;
   }
   const afterSince = (since, t) => !since || (t && new Date(t) >= new Date(since));
@@ -502,9 +506,10 @@
     return h;
   }
   function stratCard(href, title, badge, p, bu, openN) {
-    const v = p?.pnlUsd ?? 0;
+    const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
     return `<a class="card tap scard" href="${href}"><div class="rowx"><div class="t1">${title}</div>${badge}</div>
-      <div class="${v >= 0 ? "green" : "red"} sv">${money(v)}</div><div class="sub">profit ${esc(sinceText(p))}</div>
+      <div class="pnlrow"><div class="${t >= 0 ? "green" : "red"} sv">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
+      <div class="sub">tonight · ${p?.closedTonight ?? 0} closed</div>
       <div class="sub" style="margin-top:6px">${bu?.sharePct ?? "?"}% share · <b class="green">${bu?.budgetUsd != null ? money(bu.budgetUsd) : "—"}</b> free</div>
       <div class="sub">${openN ?? 0} open · ${p?.wins ?? 0}W ${p?.losses ?? 0}L ›</div></a>`;
   }

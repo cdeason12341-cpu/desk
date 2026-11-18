@@ -46,10 +46,15 @@ def iso(ts: float | None) -> str | None:
 
 
 def summarize(pnls: list[float], tonight: list[float]) -> dict:
+    """pnlUsd / closed / wins are the all-time total since the display baseline.
+    pnlTonightUsd and the *Tonight fields are the current 8 AM CT night only (DECISION 83)."""
     wins = [p for p in pnls if (p or 0) > 0]
+    tw = [p for p in tonight if (p or 0) > 0]
     return {"pnlUsd": round(sum(p or 0 for p in pnls), 2), "pnlTonightUsd": round(sum(p or 0 for p in tonight), 2),
             "closed": len(pnls), "closedTonight": len(tonight), "wins": len(wins), "losses": len(pnls) - len(wins),
-            "winRatePct": round(100 * len(wins) / len(pnls), 1) if pnls else None}
+            "winRatePct": round(100 * len(wins) / len(pnls), 1) if pnls else None,
+            "winsTonight": len(tw), "lossesTonight": len(tonight) - len(tw),
+            "winRateTonightPct": round(100 * len(tw) / len(tonight), 1) if tonight else None}
 
 
 def a_live(db, s, night: str) -> dict:
