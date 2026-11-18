@@ -5,7 +5,8 @@ import asyncio, json
 import config, gmgn
 from agents.gmgn_trader import (DESK_STOP, DESK_TRAIL, EXIT_LABEL, LIMIT_STOP_MARK, conditions,
                                 desk_trail_check, has_profit_stop_trace, limit_stop_only,
-                                sim_exit, stop_strategy_body, trail_floor_price, trail_trigger)
+                                sim_exit, stop_strategy_body, trail_floor_price, trail_net_floor_price,
+                                trail_net_ok, trail_sol_in, trail_trigger)
 from tests.helpers import make_ctx, pair, run
 from tests.test_gmgn import M
 from tests.test_gmgn_grace import GraceClient, _held, _live, _nosleep
@@ -121,9 +122,13 @@ def test_smart_trade_positions_are_desk_trailed(monkeypatch):
     assert "profit_stop_trace" not in {x["order_type"] for x in json.loads(_row(c)["conditions"])}
     assert _tick(t, clock, 1.30) == 1                         # desk trail watches smart_trade too
     assert _row(c)["id"] in t._trail_armed
-    _tick(t, clock, 1.06)                                     # still above the +5% floor
+    o = _row(c)
+    floor_px = trail_net_floor_price(c.s, o)
+    _tick(t, clock, floor_px + 0.01)                          # still above the net floor
     assert not _sells(fc)
-    _tick(t, clock, 1.05)                                     # floor hit
+    _tick(t, clock, 1.00)                                     # gapped below the net floor: hold
+    assert not _sells(fc) and _row(c)["id"] in t._trail_armed and t._trail_peak[_row(c)["id"]] == 1.30
+    _tick(t, clock, floor_px)                                 # bounce to the net floor
     assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == DESK_TRAIL
 
 
@@ -132,22 +137,23 @@ def test_no_surge_adopted_buy_still_trailed_and_zero_held_skips(monkeypatch):
     c.db.x("UPDATE gmgn_orders SET no_surge=1, repair='adopted manual buy; stop_loss strategy created' WHERE mint=?", (M,))
     _tick(t, clock, 1.30)
     _held(t, 0)                                               # the GMGN stop / owner already sold it
-    _tick(t, clock, 1.00)
+    _tick(t, clock, trail_net_floor_price(c.s, _row(c)))
     assert not _sells(fc) and _row(c)["status"] == "open" and _row(c)["last_check"] == 0
 
 
 def test_failed_sell_alerts_once_and_retries(monkeypatch):
     c, clock, t, fc = _promoted_limit(monkeypatch)
     _tick(t, clock, 1.30)
+    floor_px = trail_net_floor_price(c.s, _row(c))
 
     async def boom(body):
         fc.calls.append(("swap", body)); raise gmgn.GmgnError(500, 500, "X", "down")
     fc.swap = boom
-    _tick(t, clock, 1.00)
-    _tick(t, clock, 1.00)                                     # inside the 15s retry wait: no new try
+    _tick(t, clock, floor_px)
+    _tick(t, clock, floor_px)                                  # inside the 15s retry wait: no new try
     assert len(_sells(fc)) == 1
     assert sum("sell failed" in m["text"] for m in c.notifier.sent) == 1
-    _tick(t, clock, 1.00, dt=16)
+    _tick(t, clock, floor_px, dt=16)
     assert len(_sells(fc)) == 2
     assert sum("sell failed" in m["text"] for m in c.notifier.sent) == 1
 
@@ -155,11 +161,12 @@ def test_failed_sell_alerts_once_and_retries(monkeypatch):
 def test_stale_peak_on_first_sight_does_not_sell(monkeypatch):
     c, clock, t, fc = _promoted_limit(monkeypatch)
     c.db.x("UPDATE gmgn_orders SET peak=1.60 WHERE mint=?", (M,))   # peak from before the desk trail existed
-    _tick(t, clock, 1.02)                                     # 36% under the old peak: no surprise sell
+    _tick(t, clock, 1.02)                                     # under the net floor: no sell, peak kept
     assert not _sells(fc)
-    assert t._trail_peak[_row(c)["id"]] == 1.02
-    assert _row(c)["id"] not in t._trail_armed
-    _tick(t, clock, 1.30); _tick(t, clock, 1.03)              # re-arms from fresh samples, then trails
+    assert t._trail_peak[_row(c)["id"]] == 1.60
+    assert _row(c)["id"] in t._trail_armed
+    floor_px = trail_net_floor_price(c.s, _row(c))
+    _tick(t, clock, floor_px)                                 # bounce to the net floor (still under the 1.28 line)
     assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == DESK_TRAIL
 
 
@@ -238,8 +245,15 @@ def test_desk_trail_never_sells_below_floor_and_stop_unchanged():
     r, peak, armed = desk_trail_check(c.s, o, 1.21, 10)                     # Rockstar-shaped: +21%
     assert armed and r is None and peak == 1.21
     o = {**o, "peak": 1.21}
-    assert desk_trail_check(c.s, o, 1.06, 10)[0] is None                    # above the +5% floor
-    assert desk_trail_check(c.s, o, 1.05, 10)[0] == DESK_TRAIL              # floor, not the raw -3% line
+    floor_px = trail_net_floor_price(c.s, o)
+    assert floor_px > 1.05                                                  # fees raise the mark floor above +5%
+    assert desk_trail_check(c.s, o, floor_px + 0.001, 10)[0] is None
+    assert desk_trail_check(c.s, o, 1.05, 10)[0] is None                    # +5% mark is not enough after fees
+    assert desk_trail_check(c.s, o, 1.02, 10)[0] is None                    # gapped below: hold, still armed
+    assert desk_trail_check(c.s, o, 1.02, 10)[2] is True
+    assert desk_trail_check(c.s, o, floor_px, 10)[0] == DESK_TRAIL           # net floor, not the raw -3% line
+    assert desk_trail_check(c.s, o, 1.02, 10, below_floor=True)[0] is None   # still under: no sell
+    assert desk_trail_check(c.s, o, floor_px + 0.02, 10, below_floor=True)[0] == DESK_TRAIL  # bounce through floor
     # JENSEN-shaped +39% peak: sell at the 20% trail line (+11.2%), not at the floor
     o = {**o, "peak": 1.39}
     trig = trail_trigger(c.s, 1.0, 1.39)
@@ -255,8 +269,12 @@ def test_sim_exit_take_profit_trail_uses_floor():
     c, _ = make_ctx(**{"risk.trail_start_pct": 20, "risk.trail_pct": 20, "risk.stop_pct": 50,
                        "risk.trail_floor_pct": 5, "risk.timeout_h": 48, "risk.grace_min": 0})
     o = {"entry_price": 1.0, "peak": 1.21, "exits_phase": "normal", "ts": 0}
+    floor_px = trail_net_floor_price(c.s, o)
     assert sim_exit(c.s, o, 1.06, 10)[0] is None
-    assert sim_exit(c.s, o, 1.05, 10)[0] == "profit_stop_trace"
+    assert sim_exit(c.s, o, 1.05, 10)[0] is None
+    assert sim_exit(c.s, o, 1.02, 10)[0] is None
+    assert sim_exit(c.s, o, floor_px, 10)[0] == "profit_stop_trace"
+    assert sim_exit(c.s, o, floor_px + 0.02, 10, below_floor=True)[0] == "profit_stop_trace"
 
 
 def test_conditions_omit_profit_stop_trace():
@@ -308,3 +326,61 @@ def test_strip_skips_limit_stop_only(monkeypatch):
     assert not any(k == "strategy_create" for k, _ in fc.calls)
     assert _row(c)["exits_phase"] == "normal"
     assert LIMIT_STOP_MARK in _row(c)["repair"]
+
+def test_net_floor_covers_fees_and_gap_holds_peak():
+    c, _ = make_ctx(**{"risk.trail_start_pct": 20, "risk.trail_pct": 20, "risk.stop_pct": 50,
+                       "risk.trail_floor_pct": 5, "gmgn.fee_pct": 1.0, "gmgn.priority_fee_sol": 0,
+                       "gmgn.tip_fee_sol": 0})
+    o = {"entry_price": 1.0, "peak": 1.21, "exits_phase": "normal", "ts": 0}
+    # no size, market entry: both buy and sell 1% fees -> mark floor (1.05+0.01)/0.99
+    assert abs(trail_net_floor_price(c.s, o) - 1.06 / 0.99) < 1e-12
+    assert not trail_net_ok(c.s, o, 1.05)
+    assert trail_net_ok(c.s, o, 1.06 / 0.99)
+    # chain cost basis: only the sell fee, 1.05/0.99
+    o_ch = {**o, "entry_src": "chain", "lamports": 10**9}
+    # lamports is swap input, sol_in = buy_cost (1 SOL + 1% fee, no tip)
+    assert trail_sol_in(c.s, o_ch) > 1.0
+    assert trail_net_ok(c.s, o_ch, trail_net_floor_price(c.s, o_ch))
+    assert not trail_net_ok(c.s, o_ch, 1.05)
+    # -50% stop still fires while holding a gap under the net floor
+    r, peak, armed = desk_trail_check(c.s, o, 0.50, 10)
+    assert r == DESK_STOP and peak == 1.21 and armed
+
+
+def test_bounce_above_higher_trail_line_keeps_trailing():
+    c, _ = make_ctx(**{"risk.trail_start_pct": 20, "risk.trail_pct": 20, "risk.stop_pct": 50,
+                       "risk.trail_floor_pct": 5, "gmgn.fee_pct": 0, "gmgn.priority_fee_sol": 0,
+                       "gmgn.tip_fee_sol": 0})
+    o = {"entry_price": 1.0, "peak": 1.39, "exits_phase": "normal", "ts": 0}
+    trig = trail_trigger(c.s, 1.0, 1.39, floor=trail_net_floor_price(c.s, o))
+    assert trig > 1.05
+    assert desk_trail_check(c.s, o, 0.90, 10)[0] is None and desk_trail_check(c.s, o, 0.90, 10)[2]
+    # bounced well above the 20% trail line: do not sell, keep the peak
+    r, peak, armed = desk_trail_check(c.s, o, 1.25, 10, below_floor=True)
+    assert r is None and peak == 1.39 and armed
+    assert desk_trail_check(c.s, o, trig, 10, below_floor=True)[0] == DESK_TRAIL
+
+
+def test_sell_quote_under_net_floor_holds(monkeypatch):
+    c, clock, t, fc = _promoted_limit(monkeypatch)
+    fc.plan_blocked = False
+    _tick(t, clock, 1.30)
+    floor_px = trail_net_floor_price(c.s, _row(c))
+    sol_in = trail_sol_in(c.s, _row(c))
+    assert sol_in and sol_in > 0
+
+    async def cheap_quote(input_token, output_token, amount, slippage):
+        fc.calls.append(("quote", (input_token, output_token, amount, slippage)))
+        # well under +5% net
+        return {"output_amount": str(int(sol_in * 1.01 * 1e9)), "min_output_amount": "1"}
+    fc.quote = cheap_quote
+    _tick(t, clock, floor_px)
+    assert not _sells(fc)
+    assert _row(c)["id"] in t._trail_armed and _row(c)["id"] in t._trail_below_floor
+
+    async def good_quote(input_token, output_token, amount, slippage):
+        fc.calls.append(("quote", (input_token, output_token, amount, slippage)))
+        return {"output_amount": str(int(sol_in * 1.06 * 1e9)), "min_output_amount": "1"}
+    fc.quote = good_quote
+    _tick(t, clock, floor_px)
+    assert len(_sells(fc)) == 1 and _row(c)["exit_reason"] == DESK_TRAIL

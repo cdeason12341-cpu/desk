@@ -148,7 +148,7 @@ def exits_text(s, phase=None) -> str:
     if phase is None:
         phase = "grace" if grace_active(s) else "normal"
     trail = (f"take-profit trail from +{s['risk.trail_start_pct']:g}%, "
-             f"never below +{s['risk.trail_floor_pct']:g}% (desk)")
+             f"never below +{s['risk.trail_floor_pct']:g}% net after fees (desk)")
     if phase == "grace" and grace_active(s):
         return f"{exits_label(s, 'grace')} · trail {s['risk.trail_pct']:g}% after grace · {trail}"
     return f"stop -{s['risk.stop_pct']:g}% · trail {s['risk.trail_pct']:g}% · {trail}"
@@ -491,15 +491,16 @@ def check_paper_caps(s, db, night, size_usd) -> None:
         raise CapError(f"paper free ${paper_free_usd(s, db):,.2f} can't cover ${size_usd:,.2f}")
 
 
-def sim_exit(s, o, price, now):
+def sim_exit(s, o, price, now, below_floor=False):
     """PAPER mirror of the server-side exits + the desk timeout. Returns (reason|None, peak).
-    During grace: only the steep hard stop and the take-profit trail; no drawdown trail."""
+    During grace: only the steep hard stop and the take-profit trail; no drawdown trail.
+    The take-profit trail never sells when expected net SOL is under the floor (DECISION 81)."""
     entry = o["entry_price"]; peak = max(o["peak"] or entry, price)
     phase = "grace" if (o.get("exits_phase") or "") == "grace" and not grace_due(s, o, now, price) else "normal"
     stop = s["risk.grace_stop_pct"] if phase == "grace" else s["risk.stop_pct"]
     if price <= entry * (1 - stop / 100.0):
         return "loss_stop", peak
-    if peak >= entry * (1 + s["risk.trail_start_pct"] / 100.0) and price <= trail_trigger(s, entry, peak):
+    if trail_should_sell(s, o, price, peak, below_floor=below_floor):
         return "profit_stop_trace", peak
     if phase != "grace" and price <= peak * (1 - s["risk.trail_pct"] / 100.0):
         return "loss_stop_trace", peak
@@ -541,14 +542,150 @@ def limit_stop_only(o) -> bool:
 
 
 def trail_floor_price(s, entry) -> float:
-    """Lowest price the take-profit trail may sell at: entry * (1 + risk.trail_floor_pct/100)."""
+    """Mark-price floor only (no fees): entry * (1 + risk.trail_floor_pct/100). Prefer trail_net_floor_price."""
     return float(entry) * (1 + float(s["risk.trail_floor_pct"] or 0) / 100.0)
 
 
-def trail_trigger(s, entry, peak) -> float:
-    """Armed-trail sell price: trail_pct below the peak, but never below the profit floor."""
+def trail_trigger(s, entry, peak, floor=None) -> float:
+    """Armed-trail sell price: trail_pct below the peak, but never below `floor` (net floor if provided)."""
     raw = float(peak) * (1 - float(s["risk.trail_pct"]) / 100.0)
-    return max(raw, trail_floor_price(s, entry))
+    fl = trail_floor_price(s, entry) if floor is None else float(floor)
+    return max(raw, fl)
+
+
+def _trail_audit(o) -> dict:
+    raw = o.get("audit") if o else None
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return {}
+
+
+def _trail_adopted(o) -> bool:
+    if "adopted" in (o.get("reason") or "") or "adopted" in (o.get("repair") or ""):
+        return True
+    return bool(_trail_audit(o).get("adopted"))
+
+
+def _trail_chain_basis(o) -> bool:
+    """True when entry_price is a cost basis (SOL spent / tokens), so buy fees are already in it."""
+    return (o.get("entry_src") == "chain") or _trail_adopted(o)
+
+
+def trail_sol_in(s, o) -> float | None:
+    """SOL spent on the buy, fees and rent included. None if we cannot estimate."""
+    au = _trail_audit(o)
+    try:
+        if au.get("sol_lamports"):
+            return int(au["sol_lamports"]) / LAMPORTS
+    except (TypeError, ValueError):
+        pass
+    try:
+        lam = int(o.get("lamports") or 0)
+    except (TypeError, ValueError):
+        lam = 0
+    if lam <= 0:
+        return None
+    if _trail_adopted(o):
+        return lam / LAMPORTS          # adopted lamports is the wallet's full debit
+    return buy_cost_lamports(s, lam) / LAMPORTS
+
+
+def trail_expected_sol_out(s, o, price, quote_sol_out=None) -> float | None:
+    """Expected SOL received from selling the whole position at `price`, or from a GMGN sell quote.
+    Quote output_amount (in SOL) is preferred because it includes impact. Without a quote: mark
+    proceeds minus gmgn.fee_pct and the sell priority+tip. Does not assume the 25% max sell
+    slippage (that is only the tx limit). None if we cannot estimate."""
+    if quote_sol_out is not None:
+        q = float(quote_sol_out)
+        return q if q > 0 else None
+    entry = o.get("entry_price")
+    if not entry or entry <= 0 or not price or price <= 0:
+        return None
+    fee = float(s["gmgn.fee_pct"] or 0) / 100.0
+    tip = fee_lamports(s) / LAMPORTS
+    if _trail_chain_basis(o):
+        sol_in = trail_sol_in(s, o)
+        if not sol_in:
+            return None
+        return sol_in * (float(price) / float(entry)) * (1 - fee) - tip
+    try:
+        input_sol = int(o.get("lamports") or 0) / LAMPORTS
+    except (TypeError, ValueError):
+        input_sol = 0
+    if input_sol > 0 and not _trail_adopted(o):
+        return input_sol * (float(price) / float(entry)) * (1 - fee) - tip
+    return None
+
+
+def trail_net_ok(s, o, price, quote_sol_out=None) -> bool:
+    """True when expected sol_out / sol_in is at least 1 + trail_floor_pct/100 (DECISION 81)."""
+    floor = 1 + float(s["risk.trail_floor_pct"] or 0) / 100.0
+    sol_in = trail_sol_in(s, o)
+    sol_out = trail_expected_sol_out(s, o, price, quote_sol_out=quote_sol_out)
+    if sol_in and sol_out is not None:
+        return sol_out + 1e-12 >= sol_in * floor
+    entry = o.get("entry_price")
+    if not entry or entry <= 0 or not price or price <= 0:
+        return False
+    fee = float(s["gmgn.fee_pct"] or 0) / 100.0
+    if fee >= 1:
+        return False
+    if _trail_chain_basis(o):
+        return (float(price) / float(entry)) * (1 - fee) + 1e-12 >= floor
+    # no size: buy + sell fee_pct, same shape as paper _pnl (tips unknown)
+    return (float(price) / float(entry)) * (1 - fee) - fee + 1e-12 >= floor
+
+
+def trail_net_floor_price(s, o) -> float | None:
+    """Lowest mark price at which the estimated net meets the floor. None if not computable."""
+    entry = o.get("entry_price")
+    if not entry or entry <= 0:
+        return None
+    floor = 1 + float(s["risk.trail_floor_pct"] or 0) / 100.0
+    fee = float(s["gmgn.fee_pct"] or 0) / 100.0
+    if fee >= 1:
+        return None
+    tip = fee_lamports(s) / LAMPORTS
+    sol_in = trail_sol_in(s, o)
+    if _trail_chain_basis(o):
+        tip_frac = (tip / sol_in) if sol_in else 0.0
+        return float(entry) * (floor + tip_frac) / (1 - fee)
+    try:
+        input_sol = int(o.get("lamports") or 0) / LAMPORTS
+    except (TypeError, ValueError):
+        input_sol = 0
+    if input_sol > 0 and sol_in and not _trail_adopted(o):
+        return float(entry) * (floor * sol_in + tip) / (input_sol * (1 - fee))
+    return float(entry) * (floor + fee) / (1 - fee)
+
+
+def trail_should_sell(s, o, price, peak, below_floor=False, quote_sol_out=None) -> bool:
+    """Armed-trail sell decision (DECISION 81). Never sells the take when expected net is under the
+    floor. A poll below the net floor does not sell; the trail stays armed with its peak. It sells
+    later when price is in [net floor, trigger], or when price has recovered to the net floor after
+    a gap (bounce exit) and the trigger is the floor itself. A strong bounce back above a higher
+    trail line keeps trailing. quote_sol_out, when given, is the source of truth for the net."""
+    entry = o.get("entry_price")
+    if not entry or entry <= 0 or not price or price <= 0 or not peak:
+        return False
+    if float(peak) < float(entry) * (1 + float(s["risk.trail_start_pct"]) / 100.0):
+        return False
+    floor_px = trail_net_floor_price(s, o)
+    if floor_px is None:
+        return False
+    if quote_sol_out is None and price < floor_px:
+        return False
+    if not trail_net_ok(s, o, price, quote_sol_out=quote_sol_out):
+        return False
+    trigger = trail_trigger(s, entry, peak, floor=floor_px)
+    if price <= trigger:
+        return True
+    if below_floor and trigger <= floor_px * (1 + 1e-12):
+        return True
+    return False
 
 
 def has_profit_stop_trace(o) -> bool:
@@ -560,13 +697,13 @@ def has_profit_stop_trace(o) -> bool:
     return any((c or {}).get("order_type") == "profit_stop_trace" for c in conds)
 
 
-def desk_trail_check(s, o, price, now, peak=None):
+def desk_trail_check(s, o, price, now, peak=None, below_floor=False, quote_sol_out=None):
     """One price sample for an open LIVE A position. Returns (reason|None, peak, armed).
-    Peak = highest price seen since the buy (row peak, kept by the watcher too). Armed once peak >= entry *
-    (1 + risk.trail_start_pct). Armed + price <= trail_trigger (max of peak*(1-trail_pct) and
-    entry*(1+trail_floor_pct)) -> 'desk trail'. The trail never sells below the floor (DECISION 80).
-    Backup hard stop at -stop_pct (-grace_stop_pct inside an order's grace window) -> 'desk stop'.
-    All values read live from settings on every call."""
+    Peak = highest price seen since the buy. Armed once peak >= entry * (1 + risk.trail_start_pct).
+    The take-profit trail sells only when expected net SOL (after sell fee, priority/tip, and a
+    GMGN quote's impact when provided) is at least +trail_floor_pct vs SOL spent (DECISION 81).
+    A poll under the net floor does not sell; peak and armed stay. Backup hard stop at -stop_pct
+    (-grace_stop_pct inside grace) is unchanged and can still sell at a loss. All values live."""
     entry = o["entry_price"]
     peak = max(peak if peak is not None else (o.get("peak") or entry), price)
     in_grace = (o.get("exits_phase") or "") == "grace" and not grace_due(s, o, now, price)
@@ -574,7 +711,7 @@ def desk_trail_check(s, o, price, now, peak=None):
     armed = peak >= entry * (1 + float(s["risk.trail_start_pct"]) / 100.0)
     if price <= entry * (1 - stop / 100.0):
         return DESK_STOP, peak, armed
-    if armed and price <= trail_trigger(s, entry, peak):
+    if trail_should_sell(s, o, price, peak, below_floor=below_floor, quote_sol_out=quote_sol_out):
         return DESK_TRAIL, peak, armed
     return None, peak, armed
 
@@ -650,6 +787,7 @@ class GmgnTrader:
         self._trail_retry: dict = {}     # order id -> earliest retry after a failed desk-trail sell
         self._trail_peak: dict = {}      # order id -> trail peak (in memory; seeded from the row on first sight)
         self._strip_retry: dict = {}     # order id -> earliest retry after a failed profit_stop_trace strip
+        self._trail_below_floor: set = set()  # armed ids last seen under the net floor (DECISION 81 bounce)
         self.fast = None                 # fastprice.FastPrice for LIVE exit watchers (DECISION 57), set by main.Desk
         self._settling: set = set()      # order ids with a settle/exit-attach in progress (watcher must not race it)
         self._grace_extended: set = set()  # order ids holding the grace stop past the window (DECISION 65)
@@ -1387,7 +1525,7 @@ class GmgnTrader:
         else:
             head = f"GMGN · {self._tag(o)}{o['name']}: {s['risk.grace_min']:g} min grace over · stop -{s['risk.stop_pct']:g}%"
         trail = (f"take-profit trail {s['risk.trail_pct']:g}% from +{s['risk.trail_start_pct']:g}%, "
-                 f"never below +{s['risk.trail_floor_pct']:g}%, runs from my computer")
+                 f"never below +{s['risk.trail_floor_pct']:g}% net after fees, runs from my computer")
         if new_type == "limit_order":
             return f"{head} live on GMGN · {trail}"
         return f"{head} · {trail}"
@@ -1761,8 +1899,15 @@ class GmgnTrader:
             o = {**o, "exits_phase": "normal"}
         if liq is not None and float(liq) <= 0:
             return await self._paper_close(o, "pulled", o["last_price"] or price, now)
-        reason, peak = sim_exit(self.s, o, price, now)
-        self._upd(o["id"], peak=peak, last_price=price, last_liq=liq)
+        oid = o["id"]
+        reason, peak = sim_exit(self.s, o, price, now, below_floor=oid in self._trail_below_floor)
+        self._upd(oid, peak=peak, last_price=price, last_liq=liq)
+        floor_px = trail_net_floor_price(self.s, o)
+        armed = peak >= o["entry_price"] * (1 + float(self.s["risk.trail_start_pct"]) / 100.0)
+        if reason == "profit_stop_trace":
+            self._trail_below_floor.discard(oid)
+        elif armed and floor_px is not None and price < floor_px:
+            self._trail_below_floor.add(oid)
         if reason:
             await self._paper_close(o, reason, price, now)
 
@@ -2074,14 +2219,14 @@ class GmgnTrader:
 
     async def trail_once(self, pairs=None) -> int:
         """One price check on every open LIVE A position. Returns how many. The take-profit trail
-        runs on the desk with the profit floor (DECISION 80), including positions that still have a
-        server-side hard stop or drawdown trail."""
+        runs on the desk and only sells at a +trail_floor_pct net after fees (DECISION 81)."""
         rows = self._trail_rows()
         ids = {r["id"] for r in rows}
-        for k in list(self._trail_armed | self._trail_seen | set(self._trail_retry) | set(self._trail_peak)):
+        for k in list(self._trail_armed | self._trail_seen | set(self._trail_retry) | set(self._trail_peak)
+                      | self._trail_below_floor):
             if k not in ids:
                 self._trail_armed.discard(k); self._trail_seen.discard(k); self._trail_retry.pop(k, None)
-                self._trail_peak.pop(k, None)
+                self._trail_peak.pop(k, None); self._trail_below_floor.discard(k)
         if not rows:
             return 0
         px = await self.exit_prices(rows, pairs)
@@ -2093,31 +2238,86 @@ class GmgnTrader:
                 continue
             price, src = px[o["id"]]
             if o["id"] not in self._trail_seen:
-                # First sight (new position, restart, or newly limit-stop-only): never sell on a stale peak. If price is
-                # already under the trail line from the row's old peak, the trail restarts from the current price.
+                # First sight: never surprise-sell on a stale peak at or above the net floor (restart from now).
+                # Under the net floor: keep the peak, stay armed, wait for a bounce (DECISION 81).
                 self._trail_seen.add(o["id"])
                 seed = max(o.get("peak") or o["entry_price"], price)
                 note = ""
-                if price <= trail_trigger(s, o["entry_price"], seed):
+                floor_px = trail_net_floor_price(s, o)
+                if floor_px is not None and price < floor_px:
+                    note = (f"price {price:.10g} under net floor {floor_px:.10g}: holding, peak kept")
+                    if seed >= o["entry_price"] * (1 + float(s["risk.trail_start_pct"]) / 100.0):
+                        self._trail_below_floor.add(o["id"])
+                elif price <= trail_trigger(s, o["entry_price"], seed, floor=floor_px):
                     note = f"old peak {seed:.10g} already {100 * (1 - price / seed):.1f}% back: trail restarts from now"
                     seed = price
                 self._trail_peak[o["id"]] = seed
                 self._log("LIVE", o["mint"], "desk trail watching", f"#{o['id']}", f"entry={o['entry_price']:.10g}",
                           f"price={price:.10g}", f"peak={seed:.10g}", f"start=+{s['risk.trail_start_pct']:g}%",
-                          f"trail={s['risk.trail_pct']:g}%", f"floor=+{s['risk.trail_floor_pct']:g}%", f"src={src}", note)
-            reason, peak, armed = desk_trail_check(s, o, price, now, peak=self._trail_peak.get(o["id"]))
+                          f"trail={s['risk.trail_pct']:g}%", f"floor=+{s['risk.trail_floor_pct']:g}% net",
+                          f"src={src}", note)
+            reason, peak, armed = desk_trail_check(s, o, price, now, peak=self._trail_peak.get(o["id"]),
+                                                   below_floor=o["id"] in self._trail_below_floor)
             self._trail_peak[o["id"]] = peak
             if peak > (o.get("peak") or 0):
                 self._upd(o["id"], peak=peak)
             if armed and o["id"] not in self._trail_armed:
                 self._trail_armed.add(o["id"])
+                floor_px = trail_net_floor_price(s, o)
                 self._log("LIVE", o["mint"], "desk trail armed", f"#{o['id']}", f"peak={peak:.10g}",
                           f"+{100 * (peak / o['entry_price'] - 1):.1f}%",
-                          f"sell_below={trail_trigger(s, o['entry_price'], peak):.10g}")
+                          f"sell_below={trail_trigger(s, o['entry_price'], peak, floor=floor_px):.10g}")
+            floor_px = trail_net_floor_price(s, o)
+            if reason == DESK_TRAIL and now >= self._trail_retry.get(o["id"], 0):
+                qsol = await self._trail_sell_quote_sol(o)
+                if qsol is not None and not trail_net_ok(s, o, price, quote_sol_out=qsol):
+                    self._log("LIVE", o["mint"], "desk trail hold", f"#{o['id']}",
+                              f"quote {qsol:.6f} SOL under net floor")
+                    reason = None
+                    if armed:
+                        self._trail_below_floor.add(o["id"])
+                else:
+                    self._trail_below_floor.discard(o["id"])
+            elif armed and floor_px is not None and price < floor_px:
+                self._trail_below_floor.add(o["id"])
+            elif reason != DESK_TRAIL and floor_px is not None and price >= floor_px and o["id"] in self._trail_below_floor:
+                # recovered above a higher trail line: keep the dipped flag only if we still need the bounce exit
+                pass
             if reason and now >= self._trail_retry.get(o["id"], 0):
                 self._trail_src = src
                 await self.desk_sell(o, reason, price, peak, now)
         return len(rows)
+
+    async def _trail_sell_quote_sol(self, o) -> float | None:
+        """Expected SOL out for a 100% sell, from a GMGN quote. None if no client, no size, or the quote fails.
+        A failed quote does not block a sell — the fee estimate is used instead."""
+        if self.client is None or not hasattr(self.client, "quote"):
+            return None
+        try:
+            amount = await self.token_balance(o["mint"])
+        except Exception:
+            amount = None
+        if not amount:
+            au = _trail_audit(o)
+            try:
+                amount = int(au["tok_raw"]) if au.get("tok_raw") else None
+            except (TypeError, ValueError):
+                amount = None
+        if not amount:
+            return None
+        try:
+            q = await self.client.quote(o["mint"], SOL, int(amount), max(int(self.s["gmgn.slippage_pct"]), 25))
+            out = int(float((q or {}).get("output_amount") or 0))
+        except Exception:
+            return None
+        if out <= 0:
+            return None
+        sol = out / LAMPORTS
+        sol_in = trail_sol_in(self.s, o)
+        # Ignore a stub / probe quote (e.g. FakeClient's 123 lamports, or a $1 price probe).
+        if sol_in and sol < sol_in * 0.1:
+            return None
+        return sol
 
     async def desk_sell(self, o, reason, price, peak, now):
         """Market-sell 100% for the desk trail / desk backup stop. Same guards as the surge sell: never a second
