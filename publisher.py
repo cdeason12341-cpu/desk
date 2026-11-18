@@ -11,6 +11,7 @@ DATA = ROOT / "data"
 REPO = "cdeason12341-cpu/desk"
 DEBOUNCE_S = 20
 MAX_COIN_FILES = 150
+FEED_SRC_LIMIT = 300             # feed(): newest rows read per source table (the feed keeps the newest 100 overall)
 PUBLISH_TIMEOUT_S = 90
 SH_TIMEOUT_S = 45
 WAIT_IDLE_S = 45
@@ -405,10 +406,12 @@ class Builder:
 
         items = []
         # entered the waiting room (first seen tonight)
-        for r in c.db.rows("SELECT mint,name,symbol,first_seen FROM coins WHERE night=? AND first_seen IS NOT NULL", (n,)):
+        # only the newest FEED_SRC_LIMIT rows of each source can reach the newest-100 list (was: every row tonight)
+        lim = FEED_SRC_LIMIT
+        for r in c.db.rows("SELECT mint,name,symbol,first_seen FROM coins WHERE night=? AND first_seen IS NOT NULL ORDER BY first_seen DESC LIMIT ?", (n, lim)):
             items.append(item(r["first_seen"], r["mint"], {"name": r["name"], "symbol": r["symbol"]},
                               stage="room", outcome="waiting", reason="waiting room"))
-        for r in c.db.rows("SELECT ts,mint,verdict,reason,json FROM scans WHERE night=?", (n,)):
+        for r in c.db.rows("SELECT ts,mint,verdict,reason,json FROM scans WHERE night=? AND verdict IN ('kill','pass','recheck') ORDER BY ts DESC LIMIT ?", (n, lim)):
             b = body_of(r)
             reason = r["reason"] or b.get("reason")
             nchk = recheck_n(reason, b)
@@ -424,7 +427,7 @@ class Builder:
                                   stage="room" if waiting else "recheck",
                                   outcome="waiting" if waiting else "recheck",
                                   reason=reason, recheckN=nchk))
-        for r in c.db.rows("SELECT ts,mint,passed,reason,layer,json FROM audits WHERE night=?", (n,)):
+        for r in c.db.rows("SELECT ts,mint,passed,reason,layer,json FROM audits WHERE night=? ORDER BY ts DESC LIMIT ?", (n, lim)):
             b = body_of(r)
             layers = b.get("layers") if isinstance(b.get("layers"), list) else []
             fail = next((L for L in layers if isinstance(L, dict) and L.get("pass") is False), None)
@@ -442,7 +445,7 @@ class Builder:
                                   reason=r["reason"] or (fail or {}).get("value"),
                                   layer=layer, layerName=layer_name, passed=False))
         ov = self._ov_ctx()
-        for r in c.db.rows("SELECT * FROM analyses WHERE night=?", (n,)):
+        for r in c.db.rows("SELECT * FROM analyses WHERE night=? ORDER BY ts DESC LIMIT ?", (n, lim)):
             b = body_of(r)
             ans = b.get("answers") if isinstance(b.get("answers"), dict) else {}
             failed = b.get("failed")

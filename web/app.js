@@ -167,7 +167,7 @@
   const LIVE_URL = "https://165-227-20-72.sslip.io/live/v1/bundle", LIVE_S = 2, LIVE_TIMEOUT_MS = 4000, LIVE_RETRY_MS = 30000;
   const L = { boot: null, seq: {}, heavyAt: 0, builtAtMs: 0, okAt: 0, failAt: 0, src: null, bearer: null, bearerFor: null };
   window.__deskLive = L;
-  // small files every poll; the big, constantly changing ones only for the view on screen (+ all of them every 30s)
+  // small files every poll; the big, constantly changing ones only for the view on screen (+ all of them every 2 min)
   const LIGHT = ["state.json", "chart.json", "activity.json", "account.json", "scores.json", "trades.json", "strat_b.json", "strat_feed.json"];
   const HEAVY_ALL = ["feed.json", "scanner.json", "strat_b_live.json", ...AGENTS.map(a => `agents/${a}.json`)];
   const VIEW_HEAVY = { alive: ["feed.json"], scores: ["feed.json"], scanner: ["scanner.json"], bwatch: ["strat_b_live.json"],
@@ -180,7 +180,7 @@
     return L.bearer;
   }
   async function fetchLive(view, coin) {
-    const all = !S.files["feed.json"] || Date.now() - L.heavyAt > 30000;
+    const all = !S.files["feed.json"] || Date.now() - L.heavyAt > 120000;
     const want = LIGHT.concat(all ? HEAVY_ALL : (VIEW_HEAVY[view] || []));
     const q = new URLSearchParams();
     if (L.boot) q.set("b", L.boot);
