@@ -23,6 +23,11 @@ ACTIVE = ("submitting", "pending", "open", "exiting")          # count toward ca
 COUNTED = ACTIVE + ("closed", "unknown")                        # tickets used tonight
 GATE_RULE = "LIVE gate: 1 full PAPER night -> 2h PAPER, user request 2026-11-14 5:42 PM CT"
 
+PENDING_ADOPTS_META = "gmgn_pending_adopts"   # DECISION 78: one-shot break-even watches; survives restarts
+PENDING_ADOPT_POLL_S = 10.0                    # price check cadence while a pending adopt is armed
+
+
+
 
 class CapError(RuntimeError):
     pass
@@ -1435,18 +1440,261 @@ class GmgnTrader:
                         f"market-sell. Open GMGN and sell it yourself now.", kind="gmgn_alert", mint=o["mint"])
         return {"status": "open", "promote": "failed"}
 
+
+    # ---- one-shot break-even adoption of a manual wallet buy (DECISION 78)
+    def pending_adopts(self) -> list:
+        v = self.c.db.meta(PENDING_ADOPTS_META, []) or []
+        return v if isinstance(v, list) else []
+
+    def set_pending_adopts(self, rows: list):
+        self.c.db.set_meta(PENDING_ADOPTS_META, list(rows or []))
+
+    def queue_pending_adopt(self, mint, name, symbol, sigs, **extra) -> dict:
+        """Persist a one-shot watch: adopt into A LIVE when price is back at entry. Does not touch the position."""
+        rows = [r for r in self.pending_adopts() if r.get("mint") != mint]
+        rec = {"mint": mint, "name": name, "symbol": symbol, "sigs": list(sigs or []),
+               "created_at": self.c.clock(), "notified": False}
+        rec.update(extra)
+        rec["mint"], rec["name"], rec["symbol"], rec["sigs"] = mint, name, symbol, list(sigs or [])
+        rows.append(rec)
+        self.set_pending_adopts(rows)
+        return rec
+
+    def _loop_wait_s(self) -> float:
+        wait = float(self.s["risk.poll_s"])
+        if self.pending_adopts():
+            wait = min(wait, PENDING_ADOPT_POLL_S)
+        return wait
+
+    def _pending_drop(self, mint):
+        self.set_pending_adopts([r for r in self.pending_adopts() if r.get("mint") != mint])
+
+    def _pending_save(self, rec):
+        rows = [r for r in self.pending_adopts() if r.get("mint") != rec["mint"]]
+        rows.append(rec)
+        self.set_pending_adopts(rows)
+
+    async def _pending_legs(self, rec):
+        if rec.get("legs"):
+            return rec["legs"]
+        legs = []
+        for sig in rec.get("sigs") or []:
+            d = await chain.tx_delta(self.c.net, sig, MAIN_WALLET, rec["mint"], self._txc)
+            if not d or d["err"] or d["tok"] <= 0 or d["sol"] >= 0:
+                return None
+            legs.append({"sig": d.get("sig") or sig, "ts": d["ts"], "sol": d["sol"], "tok": d["tok"],
+                         "dec": d.get("dec") or 6})
+        return legs or None
+
+    async def _freeze_pending(self, rec) -> dict | None:
+        """Fill entry_price / size_usd from the buy legs and the desk's SOL price. None = try again later."""
+        if rec.get("entry_price") and rec.get("size_usd") and rec.get("lamports") and rec.get("tok_raw"):
+            return rec
+        legs = await self._pending_legs(rec)
+        if not legs:
+            return None
+        sol_usd = rec.get("sol_usd") or await self.sol_usd()
+        if not sol_usd:
+            return None
+        tok = int(sum(l["tok"] for l in legs))
+        lam = int(-sum(l["sol"] for l in legs))
+        dec = int(legs[0].get("dec") or 6)
+        ts = min((l.get("ts") or 0) for l in legs)
+        entry = chain.result({"sol": -lam, "tok": tok, "dec": dec}, [], sol_usd)["entry_price"]
+        size = round(lam / LAMPORTS * sol_usd, 2)
+        entry_mc = rec.get("entry_mc")
+        if entry_mc is None:
+            try:
+                r = await self.c.net.rpc("getTokenSupply", [rec["mint"]])
+                supply_ui = float((r or {}).get("value", {}).get("uiAmount") or 0) or None
+                if entry and supply_ui:
+                    entry_mc = round(entry * supply_ui, 2)
+            except Exception:
+                pass
+        rec = {**rec, "legs": legs, "tok_raw": tok, "lamports": lam, "dec": dec,
+               "sol_usd": sol_usd, "entry_price": entry, "size_usd": size,
+               "entry_mc": entry_mc, "opened_at": rec.get("opened_at") or (float(ts) if ts else self.c.clock())}
+        return rec
+
+    async def _pending_prices(self, mints, prices=None) -> dict:
+        """{mint: price_usd} from the caller (tests), else the desk's existing exit quote path. No new API family."""
+        if prices is not None:
+            return {m: float(prices[m]) for m in mints if m in prices and prices[m]}
+        mints = list(mints)
+        if not mints:
+            return {}
+        if self.fast is not None:
+            got = await self.fast.prices(mints)
+            return {m: float(p) for m, (p, _src) in got.items() if p}
+        from agents.scanner import pick_pair
+        import fields
+        pairs = await self.c.net.dex_tokens(sorted(set(mints)))
+        out = {}
+        for m in mints:
+            pair = pick_pair(pairs, m)
+            v = fields.get(pair, "priceUsd") if pair else None
+            if v:
+                out[m] = float(v)
+        return out
+
+    async def check_pending_adopts(self, prices=None):
+        """One-shot watches: adopt at break-even, or cancel if the owner already sold. Never touches the bag before then."""
+        rows = self.pending_adopts()
+        if not rows:
+            return
+        px = await self._pending_prices([r["mint"] for r in rows], prices=prices)
+        for rec in list(self.pending_adopts()):
+            await self._tick_pending_adopt(rec, px)
+
+    async def _tick_pending_adopt(self, rec, px: dict):
+        mint, symbol = rec["mint"], rec.get("symbol") or rec.get("name") or "coin"
+        frozen = await self._freeze_pending(rec)
+        if frozen is None:
+            return
+        rec = frozen
+        self._pending_save(rec)
+        if not rec.get("notified"):
+            await self.push(
+                f"Desk · watching {symbol}, Strat A protection at break even (${rec['size_usd']:,.2f})",
+                kind="info", mint=mint)
+            rec = {**rec, "notified": True}
+            self._pending_save(rec)
+        bal = await chain.token_balance(self.c.net, MAIN_WALLET, mint)
+        if bal is None:
+            return
+        if bal < max(1, int((rec.get("tok_raw") or 0) * 0.01)):
+            self._pending_drop(mint)
+            await self.push(f"Desk · {symbol} watch cancelled (sold)", kind="info", mint=mint)
+            self._log("LIVE", mint, "pending adopt cancelled (sold)")
+            return
+        price = px.get(mint)
+        if price is None or price < rec["entry_price"]:
+            return
+        r = await self.adopt(mint, rec.get("name") or symbol, symbol, rec.get("sigs") or [],
+                             note=rec.get("note") or "adopted manual buy", pending=rec)
+        if r.get("status") == "open":
+            self._pending_drop(mint)
+            await self.push(f"Strat A · {symbol} back to break even, now protected", kind="gmgn", mint=mint)
+            self._log("LIVE", mint, "pending adopt filled", f"#{r.get('id')}", f"px={price:.10g}")
+        elif r.get("status") == "refused" and "no longer holds" in (r.get("reason") or ""):
+            self._pending_drop(mint)
+            await self.push(f"Desk · {symbol} watch cancelled (sold)", kind="info", mint=mint)
+        else:
+            self._log("LIVE", mint, "pending adopt retry", r.get("reason") or r.get("status"))
+
+    async def adopt(self, mint, name, symbol, sigs, *, note=None, pending=None) -> dict:
+        """Adopt a manual wallet buy into A LIVE, same shape as gmgn_orders #62 Dior (DECISION 78).
+        Real entry from the buy tx(s) (or a frozen pending-adopt snapshot), a GMGN limit_order stop at
+        -risk.stop_pct for 100% of the tokens held now, desk trail / surge as normal A exits. No grace
+        window. Does not spend new SOL and does not change modes, caps, or settings."""
+        if self.client is None:
+            return {"status": "refused", "reason": "GMGN client not configured"}
+        held_by = mint_held_live(self.c.db, mint)
+        if held_by:
+            return {"status": "refused", "reason": f"already held by {held_by} LIVE in the wallet"}
+        if pending and pending.get("entry_price") and pending.get("lamports") and pending.get("tok_raw"):
+            legs = pending.get("legs") or []
+            if not legs:
+                legs = await self._pending_legs({"mint": mint, "sigs": sigs, "legs": pending.get("legs")})
+                if not legs:
+                    return {"status": "refused", "reason": "no buy signature"}
+            tok, lam, dec = int(pending["tok_raw"]), int(pending["lamports"]), int(pending.get("dec") or legs[0].get("dec") or 6)
+            sol_usd, entry = float(pending["sol_usd"]), float(pending["entry_price"])
+            size = float(pending["size_usd"])
+            ts = pending.get("opened_at") or min((l.get("ts") or 0) for l in legs) or self.c.clock()
+            entry_mc = pending.get("entry_mc")
+        else:
+            if not sigs:
+                return {"status": "refused", "reason": "no buy signature"}
+            legs = []
+            for sig in sigs:
+                d = await chain.tx_delta(self.c.net, sig, MAIN_WALLET, mint, self._txc)
+                if not d or d["err"] or d["tok"] <= 0 or d["sol"] >= 0:
+                    return {"status": "refused", "reason": f"buy tx is not a wallet buy of this mint ({sig[:8]})"}
+                legs.append(d)
+            legs.sort(key=lambda l: l["ts"] or 0)
+            tok, lam = sum(l["tok"] for l in legs), -sum(l["sol"] for l in legs)
+            ts = min((l["ts"] or 0) for l in legs)
+            dec = legs[0].get("dec") or 6
+            sol_usd = await self.sol_usd()
+            if not sol_usd:
+                return {"status": "refused", "reason": "no SOL price from GMGN"}
+            entry = chain.result({"sol": -lam, "tok": tok, "dec": dec}, [], sol_usd)["entry_price"]
+            size = round(lam / LAMPORTS * sol_usd, 2)
+            entry_mc = None
+            try:
+                r = await self.c.net.rpc("getTokenSupply", [mint])
+                supply_ui = float((r or {}).get("value", {}).get("uiAmount") or 0) or None
+                if entry and supply_ui:
+                    entry_mc = round(entry * supply_ui, 2)
+            except Exception:
+                pass
+        bal = await chain.token_balance(self.c.net, MAIN_WALLET, mint)
+        if bal is None:
+            return {"status": "refused", "reason": "wallet balance unknown"}
+        if bal < max(1, int(tok * 0.01)):
+            return {"status": "refused", "reason": "wallet no longer holds the bought tokens"}
+        stop_pct = float(self.s["risk.stop_pct"])
+        existing = []
+        for tag in ("STMix", "LimitOrder"):
+            try:
+                d = await self.client.strategy_orders(base_token=mint, kind="open", group_tag=tag)
+            except TypeError:
+                d = await self.client.strategy_orders(base_token=mint, kind="open")
+            existing += [x for x in (d or {}).get("list") or []
+                         if (x.get("base_token") or x.get("token_address")) == mint
+                         and (x.get("order_id") or x.get("id"))]
+        if existing:
+            sid = existing[0].get("order_id") or existing[0].get("id")
+            repair = "adopted manual buy; existing GMGN strategy"
+        else:
+            body = stop_strategy_body(self.s, mint, entry, sol_usd, bal, stop_pct=stop_pct)
+            try:
+                r = await self.client.strategy_create(body)
+            except Exception as e:
+                self._log("LIVE adopt stop failed", mint, str(e)[:200])
+                return {"status": "refused", "reason": f"could not create GMGN stop: {str(e)[:160]}"}
+            sid = (r or {}).get("order_id")
+            if not sid:
+                return {"status": "refused", "reason": "could not create GMGN stop"}
+            repair = "adopted manual buy; stop_loss strategy created"
+        held_by = mint_held_live(self.c.db, mint)
+        if held_by:
+            return {"status": "refused", "reason": f"already held by {held_by} LIVE in the wallet"}
+        now = self.c.clock()
+        opened = float(ts) or now
+        audit = {"adopted": True,
+                 "buys": [{"sig": l.get("sig"), "ts": l.get("ts"), "sol": l.get("sol"), "tok": l.get("tok")} for l in legs],
+                 "tok_raw": tok, "sol_lamports": lam, "phase": "normal", "strategy_kind": "limit_order",
+                 "note": note or "adopted manual buy"}
+        conds = [{"order_type": "loss_stop", "price_scale": f"{stop_pct:g}", "sell_ratio": "100"}]
+        oid = self._row(ts=opened, night=self.c.night, mode="LIVE", mint=mint, name=name, symbol=symbol,
+                        status="open", reason="adopted manual buy", size_usd=size, sol_usd=sol_usd,
+                        lamports=lam, entry_price=entry, peak=entry, last_price=entry,
+                        order_id="", strategy_order_id=sid, repair=repair, tx=(legs[-1].get("sig") if legs else (sigs or [""])[-1]),
+                        entry_src="chain", audit=json.dumps(audit), grace_until=None, exits_phase="normal",
+                        no_surge=0, conditions=json.dumps(conds), last_check=now)
+        self._log("LIVE adopted", mint, name, f"#{oid}", f"${size:.2f}", f"stop={sid}", repair)
+        return {"status": "open", "id": oid, "strategy_order_id": sid, "entry_price": entry,
+                "size_usd": size, "lamports": lam, "tokens": tok / 10 ** dec, "mc_entry": entry_mc,
+                "check_price": entry * (1 - stop_pct / 100.0) if entry else None, "note": repair,
+                "held_raw": bal}
+
     # ---- watcher (Risk side of GMGN)
     async def loop(self):
         while True:
             t0 = time.time()
             try:
                 await self.watch_once()
+                await self.check_pending_adopts()
                 await self.expire_approvals()
                 n = self.c.db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE status IN ({','.join('?'*len(ACTIVE))})", ACTIVE)["n"]
-                self.c.hb("gmgn", f"{self.mode()} open={n}{' HALTED' if self.halted() else ''}")
+                pend = self.pending_adopts()
+                extra = f" pending_adopt={len(pend)}" if pend else ""
+                self.c.hb("gmgn", f"{self.mode()} open={n}{' HALTED' if self.halted() else ''}{extra}")
             except Exception as e:
                 self.c.error("gmgn", "watch", str(e)[:300])
-            await asyncio.sleep(max(1, self.s["risk.poll_s"] - (time.time() - t0)))
+            await asyncio.sleep(max(1, self._loop_wait_s() - (time.time() - t0)))
 
     async def watch_once(self, pairs=None, holdings=None, strategies=None):
         c, s = self.c, self.s
