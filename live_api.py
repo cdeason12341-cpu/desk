@@ -32,11 +32,25 @@ def auth_token(app_token: str) -> str:
     return hashlib.sha256((AUTH_SALT + app_token).encode()).hexdigest()
 
 
-def _digest(obj) -> str:
-    """Change detector: top-level 'ts' (build time) ignored so an unchanged file isn't re-sent every build."""
-    if isinstance(obj, dict) and "ts" in obj:
-        obj = {k: v for k, v in obj.items() if k != "ts"}
+VOLATILE = frozenset(("ts", "t", "heartbeatAgeS", "ageMin", "ageS"))   # clock-driven fields that tick every build
+VOLATILE_RESEND_S = 15.0        # a file whose only change is a ticking clock field is re-sent at most this often
+
+
+def _strip(obj):
+    if isinstance(obj, dict):
+        return {k: _strip(v) for k, v in obj.items() if k not in VOLATILE}
+    if isinstance(obj, list):
+        return [_strip(v) for v in obj]
+    return obj
+
+
+def _h(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _digest(obj) -> str:
+    """Change detector for real content: clock fields (build time, heartbeat ages, ...) ignored."""
+    return _h(_strip(obj))
 
 
 class Snapshot:
@@ -44,25 +58,33 @@ class Snapshot:
         self.lock = threading.Lock()
         self.boot = _pyrand.token_hex(4)
         self.seq = 0
-        self.files: dict[str, tuple[int, str, dict]] = {}     # rel -> (seq, digest, envelope)
+        self.files: dict[str, tuple] = {}                       # rel -> (seq, content digest, envelope, full digest)
+        self.sent_at: dict[str, float] = {}
         self.built_at = 0.0
         self.build_ms = 0.0
 
     def update(self, objs: dict, token: str, build_ms: float = 0.0, now: float | None = None):
+        """Real content change -> new version now. Only clock fields ticked -> new version at most every
+        VOLATILE_RESEND_S (so ages / build times stay roughly current without re-sending big files every 2 s)."""
+        now = now or time.time()
         prepared = {}
         with self.lock:
-            cur = dict(self.files)
+            cur, sent = dict(self.files), dict(self.sent_at)
         for rel, obj in objs.items():
             d = _digest(obj)
-            if rel in cur and cur[rel][1] == d:
-                continue
-            prepared[rel] = (d, crypto.encrypt_obj(obj, token))
+            if rel in cur:
+                if cur[rel][1] == d and now - sent.get(rel, 0) < VOLATILE_RESEND_S:
+                    continue
+                if cur[rel][1] == d and _h(obj) == cur[rel][3]:
+                    continue
+            prepared[rel] = (d, crypto.encrypt_obj(obj, token), _h(obj))
         with self.lock:
             if prepared:
                 self.seq += 1
-                for rel, (d, env) in prepared.items():
-                    self.files[rel] = (self.seq, d, env)
-            self.built_at = now or time.time()
+                for rel, (d, env, full) in prepared.items():
+                    self.files[rel] = (self.seq, d, env, full)
+                    self.sent_at[rel] = now
+            self.built_at = now
             self.build_ms = build_ms
         return len(prepared)
 
@@ -77,7 +99,7 @@ class Snapshot:
             except ValueError:
                 n = -1
             files = {}
-            for rel, (sq, _, env) in self.files.items():
+            for rel, (sq, _, env, _f) in self.files.items():
                 if rel.startswith(("coin/", "audit/")):
                     if rel.split("/", 1)[1][:-5] in coins:      # the coin page being viewed: always sent (small)
                         files[rel] = env

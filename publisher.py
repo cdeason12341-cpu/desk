@@ -365,7 +365,9 @@ class Builder:
         def short(mint):
             return (mint[:4] + "…" + mint[-4:]) if mint and len(mint) >= 8 else (mint or "")
 
-        coin_cache = {}                                   # one coins-row read per mint per build (was one per event)
+        # names for every coin tonight in one query (was one coins-row read per event); other nights' coins read on demand
+        coin_cache = {r["mint"]: {"name": r["name"], "symbol": r["symbol"]}
+                      for r in c.db.rows("SELECT mint,name,symbol FROM coins WHERE night=?", (n,))}
 
         def names(mint, body=None):
             if mint not in coin_cache:

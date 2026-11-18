@@ -185,8 +185,7 @@
     const n = Object.keys(out.files || {}).length;
     const dec = await Promise.all(Object.entries(out.files || {}).map(async ([f, env]) => [f, await decrypt(env)]));
     for (const [f, obj] of dec) { S.files[f] = obj; S.missing.delete(f); }
-    // a file left out is unchanged apart from its build time, so it is current as of builtAt
-    if (S.files["state.json"] && out.builtAt && !dec.some(([f]) => f === "state.json")) S.files["state.json"].ts = out.builtAt;
+    // a file left out only differs by ticking clock fields (ages grow from its own ts), so it is kept as is
     L.cursor = out.cursor; L.builtAtMs = out.builtAtMs || Date.now(); L.okAt = Date.now(); L.src = "droplet";
     return n;
   }

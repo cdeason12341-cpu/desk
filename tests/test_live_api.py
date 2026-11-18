@@ -177,3 +177,20 @@ def test_bad_coin_param_ignored():
 def test_no_access_log():
     h = live_api.make_handler(object())
     assert h.log_message(None, "%s", "x") is None
+
+
+def test_clock_only_changes_are_throttled():
+    s = live_api.Snapshot()
+    base = {"ts": "a", "agents": {"x": {"heartbeatAgeS": 1.0}}, "bal": 1}
+    s.update({"state.json": base}, TOKEN, now=1000.0)
+    c0 = s.cursor()
+    s.update({"state.json": dict(base, ts="b", agents={"x": {"heartbeatAgeS": 3.0}})}, TOKEN, now=1002.0)
+    assert s.cursor() == c0                                     # only clocks ticked: not re-sent yet
+    s.update({"state.json": dict(base, ts="c", bal=2)}, TOKEN, now=1004.0)
+    assert s.cursor() != c0                                     # real change: sent right away
+    c1 = s.cursor()
+    s.update({"state.json": dict(base, ts="d", bal=2)}, TOKEN, now=1004.0 + live_api.VOLATILE_RESEND_S + 1)
+    assert s.cursor() != c1                                     # clock-only change re-sent after the window
+    c2 = s.cursor()
+    s.update({"state.json": dict(base, ts="d", bal=2)}, TOKEN, now=1100.0)
+    assert s.cursor() == c2                                     # identical: never re-sent
