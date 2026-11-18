@@ -197,8 +197,8 @@
   // ---------- routing
   // Owner 2026-11-17 5:59 PM CT: paper views hidden (data kept); old paper routes land on the LIVE views.
   // Owner 2026-11-17 6:20 PM CT (DECISION 72): Wallet / Strat A / Strat B tabs, each strategy with its own feed. Home folds into Wallet.
-  const ALIAS = { home: "wallet", live: "bfeed", stratblive: "bfeed", paper: "strata", apaper: "strata", bpaper: "stratb" };
-  const LIVE_HASH = { scores: 1, scanner: 1, alive: 1, bfeed: 1 };
+  const ALIAS = { home: "wallet", live: "bwatch", stratblive: "bwatch", paper: "strata", apaper: "strata", bpaper: "stratb" };
+  const LIVE_HASH = { scores: 1, scanner: 1, alive: 1, bfeed: 1, bwatch: 1 };
   function applyAlias() {
     const raw = location.hash.replace(/^#\/?/, "");
     const name = raw.split("/")[0] || "wallet";
@@ -236,7 +236,7 @@
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
     const r = route().name;
-    const on = { wallet: r === "wallet" || r === "coin" || r === "audit", stratb: r === "stratb" || r === "bfeed",
+    const on = { wallet: r === "wallet" || r === "coin" || r === "audit", stratb: r === "stratb" || r === "bfeed" || r === "bwatch",
       strata: r === "strata" || r === "alive" || r === "scores" || r === "scanner" };
     document.querySelectorAll(".tabs a").forEach(a => a.classList.toggle("on", a.dataset.tab === r || !!on[a.dataset.tab]));
     statusRow();
@@ -360,7 +360,7 @@
       return `<a href="#/${h}" class="${on ? "on" : ""}" role="tab" aria-selected="${on}">${t}</a>`; }).join("") + `</div>`;
   }
   function stratATabs() { return segBar([["strata", "strata", "Overview"], ["alive", "alive", "Feed"], ["scores", "scores", "Scores"], ["scanner", "scanner", "Scanner"]], "Strategy A views"); }
-  function stratBTabs() { return segBar([["stratb", "stratb", "Overview"], ["bfeed", "bfeed", "Feed"]], "Strategy B views"); }
+  function stratBTabs() { return segBar([["stratb", "stratb", "Overview"], ["bfeed", "bfeed", "Feed"], ["bwatch", "bwatch", "Watchlist"]], "Strategy B views"); }
   function bypassBadge(r) { return r.bypass ? `<span class="badge bypass${r.tag === "OVERRIDE" ? " override" : ""}">${esc(r.tag || "BYPASS")} · score ${r.score ?? "?"}</span>` : ""; }
   function tradeRow(r) {
     const name = r.name || r.symbol || short(r.mint);
@@ -424,7 +424,7 @@
   function aLiveBody(gm, tr, full) {
     const real = tr?.real, on = gm?.mode === "LIVE";
     const p = F("strat_feed.json")?.pnl?.A || (real ? { pnlUsd: real.pnlAllUsd, pnlTonightUsd: real.pnlTonightUsd, wins: real.wins, losses: real.losses, closed: (real.wins || 0) + (real.losses || 0) } : null);
-    let h = profitCard("A LIVE · Strategy A (GMGN) · real money", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A");
+    let h = profitCard("Strategy A · real money · GMGN", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A");
     const open = real ? real.open : (gm?.open || []).filter(q => q.mode === "LIVE");
     h += `<h1>A positions</h1>` + (open.length ? `<div class="card list">${open.map(real ? tradeRow : gmgnPosRow).join("")}</div>`
       : emptyBox("No A LIVE positions open", on ? "A buys on its own when a coin passes the desk. Its stop sits on GMGN." : "Strategy A isn't LIVE right now."));
@@ -537,7 +537,8 @@
   function stratBLive() {
     const g = gate(); if (g) return g;
     const L = F("strat_b_live.json");
-    let h = stratBTabs() + evFeed("B's", F("strat_feed.json")?.B, "B's real buys, sells, stops and skips show up here.");
+    if (route().name === "bfeed") return stratBTabs() + evFeed("B's", F("strat_feed.json")?.B, "B's real buys, sells, stops and skips show up here.");
+    let h = stratBTabs();
     if (!L) return h + emptyBox("Strategy B live view hasn't published yet", "It shows up after the desk's next publish.");
     const n = L.counts || {};
     h += `<h1>B watchlist</h1><div class="pills" style="margin:0 0 12px"><span class="pill amber">${n.watching ?? 0} watching</span><span class="pill green">${n.boughtTonight ?? 0} bought</span><span class="pill red">${n.skippedTonight ?? 0} skipped</span><span class="pill">${n.expiredTonight ?? 0} expired</span><span class="pill">${n.evaluationsTonight ?? 0} evaluations</span></div>`;
@@ -559,7 +560,7 @@
     const lr = lv.lastRefusal;
     const p = F("strat_feed.json")?.pnl?.B || { pnlUsd: lv.pnlAllUsd, pnlTonightUsd: lv.pnlTonightUsd, closed: lv.closedAll, wins: lv.wins, losses: lv.losses, winRatePct: lv.winRatePct, sinceLabel: lv.sinceLabel };
     const gb = (F("state.json")?.gmgn || gmgnState())?.budgets?.B;     // same numbers as the Wallet tab
-    let h = profitCard("B LIVE · Strategy B · real money", p, b.mode, bBadge("LIVE"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B");
+    let h = profitCard("Strategy B · real money · GMGN", p, b.mode, bBadge("LIVE"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B");
     if (lr) h += `<div class="sub" style="white-space:normal;margin:-4px 2px 10px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>`;
     h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox("No B LIVE positions open", "B will buy when a coin qualifies and its share of the wallet can cover it."));
     h += `<h1>B trades ${esc(sinceText(p))}</h1>` + ((lv.closed || []).length ? `<div class="card list">${lv.closed.map(stratBRow).join("")}</div>` : emptyBox("No B trades closed since the reset", "New closes count toward the profit above."));
@@ -999,7 +1000,7 @@
     const r = route();
     const html = r.name === "agents" ? agents() : r.name === "activity" ? activity() : r.name === "account" ? account()
       : r.name === "audit" ? audit(r.arg) : r.name === "coin" ? coin(r.arg)
-      : r.name === "bfeed" ? stratBLive() : r.name === "stratb" ? stratB()
+      : (r.name === "bfeed" || r.name === "bwatch") ? stratBLive() : r.name === "stratb" ? stratB()
       : (r.name === "scores" || r.name === "scanner" || r.name === "alive") ? scores()
       : r.name === "strata" ? stratA()
       : wallet();
