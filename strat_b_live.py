@@ -32,6 +32,12 @@ REFUSE_RETRY_S = 600          # a refused coin is tried again at most every 10 m
 REFUSE_PUSH_GAP_S = 1800      # wallet / cap refusals push at most once per 30 min (each coin's first refusal tonight pushes)
 CLOSE_CHECK_S = 15.0          # chain close check / pending settle cadence
 SELL_RETRY_S = 15.0
+NO_ROUTE_RETRY_S = 300.0      # DECISION 89: a sell GMGN can't route backs off hard (5, 10, then 20 min)...
+NO_ROUTE_WRITE_OFF = 3        # ...and after this many no-route sells the order is written off (tokens stay in the wallet)
+
+
+def no_route_error(e) -> bool:
+    return any(m in str(e) for m in A.NO_ROUTE_MARKERS)
 
 
 def b_conditions(s, phase=None, o=None) -> list[dict]:
@@ -88,6 +94,7 @@ class BLive:
         self._retry_buy: dict = {}      # mint -> (until, reason)
         self._retry_sell: dict = {}     # order id -> earliest retry
         self._sell_fails: dict = {}     # order id -> consecutive failed sells (DECISION 88 backoff)
+        self._no_route: dict = {}       # order id -> consecutive no-route sells (DECISION 89)
         self._gate_logged = 0.0
         self._last_close = 0.0
         self._trail_below_floor: set = set()
@@ -471,7 +478,7 @@ class BLive:
         except Exception as e:
             self._upd(oid, note=((o["note"] or "") + f" sell failed: {str(e)[:120]}")[-500:])
             self._log("LIVE sell failed", o["mint"], f"#{oid}", reason, str(e)[:200])
-            return "failed"
+            return "no_route" if no_route_error(e) else "failed"
         self._upd(oid, status="exiting", exit_reason=reason, sell_order_id=(r or {}).get("order_id"))
         self._log("LIVE SELL sent", o["mint"], o["name"], f"#{oid}", reason, (r or {}).get("order_id"))
         return "sent"
@@ -486,9 +493,19 @@ class BLive:
             if not o or o["status"] != "open" or o["sell_order_id"]:
                 return None
             res = await self._market_sell(oid, reason)
-            if res in ("failed", "unknown"):
+            if res == "no_route":
+                k = self._no_route[oid] = self._no_route.get(oid, 0) + 1
+                if k >= NO_ROUTE_WRITE_OFF:
+                    return await self.write_off(oid, reason)
+                self._retry_sell[oid] = now + max(NO_ROUTE_RETRY_S * 2 ** (k - 1), gmgn.GATE.remaining())
+                self._log("LIVE no sell route", o["mint"], f"#{oid}", f"{k}/{NO_ROUTE_WRITE_OFF}",
+                          f"next try in {self._retry_sell[oid] - now:.0f}s")
+                res = "failed"
+            elif res in ("failed", "unknown"):
+                self._no_route.pop(oid, None)
                 n = self._sell_fails[oid] = self._sell_fails.get(oid, 0) + 1
                 self._retry_sell[oid] = gmgn.GATE.retry_at(now, SELL_RETRY_S, n)   # backoff, never before a ban ends
+            if res in ("failed", "unknown"):
                 if res == "failed" and "alerted" not in (o["note"] or ""):
                     self._upd(oid, note=((self._get(oid)["note"] or "") + " alerted")[-500:])
                     await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: {reason} hit, but the market sell failed. "
@@ -499,10 +516,48 @@ class BLive:
                                                       "repair": o["note"]})
                 e = o["entry_price"] or price
                 await self._push(f"{LIVE_LABEL} · {o['name']}: {reason} at {100 * (price / e - 1):+.0f}% from entry, market-selling", o["mint"])
-            self._retry_sell.pop(oid, None); self._sell_fails.pop(oid, None)
+            self._retry_sell.pop(oid, None); self._sell_fails.pop(oid, None); self._no_route.pop(oid, None)
             return res
         finally:
             self._busy.discard(oid)
+
+    async def write_off(self, oid, reason) -> str:
+        """DECISION 89: GMGN can't route a sell for this coin (honeypot / drained pool). Stop trying: close the row at
+        its real Jupiter sell value (0 if none) so realized PnL and the GTA kill switch see the loss. Tokens stay in the
+        wallet; nothing is sold."""
+        import jupiter
+        o = self._get(oid)
+        if not o or o["status"] != "open":
+            return "already"
+        value, how = 0.0, "no Jupiter route"
+        try:
+            amount = await self.t.token_balance(o["mint"])
+            q = await jupiter.quote(o["mint"], jupiter.SOL, int(amount or 0)) if amount else {"ok": False}
+            if q.get("ok"):
+                sol_usd = o["sol_usd"] or await self.t.sol_usd() or 0
+                value = q["out"] / LAMPORTS * float(sol_usd)
+                how = f"Jupiter sell quote {q['out']} lamports"
+        except Exception as e:
+            how = f"value unknown ({type(e).__name__}), counted as 0"
+        size = float(o["size_usd"] or 0)
+        pnl = round(value - size, 2)
+        pct = round(100.0 * (value / size - 1.0), 2) if size else None
+        now = self.c.clock()
+        px = (o["entry_price"] * value / size) if (size and o["entry_price"]) else 0.0
+        cur = self.c.db.x("UPDATE strat_b_orders SET status='closed', closed_at=?, exit_reason=?, exit_signal_price=?, exit_price=?, "
+                          "last_price=?, pnl_usd=?, pct=?, note=? WHERE id=? AND status='open'",
+                          (now, "honeypot - unsellable (no route)", o["last_price"], px, px, pnl, pct,
+                           ((o["note"] or "") + f" | written off after {NO_ROUTE_WRITE_OFF} no-route sells ({reason}); {how}; "
+                            f"tokens left in wallet")[-500:], oid))
+        self._retry_sell.pop(oid, None); self._sell_fails.pop(oid, None); self._no_route.pop(oid, None)
+        if not cur.rowcount:
+            return "already"
+        self._log("LIVE WRITE-OFF", o["mint"], o["name"], f"#{oid}", "honeypot - unsellable (no route)", f"value=${value:.2f}",
+                  f"pnl=${pnl:+.2f}", how)
+        await self._push(f"{LIVE_LABEL} · {o['name']}: GMGN can't route a sell ({NO_ROUTE_WRITE_OFF} tries), so I stopped "
+                         f"trying and wrote it off at ${value:,.2f} ({'-' if pnl < 0 else '+'}${abs(pnl):,.2f}). "
+                         f"The tokens are still in your wallet.", o["mint"])
+        return "written_off"
 
     def _b_strategy_type(self, o) -> str:
         note = o.get("note") or ""

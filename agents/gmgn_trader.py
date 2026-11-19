@@ -750,6 +750,9 @@ SURGE_FLOOR = "surge floor"      # surge profit floor (DECISION 56)
 SURGE_POLL_S = 3.0               # price check on open positions (one DexScreener call for all open mints)
 SURGE_FAST_PCT = 20.0            # ...or +20% inside any 60s window
 SURGE_FAST_S = 60.0
+NO_ROUTE_MARKERS = ("GetSwapRouteErr", "40000404", "little pool hit")   # DECISION 89: GMGN can't route this sell
+NO_ROUTE_RETRY_S = 300.0
+NO_ROUTE_BACKOFF_MAX_S = 1800.0
 SURGE_RETRY_S = 15.0             # after a failed surge sell, wait before trying again
 
 
@@ -840,6 +843,7 @@ class GmgnTrader:
         self._trail_seen: set = set()    # order ids the desk trail has started watching (logged once)
         self._trail_retry: dict = {}     # order id -> earliest retry after a failed desk-trail sell
         self._sell_fails: dict = {}      # order id -> consecutive failed market sells (DECISION 88 backoff)
+        self._no_route: set = set()      # order ids whose last market sell GMGN couldn't route (DECISION 89)
         self._gate_logged = 0.0          # last "GMGN gate closed" log line (throttled)
         self._trail_peak: dict = {}      # order id -> trail peak (in memory; seeded from the row on first sight)
         self._strip_retry: dict = {}     # order id -> earliest retry after a failed profit_stop_trace strip
@@ -1486,6 +1490,10 @@ class GmgnTrader:
         except Exception as e:
             self._upd(oid, repair=(o["repair"] or "") + f" market_sell failed: {str(e)[:120]}")
             self._log("LIVE", o["mint"], "market sell failed", str(e)[:200])
+            if NO_ROUTE_MARKERS and any(m in str(e) for m in NO_ROUTE_MARKERS):
+                self._no_route.add(oid)              # DECISION 89: unroutable -> 5 min base backoff, not 15 s
+            else:
+                self._no_route.discard(oid)
             return "failed"
 
     def _gate_log(self, mint, *what):
@@ -1497,6 +1505,8 @@ class GmgnTrader:
     def _sell_retry_at(self, oid, now, base_s):
         """DECISION 88: per-order sell retry with backoff (x2 per failure up to 120 s), never before a GMGN ban ends."""
         n = self._sell_fails[oid] = self._sell_fails.get(oid, 0) + 1
+        if oid in self._no_route:                # DECISION 89: a sell GMGN can't route backs off hard (5, 10, 20, 30 min)
+            return now + max(min(NO_ROUTE_BACKOFF_MAX_S, NO_ROUTE_RETRY_S * 2 ** (n - 1)), gmgn.GATE.remaining())
         return gmgn.GATE.retry_at(now, base_s, n)
 
     async def market_sell(self, oid, reason):
