@@ -79,6 +79,23 @@ class Net:
         d = r.json()
         return d if isinstance(d, list) else []
 
+    async def dex_search(self, q: str) -> list:
+        """DexScreener name/symbol search (GTA hunt). Shared dex bucket. Returns pair objects, possibly mixed chains."""
+        await self.dex_bucket.take()
+        self.dex_calls += 1
+        r = await self._send(self.http.get("https://api.dexscreener.com/latest/dex/search",
+                                           params={"q": q}, timeout=20), 22, "dexscreener search")
+        if r.status_code == 429:
+            raise RateLimited("dexscreener 429")
+        if r.status_code != 200:
+            raise SourceError(f"dexscreener search {r.status_code}")
+        d = r.json()
+        if isinstance(d, list):
+            return d
+        if isinstance(d, dict):
+            return d.get("pairs") or d.get("data") or []
+        return []
+
     async def gecko_new_pools(self, page: int = 1) -> dict:
         """Recent Solana pools (GeckoTerminal public API). Used only as a WS-gap backstop."""
         r = await self._send(self.http.get(

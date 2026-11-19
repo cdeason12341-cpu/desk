@@ -95,7 +95,7 @@ def test_module_reaches_gmgn_only_through_strat_b_live():
     order is strat_b_live, which uses Strategy A's client and never touches keys."""
     src, mods = _imports(strat_b.__file__)
     assert mods <= {"__future__", "asyncio", "collections", "json", "time", "fields", "links", "ctx", "agents.scanner",
-                    "strat_b_live", "agents", "agents.gmgn_trader", "pnl_since"}, mods
+                    "strat_b_live", "agents", "agents.gmgn_trader", "pnl_since", "strat_b_gta"}, mods
     # agents.gmgn_trader: trail net-floor math only (DECISION 85). Still no GMGN client, wallet, or secrets.
     code = src.split('"""', 2)[2]
     for bad in ("import gmgn", "import solana", "secrets_store", "keypair", "private", "swap(", "notifier.send"):

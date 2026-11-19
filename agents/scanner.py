@@ -510,6 +510,14 @@ class Scanner:
         except RuntimeError:
             pass
         self.c.event("scan", mint)
+        try:
+            sb = getattr(self.c, "strat_b", None)
+            if sb is not None:
+                raw = raw or {}
+                sb.see_raw({"mint": mint, "name": raw.get("name"), "symbol": raw.get("symbol"),
+                            "b_source": f"scanner {source}"})
+        except Exception:
+            pass
         return True
 
     async def catchup_graduations(self) -> int:

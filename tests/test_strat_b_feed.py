@@ -137,7 +137,7 @@ def test_feed_module_never_reaches_gmgn_or_wallet():
             mods |= {a.name for a in n.names}
         elif isinstance(n, ast.ImportFrom):
             mods.add(n.module)
-    assert mods <= {"__future__", "asyncio", "datetime", "fields", "holders", "sources", "ctx", "net", "agents.auditor"}, mods
+    assert mods <= {"__future__", "asyncio", "datetime", "fields", "holders", "sources", "ctx", "net", "agents.auditor", "strat_b_gta"}, mods
     code = src.split('"""', 2)[2]
     for bad in ("gmgn", "safe_sell", "on_pass", "secrets", "keypair", "wallet_", "swap", "bus.analyst", "bus.executor"):
         assert bad not in code, bad

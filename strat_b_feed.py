@@ -103,8 +103,13 @@ class BFeed:
 
     async def poll_once(self, now=None, payloads=None):
         c, s = self.c, self.c.s
+        import strat_b_gta as G
         now = c.clock() if now is None else now
-        if not (self.sb.enabled() and s["strat_b.feed_enabled"]):
+        if not self.sb.enabled():
+            return "off"
+        if G.is_gta_profile(s):
+            return await self._gta_poll(now, payloads, s)
+        if not s["strat_b.feed_enabled"]:
             return "off"
         if payloads is None and (now - self.last < s["strat_b.feed_poll_s"] or now < self.backoff_until):
             return f"idle · {self.stats}"
@@ -156,6 +161,40 @@ class BFeed:
         self.log.info(f"{iso(now)}\tfeed\tpulled={len(pools)}\tcandidates={len(cands)}\tchecked={n}\twatching={watching}"
                       + (f"\terrors={errs}" if errs else ""))
         return f"pulled={len(pools)} candidates={len(cands)} checked={n}"
+
+    async def _gta_poll(self, now, payloads, s):
+        """GTA source only: trending Gecko pools, no rugcheck / age / mc / liq filters."""
+        if payloads is None and (now - self.last < s["strat_b.feed_poll_s"] or now < self.backoff_until):
+            return f"idle · {self.stats}"
+        self.last = now
+        pools, errs = [], []
+        for i, (label, path, params) in enumerate(SOURCES):
+            try:
+                d = payloads[i] if payloads is not None else await self.gecko(path, params)
+            except Exception as e:
+                errs.append(f"{params.get('duration')}p{params.get('page')}:{str(e)[:40]}")
+                if type(e).__name__ == "RateLimited":
+                    self.backoff_until = now + 60
+                    self.last = now - s["strat_b.feed_poll_s"] + 60
+                    break
+                continue
+            pools += parse_pools(d, label, now)
+            if payloads is None:
+                await asyncio.sleep(CALL_GAP_S)
+        seen = set()
+        n = 0
+        for p0 in pools:
+            if p0["mint"] in seen:
+                continue
+            seen.add(p0["mint"])
+            self.sb.see_raw({"mint": p0["mint"], "name": p0.get("name"), "symbol": p0.get("symbol"),
+                             "b_source": f"{p0.get('src')} (gta feed)"})
+            n += 1
+        self.stats["pulled"] = len(pools)
+        self.stats["candidates"] = n
+        self.log.info(f"{iso(now)}\tfeed gta\tpulled={len(pools)}\toffered={n}"
+                      + (f"\terrors={errs}" if errs else ""))
+        return f"gta pulled={len(pools)} offered={n}"
 
     async def check(self, p) -> dict | None:
         """B's own read-only holder checks. None = couldn't read (retry later). b_block = permanent skip reason."""

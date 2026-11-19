@@ -231,6 +231,18 @@ SPECS: list[Spec] = [
     _s("strat_b.fee_pct", 1.0, 0, 10, aliases=("b fee",), fmt="{v:g}%"),
     _s("strat_b.net_fee_usd", 0.25, 0, 10, aliases=("b network fee",), fmt="${v:,.2f}"),
     _s("strat_b.poll_s", 10, 3, 120, aliases=("b poll",), fmt="{v}s"),
+    # DECISION 87: GTA profile (not protected except kill-switch restore of standard B, which uses force=True)
+    _s("strat_b.profile", "default", kind="choice", choices=("default", "gta"), aliases=("b profile", "strategy b profile")),
+    _s("strat_b.gta_stop_pct", 30.0, 1, 90, aliases=("gta stop", "b gta stop"), fmt="-{v:g}%", neg=True),
+    _s("strat_b.gta_tp_pct", 20.0, 1, 1000, aliases=("gta tp", "b gta take profit"), fmt="+{v:g}%"),
+    _s("strat_b.gta_profit_hold_s", 60, 1, 3600, aliases=("gta profit hold", "b gta hold"), fmt="{v}s"),
+    _s("strat_b.gta_spike_min_pct", 20.0, 1, 1000, aliases=("gta spike", "gta spike min"), fmt="+{v:g}%"),
+    _s("strat_b.gta_spike_window_s", 60, 5, 3600, aliases=("gta spike window",), fmt="{v}s"),
+    _s("strat_b.gta_spike_drop_pct", 8.0, 1, 90, aliases=("gta spike drop", "gta top drop"), fmt="{v:g}%"),
+    _s("strat_b.gta_spike_stall_s", 15, 1, 600, aliases=("gta spike stall",), fmt="{v}s"),
+    _s("strat_b.gta_kill_pct", 50.0, 1, 100, aliases=("gta kill", "gta kill switch"), fmt="{v:g}%"),
+    _s("strat_b.gta_poll_s", 3, 1, 30, aliases=("gta poll",), fmt="{v}s"),
+    _s("strat_b.gta_hunt_s", 30, 5, 600, aliases=("gta hunt",), fmt="{v}s"),
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.

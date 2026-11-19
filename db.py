@@ -89,7 +89,11 @@ class DB:
                   # DECISION 69: drop watches whose market cap stays under the floor, or whose liquidity is $0
                   ("strat_b_watch", "under_floor_evals", "INTEGER"), ("strat_b_watch", "under_floor_since", "REAL"),
                   # DECISION 85: B early-stop window (-50% for first N min, then -35%)
-                  ("strat_b_orders", "exits_phase", "TEXT"), ("strat_b_orders", "early_until", "REAL"))
+                  ("strat_b_orders", "exits_phase", "TEXT"), ("strat_b_orders", "early_until", "REAL"),
+                  # DECISION 87: GTA profile stamp + profit clock + spike peak time
+                  ("strat_b_orders", "profile", "TEXT"),
+                  ("strat_b_orders", "profit_since", "REAL"),
+                  ("strat_b_orders", "spike_high_at", "REAL"))
 
     def _migrate(self):
         for table, col, typ in self.MIGRATIONS:

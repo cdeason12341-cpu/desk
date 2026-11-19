@@ -28,6 +28,9 @@ class FakeNet:
     async def gecko_new_pools(self, page=1):
         return self.new_pools.get(page, {"data": []})
 
+    async def dex_search(self, q):
+        return list(getattr(self, "search", {}).get(q, []))
+
     async def rpc(self, method, params, timeout=30):
         fn = self.rpc_map.get(method)
         if fn is None:

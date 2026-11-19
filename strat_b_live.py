@@ -34,10 +34,15 @@ CLOSE_CHECK_S = 15.0          # chain close check / pending settle cadence
 SELL_RETRY_S = 15.0
 
 
-def b_conditions(s, phase=None) -> list[dict]:
+def b_conditions(s, phase=None, o=None) -> list[dict]:
     """B's only server-side exit: the hard stop. phase='early' uses -early_stop_pct; 'normal' uses -stop_pct.
-    B runs TP / trail / time stop itself. phase=None means whatever a new buy would attach."""
+    B runs TP / trail / time stop itself. phase=None means whatever a new buy would attach.
+    GTA-profile orders (DECISION 87) attach a flat -gta_stop_pct stop with no early window."""
     import strat_b as B
+    import strat_b_gta as G
+    if G.is_gta_order(o, s) if o is not None else G.is_gta_profile(s):
+        stop = s["strat_b.gta_stop_pct"]
+        return [{"order_type": "loss_stop", "side": "sell", "price_scale": f"{stop:g}", "sell_ratio": "100"}]
     if phase is None:
         phase = "early" if float(s["strat_b.early_stop_min"] or 0) > 0 else "normal"
     stop = s["strat_b.early_stop_pct"] if phase == "early" else s["strat_b.stop_pct"]
@@ -154,13 +159,18 @@ class BLive:
         mint, name = w["mint"], w["name"]
         if s["strat_b.mode"] != "LIVE":
             return await self._refuse(w, "not LIVE", 0, now)
+        if not self.sb.enabled():
+            return await self._refuse(w, "B is paused", 0, now)
         if t is None or t.client is None:
             return await self._refuse(w, "GMGN client not configured", 0, now)
         if t.halted():
             return await self._refuse(w, "GMGN halted (/halt)", 0, now)
-        blocked = await self._dex_pool_gate(w, m, now)
-        if blocked:
-            return blocked
+        import strat_b_gta as G
+        gta = G.is_gta_profile(s)
+        if not gta:
+            blocked = await self._dex_pool_gate(w, m, now)
+            if blocked:
+                return blocked
         act = ",".join("?" * len(A.ACTIVE))
         if c.db.one(f"SELECT id FROM gmgn_orders WHERE mint=? AND mode='LIVE' AND status IN ({act})", (mint, *A.ACTIVE)) or \
                 c.db.one(f"SELECT id FROM strat_b_orders WHERE mint=? AND mode='LIVE' AND status IN ({act})", (mint, *A.ACTIVE)):
@@ -170,7 +180,7 @@ class BLive:
             return await self._refuse(w, "no SOL price from GMGN", 0, now)
         wallet = await t.wallet_lamports(fresh=True)
         free = A.strategy_free_lamports(s, c.db, "B", wallet)          # DECISION 71: B's share of the wallet only
-        pool_cap = (m["liq"] * s["strat_b.max_pool_pct"] / 100.0) if m.get("liq") else None
+        pool_cap = None if gta else ((m["liq"] * s["strat_b.max_pool_pct"] / 100.0) if m.get("liq") else None)
         size, lamports, short = A.pick_size(s, free, sol_usd, pool_cap, top_usd=s["strat_b.trade_usd"])
         if size is None:
             return await self._refuse(w, short, 0, now, wallet_kind=True)
@@ -182,7 +192,8 @@ class BLive:
         if held:
             return await self._refuse(w, f"already held by {held} LIVE in the wallet", 0, now)
         import strat_b as B
-        ef = B.early_fields(s, now)
+        prof = "gta" if gta else (s["strat_b.profile"] or "default")
+        ef = B.early_fields(s, now, profile=prof)
         body = b_buy_body(s, mint, lamports, phase=ef["exits_phase"])
         if body["from_address"] != MAIN_WALLET or body["input_token"] != SOL or int(body["input_amount"]) != lamports:
             return await self._refuse(w, "swap body mismatch", size, now)
@@ -192,7 +203,8 @@ class BLive:
                         size_usd=size, lamports=lamports, sol_usd=sol_usd, signal_price=m["price"], entry_price=m["price"],
                         peak=m["price"], last_price=m["price"], last_liq=m["liq"], entry_liq=m["liq"], mc_entry=m["mc"],
                         trail_armed=0, opened_at=now, why=json.dumps(dict(m, reason=why)), last_seen=now,
-                        exits_phase=ef["exits_phase"], early_until=ef["early_until"])
+                        exits_phase=ef["exits_phase"], early_until=ef["early_until"],
+                        profile=prof, profit_since=None, spike_high_at=now)
         c.db.x("UPDATE strat_b_watch SET status='bought', reason=?, updated=? WHERE mint=?", (f"{LIVE_LABEL}: {why}", now, mint))
         self._retry_buy.pop(mint, None)
         self._busy.add(oid)
@@ -571,11 +583,18 @@ class BLive:
         s = self.c.s
         if o["id"] in self._busy:
             return None
+        import strat_b_gta as G
         hist = self.sb._sample(o["mint"], now, price)
         below = o["id"] in self._trail_below_floor or o["id"] in self.sb._trail_below_floor
-        reason, upd = exit_check(s, o, price, liq, hist, now, below_floor=below)
-        self.c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=COALESCE(?, last_liq), last_seen=? WHERE id=?",
-                    (upd["peak"], upd["trail_armed"], price, liq, now, o["id"]))
+        quote = None
+        if G.is_gta_order(o, s) and self.t is not None:
+            try:
+                quote = await self.t._trail_sell_quote_sol(o)
+            except Exception:
+                quote = None
+        reason, upd = exit_check(s, o, price, liq, hist, now, below_floor=below, quote_sol_out=quote)
+        self.c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=COALESCE(?, last_liq), last_seen=?, profit_since=?, spike_high_at=? WHERE id=?",
+                    (upd["peak"], upd["trail_armed"], price, liq, now, upd.get("profit_since"), upd.get("spike_high_at"), o["id"]))
         if upd.get("below_floor"):
             self._trail_below_floor.add(o["id"])
             self.sb._trail_below_floor.add(o["id"])
@@ -607,8 +626,11 @@ class BLive:
             return "no GMGN client"
         now = self.c.clock() if now is None else now
         import strat_b as B
+        import strat_b_gta as G
         rows = [o for o in self._rows(("open",)) if o["entry_price"]]
         for o in list(rows):
+            if G.is_gta_order(o, self.c.s):
+                continue
             if B.early_window_ended(self.c.s, o, now) and o["id"] not in self._busy:
                 await self.promote_early_stop(o["id"])
         rows = [o for o in self._rows(("open",)) if o["entry_price"]]

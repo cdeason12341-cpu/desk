@@ -60,11 +60,20 @@ def static_check(s, audit) -> str | None:
 
 
 # ---------- entry (checked every poll while watching)
-def entry_check(s, w, pair, now) -> tuple[bool, str, dict]:
+def entry_check(s, w, pair, now, hist=None) -> tuple[bool, str, dict]:
     """w: watch row with high/low (since the high). Returns (buy?, reason, metrics)."""
+    import strat_b_gta as G
     g = lambda p: fields.get(pair, p)
     price, liq, mc = num(g("priceUsd")), num(g("liquidity.usd"), 0.0), num(g("marketCap")) or num(g("fdv"))
     m = {"price": price, "liq": liq, "mc": mc}
+    if G.is_gta_profile(s):
+        if not price:
+            return False, "no tradable price", m
+        name, symbol = w.get("name"), w.get("symbol")
+        if not G.gta_related(name, symbol):
+            return False, "not a GTA-related coin", m
+        ok, why = G.gta_spike_hit(s, hist or [], now, price, pair)
+        return ok, why, m
     if not price:
         return False, "no price", m
     age_min = (now - w["grad_at"]) / 60.0 if w.get("grad_at") else None
@@ -230,8 +239,11 @@ def b_size_ladder_text(s) -> str:
     return ", then ".join(parts)
 
 
-def early_fields(s, start) -> dict:
+def early_fields(s, start, profile=None) -> dict:
     """exits_phase / early_until at fill (or at the original buy time for an adopt)."""
+    prof = profile or ((s["strat_b.profile"] if s is not None else None) or "default")
+    if prof == "gta":
+        return {"exits_phase": "normal", "early_until": None}
     mins = float(s["strat_b.early_stop_min"] or 0)
     if mins > 0:
         return {"exits_phase": "early", "early_until": float(start) + mins * 60}
@@ -258,7 +270,11 @@ def early_window_ended(s, o, now) -> bool:
 
 
 def b_stop_pct(s, o, now) -> float:
-    """Desk stop: -early_stop_pct in the first window, then -stop_pct. Pre-DECISION 85 rows (no phase) use -35%."""
+    """Desk stop: -early_stop_pct in the first window, then -stop_pct. Pre-DECISION 85 rows (no phase) use -35%.
+    GTA-profile orders use a flat -gta_stop_pct with no early window (DECISION 87)."""
+    import strat_b_gta as G
+    if G.is_gta_order(o, s):
+        return float(s["strat_b.gta_stop_pct"])
     if early_clock_open(s, o, now):
         return float(s["strat_b.early_stop_pct"])
     return float(s["strat_b.stop_pct"])
@@ -266,6 +282,15 @@ def b_stop_pct(s, o, now) -> float:
 
 def b_exits_text(s, o=None, now=None) -> str:
     """Buy-push / rules line for B's exits."""
+    import strat_b_gta as G
+    if G.is_gta_order(o, s) or (o is None and G.is_gta_profile(s)):
+        return (f"flat stop -{s['strat_b.gta_stop_pct']:g}% (desk + GMGN in LIVE) · "
+                f"sell all at +{s['strat_b.gta_tp_pct']:g}% net after fees · "
+                f"or when net profit holds more than {s['strat_b.gta_profit_hold_s']:g}s · "
+                f"or at the end of the spike if still in net profit "
+                f"(drop {s['strat_b.gta_spike_drop_pct']:g}% from the peak or no new high for "
+                f"{s['strat_b.gta_spike_stall_s']:g}s). No trail, no time stop. "
+                f"A night loss of {s['strat_b.gta_kill_pct']:g}% of the wallet baseline restores standard B.")
     early_m = float(s["strat_b.early_stop_min"] or 0)
     stop = (f"stop -{s['strat_b.early_stop_pct']:g}% for the first {early_m:g} min, then -{s['strat_b.stop_pct']:g}%"
             if early_m > 0 else f"stop -{s['strat_b.stop_pct']:g}%")
@@ -281,9 +306,13 @@ def _b_trail_order(o) -> dict:
     return o if isinstance(o, dict) else dict(o)
 
 
-def exit_check(s, o, price, liq, hist, now, below_floor=False) -> tuple[str | None, dict]:
+def exit_check(s, o, price, liq, hist, now, below_floor=False, quote_sol_out=None) -> tuple[str | None, dict]:
     """o: open order row. hist is kept for callers; the spike sell is gone (DECISION 85).
-    Returns (reason|None, updates). The take-profit trail reuses A's net-floor math."""
+    Returns (reason|None, updates). The take-profit trail reuses A's net-floor math.
+    GTA-profile orders use DECISION 87 exits (no trail, no time stop)."""
+    import strat_b_gta as G
+    if G.is_gta_order(o, s):
+        return G.gta_exit_check(s, o, price, liq, now, quote_sol_out=quote_sol_out)
     from agents.gmgn_trader import trail_should_sell, trail_net_floor_price
     e = o["entry_price"]
     peak = max(o["peak"] or e, price)
@@ -309,7 +338,27 @@ def exit_check(s, o, price, liq, hist, now, below_floor=False) -> tuple[str | No
 
 def rules(s) -> list[dict]:
     """Plain-words rules with the live value and the reason (shown in the app and the scorecard)."""
+    import strat_b_gta as G
     v = lambda k: s[k]
+    if G.is_gta_profile(s):
+        return [
+            {"k": "Profile", "v": "GTA — only Grand Theft Auto / GTA / GTA VI / GTA 6 / Rockstar / Vice City coins, and only when they are in an active spike",
+             "why": "Name and symbol match (word boundaries, so 'gtable' does not count). Candidates come from raw new/trending sources, not the scanner's pass list."},
+            {"k": "Entry", "v": f"in a spike of at least +{v('strat_b.gta_spike_min_pct'):g}% inside {v('strat_b.gta_spike_window_s'):g}s (same hurdle as Strategy A's fast surge)",
+             "why": "Buy the burst as it hits, not a pullback. No market-cap, liquidity, age, holder, auditor, or dex/pool filters. A tradable price, wallet room, $50 then $20, and max open are the only execution checks."},
+            {"k": "Size", "v": f"${v('strat_b.trade_usd'):,.0f}, then ${v('gmgn.fallback_trade_usd'):,.0f}, then shrink to ${v('gmgn.min_trade_usd'):,.0f}; max {v('strat_b.live_max_open') if v('strat_b.mode')=='LIVE' else v('strat_b.max_open')} open",
+             "why": "Same $50 / $20 ladder as standard B"},
+            {"k": "Stop", "v": f"flat -{v('strat_b.gta_stop_pct'):g}% from entry (desk + a GMGN server-side stop in LIVE). No first-window -50%.",
+             "why": "A hard floor so a failed spike cannot go to zero"},
+            {"k": "Take profit", "v": f"sell all at +{v('strat_b.gta_tp_pct'):g}% net after fees, or when net profit stays > 0 for more than {v('strat_b.gta_profit_hold_s'):g}s (the clock resets if net dips to 0 or below)",
+             "why": "Same net estimate as A's trail floor: a full-position GMGN sell quote first, else mark minus the 1% fee and priority/tip"},
+            {"k": "Spike over", "v": f"sell when the price drops {v('strat_b.gta_spike_drop_pct'):g}% from the spike peak or makes no new high for {v('strat_b.gta_spike_stall_s'):g}s, but only if expected net after fees is still > 0. Otherwise hold for the stop or a later take-profit.",
+             "why": "Get off the spike when momentum dies, without selling a loser that the -30% stop or a bounce can still handle"},
+            {"k": "Not used", "v": "no trailing stop, no 24h time stop, none of standard B's entry filters",
+             "why": "This profile is a spike scalp, not the pullback strategy"},
+            {"k": "Kill switch", "v": f"if GTA B's night losses (realized + unrealized) reach {v('strat_b.gta_kill_pct'):g}% of the wallet value recorded when GTA was first enabled this night (re-baselined at 8 AM CT), B restores the saved standard Strat B preset, stays LIVE, and keeps any open GTA positions on their existing exits",
+             "why": "Automatic, on the desk, even if the phone is off (DECISION 87)"},
+        ]
     return [
         {"k": "Entry · holders", "v": f"top 10 ≤ {v('strat_b.max_top10_pct'):g}%, ≥ {v('strat_b.min_holders')} holders, bundled ≤ {v('strat_b.max_bundle_pct'):g}%",
          "why": "Fried Dev / Parasol holder checks; bundles graduate then fall (pumpdata.fun)"},
@@ -386,7 +435,14 @@ class StratB:
         grad = coin.get("migrated_at") or (now - float(scan.get("ageMin") or 0) * 60)
         name = scan.get("name") or coin.get("name") or c.label(mint)
         src = scan.get("b_source") or ("desk scanner" + (f" · {scan['source']}" if scan.get("source") else ""))
-        bad = static_check(s, audit)
+        import strat_b_gta as G
+        if G.is_gta_profile(s):
+            if not G.gta_related(name, scan.get("symbol") or (c.coin(mint) or {}).get("symbol")):
+                bad = "not a GTA-related coin"
+            else:
+                bad = None
+        else:
+            bad = static_check(s, audit)
         status = "skipped" if bad else "watching"
         c.db.x("INSERT OR IGNORE INTO strat_b_watch(mint,name,symbol,added_at,grad_at,top10,holders,bundle_pct,high,low,last_price,status,reason,updated,night,source)"
                " VALUES(?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,?,?)",
@@ -396,8 +452,9 @@ class StratB:
              "holders": audit.get("holders"), "bundle_pct": audit.get("bundle_pct"), "source": src}
         ck = checks(s, w, None, now)
         c.db.x("UPDATE strat_b_watch SET checks=?, eval_at=?, evals=1 WHERE mint=?", (json.dumps(ck), now, mint))
-        self._eval(w, "offer", status, bad or "filters ok, waiting for a pullback", ck, None, now)
-        self.log.info(f"{iso(now)}\t{'skip' if bad else 'watch'}\t{mint}\t{name}\t{bad or 'filters ok, waiting for a pullback'}"
+        ok_msg = "GTA name match, waiting for a spike" if __import__("strat_b_gta").is_gta_profile(s) else "filters ok, waiting for a pullback"
+        self._eval(w, "offer", status, bad or ok_msg, ck, None, now)
+        self.log.info(f"{iso(now)}\t{'skip' if bad else 'watch'}\t{mint}\t{name}\t{bad or ok_msg}"
                       f"\ttop10={audit_top10(audit)}\tholders={audit.get('holders')}\tbundle={audit.get('bundle_pct')}"
                       f"\tage={round((now - grad) / 60)}m\tsrc={src}")
 
@@ -471,6 +528,7 @@ class StratB:
         return lim
 
     def can_buy(self) -> str | None:
+        import strat_b_gta as G
         s, mode = self.c.s, self.mode()
         if mode == "LIVE":                               # held or being bought/sold for real
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ('submitting','pending','open','exiting')")["n"]
@@ -479,6 +537,10 @@ class StratB:
         mx = s["strat_b.live_max_open"] if mode == "LIVE" else s["strat_b.max_open"]    # DECISION 71: B LIVE's own slots
         if n >= mx:
             return f"{n} open (max {mx})"
+        if G.is_gta_profile(s):
+            if mode == "PAPER" and self.bankroll() - self.in_positions() < s["strat_b.trade_usd"]:
+                return "paper bankroll too low"
+            return None
         lim = self.daily_loss_limit()
         pnl = self.night_pnl(mode)                       # LIVE: real P&L only
         if pnl <= -lim:
@@ -489,7 +551,9 @@ class StratB:
 
     # ---- loop
     async def loop(self):
+        import strat_b_gta as G
         self.log.info(f"{iso()}\tstart\tmode={self.c.s['strat_b.mode']}\tenabled={self.c.s['strat_b.enabled']}"
+                      f"\tprofile={self.c.s['strat_b.profile']}"
                       f"\tA gmgn.mode={self.c.s['gmgn.mode']}\tgmgn client={'yes' if getattr(self.c, 'gmgn', None) is not None else 'no'}"
                       f"\tlive open={self.c.db.one('SELECT COUNT(*) n FROM strat_b_orders WHERE mode=? AND status=?', ('LIVE', OPEN))['n']}"
                       f"\tbankroll=${self.bankroll():,.2f}\topen={self.c.db.one('SELECT COUNT(*) n FROM strat_b_orders WHERE status=?', (OPEN,))['n']}"
@@ -501,24 +565,36 @@ class StratB:
                 note = "error"
                 self.c.error("strat_b", "tick", str(e)[:300])
             self.c.hb("strat_b", note or "")
-            await asyncio.sleep(float(self.c.s["strat_b.poll_s"]))
+            wait = float(self.c.s["strat_b.gta_poll_s"] if G.gta_active(self.c.s) else self.c.s["strat_b.poll_s"])
+            await asyncio.sleep(wait)
 
     async def tick(self, pairs=None):
         c, s = self.c, self.c.s
+        import strat_b_gta as G
         now = c.clock()
         self.apply_reverts(now)
+        if G.gta_active(s):
+            await G.ensure_baseline(c, log=self.log)
+            fired = await G.check_kill(c, log=self.log, notifier=c.notifier)
+            if fired:
+                s = self.c.s
+        if G.gta_active(s) and now - getattr(self, "_gta_hunted", 0.0) >= float(s["strat_b.gta_hunt_s"]):
+            self._gta_hunted = now
+            await self.gta_hunt(now)
         opens = c.db.rows("SELECT * FROM strat_b_orders WHERE status='open'")
         watch = []
         if self.enabled():
             exp = now - s["strat_b.watch_max_min"] * 60
-            old = now - s["strat_b.max_age_min"] * 60
-            for w in c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' AND (added_at<? OR grad_at<?)", (exp, old)):
-                why = (f"older than {s['strat_b.max_age_min'] / 1440:g}d" if w["grad_at"] and w["grad_at"] < old
-                       else f"no entry in {s['strat_b.watch_max_min']}m")
-                self._expire_watch(w, why, now, row_reason=self._last_reason.get(w["mint"]) or "no entry")
+            old_age = now - s["strat_b.max_age_min"] * 60
+            if not G.is_gta_profile(s):
+                for w in c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' AND (added_at<? OR grad_at<?)", (exp, old_age)):
+                    why = (f"older than {s['strat_b.max_age_min'] / 1440:g}d" if w["grad_at"] and w["grad_at"] < old_age
+                           else f"no entry in {s['strat_b.watch_max_min']}m")
+                    self._expire_watch(w, why, now, row_reason=self._last_reason.get(w["mint"]) or "no entry")
             watch = c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' ORDER BY added_at DESC LIMIT ?", (int(s["strat_b.max_watch"]),))
+            poll = float(s["strat_b.gta_poll_s"] if G.is_gta_profile(s) else s["strat_b.watch_poll_s"])
             if pairs is None:                            # live: watched coins every watch_poll_s, open positions every tick
-                if now - getattr(self, "_watch_polled", 0.0) < s["strat_b.watch_poll_s"]:
+                if now - getattr(self, "_watch_polled", 0.0) < poll:
                     watch = []
                 else:
                     self._watch_polled = now
@@ -556,7 +632,7 @@ class StratB:
     def _sample(self, mint, now, price):
         h = self.hist.setdefault(mint, collections.deque())
         h.append((now, price))
-        keep = max(float(self.c.s["strat_b.spike_window_s"]), 60.0) + 30
+        keep = max(float(self.c.s["strat_b.spike_window_s"]), float(self.c.s["strat_b.gta_spike_window_s"] or 0), 60.0) + 30
         while h and now - h[0][0] > keep:
             h.popleft()
         return list(h)
@@ -571,7 +647,8 @@ class StratB:
                 high, low = w["high"], min(w["low"] or price, price)
             c.db.x("UPDATE strat_b_watch SET high=?, low=?, last_price=?, updated=? WHERE mint=?", (high, low, price, now, w["mint"]))
             w = dict(w, high=high, low=low, last_price=price)
-        ok, why, m = entry_check(s, w, pair or {}, now)
+        hist = self._sample(w["mint"], now, price) if price else list(self.hist.get(w["mint"]) or [])
+        ok, why, m = entry_check(s, w, pair or {}, now, hist=hist)
         ck = checks(s, w, pair, now)
         c.db.x("UPDATE strat_b_watch SET checks=?, eval_at=?, evals=COALESCE(evals,0)+1 WHERE mint=?", (json.dumps(ck), now, w["mint"]))
         if ok:
@@ -601,13 +678,14 @@ class StratB:
         c, s = self.c, self.c.s
         size = float(s["strat_b.trade_usd"])
         f = fill_buy(s, m["price"], size, m["liq"])
-        ef = early_fields(s, now)
+        prof = (s["strat_b.profile"] or "default")
+        ef = early_fields(s, now, profile=prof)
         cur = c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,symbol,status,size_usd,signal_price,entry_price,tokens,buy_fees_usd,peak,"
-                     "last_price,last_liq,entry_liq,mc_entry,trail_armed,opened_at,why,last_seen,mode,exits_phase,early_until) "
-                     "VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0,?,?,?,'PAPER',?,?)",
+                     "last_price,last_liq,entry_liq,mc_entry,trail_armed,opened_at,why,last_seen,mode,exits_phase,early_until,profile,profit_since,spike_high_at) "
+                     "VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0,?,?,?,'PAPER',?,?,?,?,?)",
                      (now, c.night, w["mint"], w["name"], w["symbol"], size, m["price"], f["price"], f["tokens"], f["fees"], f["price"],
                       m["price"], m["liq"], m["liq"], m["mc"], now, json.dumps(dict(m, reason=why)), now,
-                      ef["exits_phase"], ef["early_until"]))
+                      ef["exits_phase"], ef["early_until"], prof, None, now))
         c.db.x("UPDATE strat_b_watch SET status='bought', reason=?, updated=? WHERE mint=?", (why, now, w["mint"]))
         self._last_reason.pop(w["mint"], None)
         self.hist[w["mint"]] = collections.deque([(now, m["price"])])
@@ -623,9 +701,10 @@ class StratB:
         c, s = self.c, self.c.s
         price = num(fields.get(pair, "priceUsd")) if pair else None
         liq = num(fields.get(pair, "liquidity.usd")) if pair else None
+        import strat_b_gta as G
         live = (o.get("mode") or "PAPER") == "LIVE"
         if not price:
-            if now - o["opened_at"] >= s["strat_b.time_stop_h"] * 3600 and o["last_price"]:
+            if (not G.is_gta_order(o, s)) and now - o["opened_at"] >= s["strat_b.time_stop_h"] * 3600 and o["last_price"]:
                 if live:
                     await self.live.sell(o, TIME + " (no price)", o["last_price"], now)
                 else:
@@ -641,8 +720,8 @@ class StratB:
         hist = self._sample(o["mint"], now, price)
         below = o["id"] in self._trail_below_floor
         reason, upd = exit_check(s, o, price, liq, hist, now, below_floor=below)
-        c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=?, last_seen=? WHERE id=?",
-               (upd["peak"], upd["trail_armed"], price, liq, now, o["id"]))
+        c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=?, last_seen=?, profit_since=?, spike_high_at=? WHERE id=?",
+               (upd["peak"], upd["trail_armed"], price, liq, now, upd.get("profit_since"), upd.get("spike_high_at"), o["id"]))
         if upd.get("below_floor"):
             self._trail_below_floor.add(o["id"])
         elif o["id"] in self._trail_below_floor and not reason:
@@ -680,6 +759,75 @@ class StratB:
         except Exception as e:
             self.c.error("strat_b", "push", str(e)[:200])
 
+    def see_raw(self, scan):
+        """GTA intake from a raw source (no auditor / scanner / rugcheck). No-op unless GTA is on and B is enabled."""
+        import strat_b_gta as G
+        if not (self.enabled() and G.is_gta_profile(self.c.s)):
+            return
+        mint = (scan or {}).get("mint")
+        if not mint:
+            return
+        coin = self.c.coin(mint) or {}
+        name = scan.get("name") or coin.get("name")
+        symbol = scan.get("symbol") or coin.get("symbol")
+        if not (name or symbol) or not G.gta_related(name, symbol):
+            return
+        self._offer({**scan, "name": name, "symbol": symbol,
+                     "b_source": scan.get("b_source") or "gta hunt"}, {"passed": True})
+
+    async def gta_hunt(self, now=None):
+        """Pull GTA-named candidates from DexScreener search, the coins table, and Gecko new_pools."""
+        import strat_b_gta as G
+        c = self.c
+        now = now or c.clock()
+        seen = set()
+
+        def take(mint, name=None, symbol=None, src="gta hunt"):
+            if not mint or mint in seen:
+                return
+            seen.add(mint)
+            try:
+                self.see_raw({"mint": mint, "name": name, "symbol": symbol, "b_source": src})
+            except Exception as e:
+                c.error("strat_b", "gta_hunt", f"{mint} {str(e)[:200]}")
+
+        try:
+            for r in c.db.rows("SELECT mint,name,symbol FROM coins ORDER BY first_seen DESC LIMIT 400"):
+                if G.gta_related(r["name"], r["symbol"]):
+                    take(r["mint"], r["name"], r["symbol"], "coins")
+        except Exception as e:
+            c.error("strat_b", "gta_hunt", f"coins {str(e)[:200]}")
+
+        fn = getattr(c.net, "gecko_new_pools", None)
+        if fn:
+            try:
+                from agents.scanner import parse_new_pools
+                payload = await fn(1)
+                for r in parse_new_pools(payload, others=True):
+                    take(r["mint"], r.get("name"), None, "gecko new_pools")
+            except Exception as e:
+                c.error("strat_b", "gta_hunt", f"new_pools {str(e)[:200]}")
+
+        search = getattr(c.net, "dex_search", None)
+        if search:
+            for term in ("gta", "rockstar", "vice city", "grand theft auto"):
+                try:
+                    rows = await search(term)
+                except Exception as e:
+                    c.error("strat_b", "gta_hunt", f"dex_search {term} {str(e)[:160]}")
+                    continue
+                for pair in rows or []:
+                    if not isinstance(pair, dict):
+                        continue
+                    if (pair.get("chainId") or "").lower() not in ("solana", "sol", ""):
+                        # keep solana; a missing chainId still gets a look
+                        if pair.get("chainId"):
+                            continue
+                    base = pair.get("baseToken") or {}
+                    take(base.get("address"), base.get("name"), base.get("symbol"), f"dex search {term}")
+
+        self.log.info(f"{iso(now)}\tgta hunt\tcandidates={len(seen)}")
+
     # ---- scorecard (publisher strat_b.json + strat_b_report.py)
     def scorecard(self, limit=40) -> dict:
         return scorecard(self.c, limit)
@@ -693,6 +841,7 @@ def _order_view(s, o):
          "label": LIVE_LABEL if mode == "LIVE" else "B PAPER",
          "sizeUsd": round(o["size_usd"], 2), "entryPrice": e, "signalPrice": o["signal_price"], "lastPrice": last,
          "peakPrice": o["peak"], "openedAt": iso(o["opened_at"]), "mcEntry": o["mc_entry"],
+         "profile": o.get("profile") or "default",
          "why": (json.loads(o["why"]).get("reason") if o["why"] else None), "link": links.coin_url(o["mint"], "solana")}
     if o["status"] == OPEN:
         if mode == "LIVE":                               # estimate from the real entry (fees + rent included)
@@ -738,7 +887,9 @@ def live_card(c, limit=40) -> dict:
     tonight = [o for o in closed if o["night"] == c.night]
     import strat_b_live
     wallet, free_sol = strat_b_live.wallet_view(c)
+    prof = (s["strat_b.profile"] or "default")
     return {"label": LIVE_LABEL, "mode": "LIVE", "active": s["strat_b.mode"] == "LIVE",
+            "profile": prof, "profileLabel": "GTA" if prof == "gta" else "Standard",
             "pnlAllUsd": round(sum(o["pnl_usd"] or 0 for o in closed), 2), "pnlTonightUsd": round(sum(o["pnl_usd"] or 0 for o in tonight), 2),
             "closedTonight": len(tonight), "closedAll": len(closed), "wins": len(wins), "losses": len(losses),
             "winRatePct": round(100 * len(wins) / len(closed), 1) if closed else None,
@@ -770,8 +921,14 @@ def scorecard(c, limit=40) -> dict:
     unreal = sum(_order_view(s, o)["pnlUsd"] for o in opens)
     w = {r["status"]: r["n"] for r in db.rows("SELECT status, COUNT(*) n FROM strat_b_watch GROUP BY status")}
     mode = "LIVE" if s["strat_b.mode"] == "LIVE" else "PAPER"
+    prof = (s["strat_b.profile"] or "default")
     return {"v": 2, "ts": iso(), "label": LIVE_LABEL if mode == "LIVE" else LABEL, "mode": mode, "paperLabel": "B PAPER",
-            "live": live_card(c, limit), "enabled": bool(s["strat_b.enabled"]), "night": c.night,
+            "live": live_card(c, limit), "enabled": bool(s["strat_b.enabled"]), "profile": prof,
+            "profileLabel": "GTA" if prof == "gta" else "Standard",
+            "gtaKillPct": float(s["strat_b.gta_kill_pct"]),
+            "gtaStopPct": float(s["strat_b.gta_stop_pct"]),
+            "gtaTpPct": float(s["strat_b.gta_tp_pct"]),
+            "gtaProfitHoldS": float(s["strat_b.gta_profit_hold_s"]), "night": c.night,
             "bankrollStart": round(start, 2), "bankroll": round(start + pnl_all, 2), "free": round(start + pnl_all - in_pos, 2),
             "inPositions": round(in_pos, 2), "unrealizedUsd": round(unreal, 2),
             "pnlAllUsd": round(pnl_all, 2), "pnlTonightUsd": round(sum(o["pnl_usd"] or 0 for o in tonight), 2),

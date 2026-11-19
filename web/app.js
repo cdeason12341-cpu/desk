@@ -297,6 +297,13 @@
     const mode = (F("state.json")?.gmgn || gmgnState())?.bMode || sb?.mode;
     return mode === "LIVE" && sb?.enabled !== false;
   }
+  function bProfile(b) {
+    return (b || F("strat_b.json"))?.profile || "default";
+  }
+  function bLiveLabel(b) {
+    if (!bIsLive(b)) return "PAPER";
+    return bProfile(b) === "gta" ? "LIVE (GTA)" : "LIVE";
+  }
   function usdShort(v) {
     if (v == null || !Number.isFinite(Number(v))) return null;
     const n = Number(v);
@@ -316,11 +323,12 @@
     const st = F("state.json");
     const b = $("#modeBadge");
     const aOn = aIsLive(), bOn = bIsLive();
-    if (aOn || bOn) { b.classList.remove("hidden"); b.textContent = aOn && bOn ? "A+B LIVE" : bOn ? "B LIVE" : "A LIVE"; b.classList.add("live"); }
+    const bLab = bLiveLabel();
+    if (aOn || bOn) { b.classList.remove("hidden"); b.textContent = aOn && bOn ? (bProfile() === "gta" ? "A+B LIVE (GTA)" : "A+B LIVE") : bOn ? bLab : "A LIVE"; b.classList.add("live"); }
     else if (st) { b.classList.remove("hidden"); b.textContent = st.mode; b.classList.toggle("live", st.mode === "LIVE"); }
     else b.classList.add("hidden");
     document.querySelectorAll(".tabs a[data-tab=strata] .tabbadge").forEach(el => { el.textContent = aOn ? "LIVE" : "OFF"; el.classList.toggle("off", !aOn); });
-    document.querySelectorAll(".tabs a[data-tab=stratb] .tabbadge").forEach(el => { el.textContent = bOn ? "LIVE" : "OFF"; el.classList.toggle("off", !bOn); });
+    document.querySelectorAll(".tabs a[data-tab=stratb] .tabbadge").forEach(el => { el.textContent = bOn ? (bProfile() === "gta" ? "GTA" : "LIVE") : "OFF"; el.classList.toggle("off", !bOn); });
     const act = F("activity.json"); const seen = +(localStorage.getItem("desk.seen") || 0);
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
     $("#bellDot").classList.toggle("hidden", !(top > seen));
@@ -566,7 +574,7 @@
         <div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions${bOn ? "" : " · Strategy B is off"}</div></div>`;
     }
     h += `<h1>Strategies</h1><div class="grid2">` + stratCard("#/strata", "Strat A", aBadge(gm.mode), sf?.pnl?.A, bg.A, bg.A?.openCount)
-      + stratCard("#/stratb", "Strat B", bBadge(bOn ? "LIVE" : "PAPER"), sf?.pnl?.B, bg.B, bg.B?.openCount) + `</div>`;
+      + stratCard("#/stratb", "Strat B", bBadge(bLiveLabel(b)), sf?.pnl?.B, bg.B, bg.B?.openCount) + `</div>`;
     return h + `<div class="hint">${bOn ? "Both strategies trade real money from this wallet, each only from its own share. They never hold the same coin." : "Strategy A trades real money from this wallet. Strategy B is off and places no real orders."} This app is read-only.</div>`;
   }
   function stratA() {
@@ -667,10 +675,17 @@
     const p = F("strat_feed.json")?.pnl?.B || { pnlUsd: lv.pnlAllUsd, pnlTonightUsd: lv.pnlTonightUsd, closed: lv.closedAll, wins: lv.wins, losses: lv.losses, winRatePct: lv.winRatePct, sinceLabel: lv.sinceLabel };
     const gb = (F("state.json")?.gmgn || gmgnState())?.budgets?.B;     // same numbers as the Wallet tab
     const bOn = bIsLive(b);
+    const gta = bProfile(b) === "gta";
+    const lab = bLiveLabel(b);
     const bSize = b.sizeLabel || sizeLadder({ capTradeUsd: b.tradeUsd, fallbackTradeUsd: b.fallbackTradeUsd, sizeLabel: b.sizeLabel });
-    let h = profitCard("Strategy B · real money · GMGN", p, bOn ? "LIVE" : (b.mode || "PAPER"), bBadge(bOn ? "LIVE" : "PAPER"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B", bSize);
+    const title = gta && bOn ? "Strategy B · GTA profile · real money · GMGN" : "Strategy B · real money · GMGN";
+    let h = profitCard(title, p, lab, bBadge(lab), (gb && gb.budgetSol != null) ? gb : lv.budget, "B", bSize);
+    if (gta && bOn) h += `<div class="card" style="white-space:normal;margin:0 0 12px"><div class="t1">GTA profile is LIVE</div>
+      <div class="sub">Buys only GTA / GTA VI / GTA 6 / Grand Theft Auto / Rockstar / Vice City coins that are in an active spike. No scanner or auditor filters.</div>
+      <div class="sub" style="margin-top:6px">Exits: +${esc(String(b.gtaTpPct ?? 20))}% net after fees, or net profit for over a minute, or the spike ends while still in net profit, or a flat −${esc(String(b.gtaStopPct ?? 30))}% stop. No trail, no time stop.</div>
+      <div class="sub" style="margin-top:6px">Kill switch: if GTA B’s night losses reach ${esc(String(b.gtaKillPct ?? 50))}% of the wallet baseline taken when GTA was first enabled tonight, standard Strat B is restored automatically and left LIVE. Open GTA positions keep their GTA exits.</div></div>`;
     if (lr) h += `<div class="sub" style="white-space:normal;margin:-4px 2px 10px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>`;
-    h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox(bOn ? "No B LIVE positions open" : "Strategy B is off", bOn ? "B will buy when a coin qualifies and its share of the wallet can cover it." : "B is paused and places no real orders."));
+    h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox(bOn ? (gta ? "No GTA positions open" : "No B LIVE positions open") : "Strategy B is off", bOn ? (gta ? "B will buy a GTA-related coin when it spikes and its share of the wallet can cover it." : "B will buy when a coin qualifies and its share of the wallet can cover it.") : "B is paused and places no real orders."));
     h += `<h1>B trades ${esc(sinceText(p))}</h1>` + ((lv.closed || []).length ? `<div class="card list">${lv.closed.map(stratBRow).join("")}</div>` : emptyBox("No B trades closed since the reset", "New closes count toward the profit above."));
     h += earlierBlock(lv.earlier || [], stratBRow);
     return h;

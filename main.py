@@ -178,6 +178,11 @@ class Desk:
             self.db.x("UPDATE nights SET ended_at=? WHERE id=? AND ended_at IS NULL", (time.time(), old))
         self.ctx.new_night()
         self.log.info(f"{iso()}	night rollover	closed={old}	new={self.ctx.night}")
+        try:
+            import strat_b_gta as G
+            await G.on_night_rollover(self.ctx, log=self.log)
+        except Exception as e:
+            self.ctx.error("desk", "gta_baseline", str(e)[:200])
         await self.night_start()
         return True
 

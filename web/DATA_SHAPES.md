@@ -181,7 +181,7 @@ bypass rows), `closedAt`. No broker ids, quotes, bodies or tx.
 ## strat_b.json (Strat B tab) — Strategy B (DECISION 54; B LIVE since DECISION 66)
 Simulated strategy, separate from GMGN and from trades.json. Never real money; the app shows it with a PAPER badge.
 ```json
-{"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","enabled":true,"night":"…",
+{"v":2,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","enabled":true,"profile":"default","profileLabel":"Standard","gtaKillPct":50,"night":"…",
  "bankrollStart":1000.0,"bankroll":1012.4,"free":962.4,"inPositions":50.0,"unrealizedUsd":-3.1,
  "pnlAllUsd":12.4,"pnlTonightUsd":12.4,"closedTonight":2,"closedAll":2,"wins":1,"losses":1,"winRatePct":50.0,"profitFactor":1.8,
  "watching":7,"skipped":12,"expired":3,
