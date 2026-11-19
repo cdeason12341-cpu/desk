@@ -9,7 +9,11 @@ Order per open LIVE mint, every risk.fast_poll_s (default 1.5 s):
 A pool spec is resolved once per mint (DexScreener pair -> pool account -> decimals) and checked against the
 DexScreener price before it is trusted: more than POOL_SANITY_PCT apart -> not used for that mint (re-tried later).
 (Jupiter's free price API is the second opinion when DexScreener disagrees, e.g. lagging a crash.)
-Never buys, never signs, never sends a transaction. Only reads."""
+Never buys, never signs, never sends a transaction. Only reads.
+
+check_buy_dex_pool (DECISION 86) is a separate pre-buy gate used by Strategy A and Strategy B
+LIVE buys. It does not write FastPrice.specs and does not change exit pricing for open positions.
+"""
 from __future__ import annotations
 import asyncio, time
 import poolprice as pp
@@ -310,3 +314,105 @@ class FastPrice:
                 if v:
                     self.dex[m] = (float(v), now)
         return {m: (self.dex[m][0], "dex") for m in mints if m in self.dex and now - self.dex[m][1] <= DEX_MAX_AGE_S}
+
+
+# ---- DECISION 86: pre-buy DexScreener vs on-chain pool (A and B LIVE). Not used for open positions.
+
+def dex_pool_diff_pct(dex_usd, pool_usd) -> float | None:
+    """Signed percent: 100 * (pool/dex - 1). None if either price is missing or not positive."""
+    try:
+        d, p = float(dex_usd), float(pool_usd)
+    except (TypeError, ValueError):
+        return None
+    if d <= 0 or p <= 0:
+        return None
+    return 100.0 * (p / d - 1.0)
+
+
+def dex_pool_skip_reason(dex_usd, pool_usd, diff_pct) -> str:
+    return (f"DexScreener is {abs(float(diff_pct)):.0f}% off the on-chain pool price "
+            f"(dex={float(dex_usd):.6g}, pool={float(pool_usd):.6g})")
+
+
+def _pool_to_usd(spec, price_in_quote, sol_usd):
+    if spec["quote"] == WSOL:
+        return price_in_quote * sol_usd if sol_usd else None
+    return price_in_quote if spec["quote"] in USD_MINTS else None
+
+
+async def read_pool_usd(net, mint, *, pair=None, sol_usd=None) -> tuple[float | None, str | None]:
+    """One-shot on-chain pool price in USD. Does not touch FastPrice.specs.
+    Returns (usd, None) or (None, error)."""
+    from agents.scanner import pick_pair
+    import fields
+    if pair is None:
+        try:
+            pairs = await net.dex_tokens([mint])
+            pair = pick_pair(pairs, mint)
+        except Exception as e:
+            return None, f"dex pair {type(e).__name__}"
+    addr = fields.get(pair, "pairAddress") if pair else None
+    if pair and (fields.get(pair, "dexId") or "") == "pumpfun":
+        addr = pp.curve_address(mint)
+    if not addr:
+        return None, "no pool"
+    try:
+        acc = (await net.rpc("getAccountInfo", [addr, {"encoding": "base64", "commitment": "confirmed"}],
+                             timeout=RPC_TIMEOUT_S) or {}).get("value")
+        if not acc:
+            return None, "pool account missing"
+        spec = pp.describe(addr, acc["owner"], pp.b64(acc), mint)
+        need = pp.needs_decimals(spec)
+        if need:
+            ms = (await net.rpc("getMultipleAccounts", [need, {"encoding": "base64"}], timeout=RPC_TIMEOUT_S) or {}).get("value") or []
+            for m_, a in zip(need, ms):
+                spec["dec_a" if m_ == spec.get("mint_a") else "dec_b"] = pp.mint_decimals(pp.b64(a) if a else None)
+        if spec["kind"] != "pump_curve":
+            spec["dec_mint"] = spec.get("dec_a") if spec["a_is_mint"] else spec.get("dec_b")
+        keys = spec["accounts"]
+        vals = (await net.rpc("getMultipleAccounts", [keys, {"encoding": "base64", "commitment": "confirmed"}],
+                              timeout=RPC_TIMEOUT_S) or {}).get("value") or []
+        if len(vals) != len(keys):
+            return None, "pool accounts missing"
+        price = pp.price_in_quote(spec, [pp.b64(v) for v in vals])
+    except pp.Unsupported as e:
+        return None, f"unsupported: {e}"
+    except Exception as e:
+        return None, f"rpc {type(e).__name__}"
+    usd = _pool_to_usd(spec, price, sol_usd)
+    if not usd:
+        return None, "no SOL/USD"
+    return float(usd), None
+
+
+async def check_buy_dex_pool(c, mint, dex_usd, *, sol_usd=None, pair=None, max_pct=None) -> dict:
+    """Pre-buy gate. blocked=True only when both prices are known and |diff| > max_pct.
+    Unreadable pool, missing dex price, or max_pct<=0 (off): blocked=False (current buy path continues)."""
+    if max_pct is None:
+        try:
+            max_pct = float(c.s["gmgn.max_dex_pool_diff_pct"] or 0)
+        except Exception:
+            max_pct = 30.0
+    max_pct = float(max_pct)
+    out = {"blocked": False, "reason": None, "dex_usd": dex_usd, "pool_usd": None, "diff_pct": None, "error": None, "max_pct": max_pct}
+    if max_pct <= 0:
+        out["error"] = "off"
+        return out
+    try:
+        dex = float(dex_usd or 0)
+    except (TypeError, ValueError):
+        dex = 0.0
+    if dex <= 0:
+        out["error"] = "no dex price"
+        return out
+    pool, err = await read_pool_usd(c.net, mint, pair=pair, sol_usd=sol_usd)
+    out["pool_usd"] = pool
+    if err or not pool:
+        out["error"] = err or "no pool price"
+        return out
+    diff = dex_pool_diff_pct(dex, pool)
+    out["diff_pct"] = diff
+    if diff is not None and abs(diff) > max_pct + 1e-9:
+        out["blocked"] = True
+        out["reason"] = dex_pool_skip_reason(dex, pool, diff)
+    return out

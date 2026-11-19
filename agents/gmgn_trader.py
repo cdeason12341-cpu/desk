@@ -1120,6 +1120,31 @@ class GmgnTrader:
         self._row(ts=self.c.clock(), night=self.c.night, mode=mode, mint=mint, name=name, status="refused", reason=reason, size_usd=size or 0)
         self._log(mode, mint, "refused", reason)
 
+    async def _dex_pool_gate(self, mint, name, dex_price):
+        """DECISION 86: skip a new buy when DexScreener is more than max_dex_pool_diff_pct off the on-chain pool.
+        If the pool can't be read, do not block. Never applied to already-open positions."""
+        import fastprice as fp
+        sol = None
+        try:
+            sol = await self.sol_usd()
+        except Exception:
+            sol = None
+        res = await fp.check_buy_dex_pool(self.c, mint, dex_price, sol_usd=sol)
+        if res.get("error") and res["error"] != "off":
+            self._log(self.mode(), mint, "dex vs pool: no pool price, not blocking", res["error"],
+                      f"dex={dex_price}")
+            return None
+        if not res["blocked"]:
+            if res.get("diff_pct") is not None:
+                self._log(self.mode(), mint, "dex vs pool ok",
+                          f"dex={res['dex_usd']:.6g}", f"pool={res['pool_usd']:.6g}", f"diff={res['diff_pct']:+.1f}%")
+            return None
+        why = res["reason"]
+        self._log(self.mode(), mint, "dex vs pool skip", why)
+        self._refuse(mint, name, self.mode(), 0, why)
+        await self.push(f"{self.prefix()}Skipped {name}: {why}", kind="gmgn_refused", mint=mint)
+        return {"status": "refused", "reason": why}
+
     async def _on_pass(self, mint, name, symbol, price, liq, score, reentry=None, mc=None, approved=False, from_dip=False):
         c, s = self.c, self.s
         mode = self.mode()
@@ -1158,6 +1183,9 @@ class GmgnTrader:
         if s["gmgn.dip_enabled"] and not from_dip:
             return await _dip._watch(c, trader=self).start(
                 mint, name, symbol, price, liq, score, reentry, want_gmgn=True, mc=mc)
+        blocked = await self._dex_pool_gate(mint, name, price)
+        if blocked:
+            return blocked
         top, why = self.ticket_usd(liq)
         if top is None:
             self._refuse(mint, name, mode, 0, why)

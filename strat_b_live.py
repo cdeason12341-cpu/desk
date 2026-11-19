@@ -127,6 +127,28 @@ class BLive:
             await self._push(f"{LIVE_LABEL} · Skipped {w['name']}: {reason}", w["mint"])
         return {"status": "refused", "reason": reason}
 
+    async def _dex_pool_gate(self, w, m, now):
+        """DECISION 86: skip a new B LIVE buy when DexScreener is off the on-chain pool. Open positions are untouched."""
+        import fastprice as fp
+        dex = (m or {}).get("price")
+        sol = None
+        try:
+            sol = await self.t.sol_usd() if self.t is not None else None
+        except Exception:
+            sol = None
+        res = await fp.check_buy_dex_pool(self.c, w["mint"], dex, sol_usd=sol)
+        if res.get("error") and res["error"] != "off":
+            self._log("LIVE dex vs pool: no pool price, not blocking", w["mint"], w["name"], res["error"], f"dex={dex}")
+            return None
+        if not res["blocked"]:
+            if res.get("diff_pct") is not None:
+                self._log("LIVE dex vs pool ok", w["mint"], w["name"],
+                          f"dex={res['dex_usd']:.6g}", f"pool={res['pool_usd']:.6g}", f"diff={res['diff_pct']:+.1f}%")
+            return None
+        why = res["reason"]
+        self._log("LIVE dex vs pool skip", w["mint"], w["name"], why)
+        return await self._refuse(w, why, 0, now)
+
     async def buy(self, w, m, why, now) -> dict:
         c, s, t = self.c, self.c.s, self.t
         mint, name = w["mint"], w["name"]
@@ -136,6 +158,9 @@ class BLive:
             return await self._refuse(w, "GMGN client not configured", 0, now)
         if t.halted():
             return await self._refuse(w, "GMGN halted (/halt)", 0, now)
+        blocked = await self._dex_pool_gate(w, m, now)
+        if blocked:
+            return blocked
         act = ",".join("?" * len(A.ACTIVE))
         if c.db.one(f"SELECT id FROM gmgn_orders WHERE mint=? AND mode='LIVE' AND status IN ({act})", (mint, *A.ACTIVE)) or \
                 c.db.one(f"SELECT id FROM strat_b_orders WHERE mint=? AND mode='LIVE' AND status IN ({act})", (mint, *A.ACTIVE)):

@@ -89,7 +89,7 @@ def action(core: str) -> str | None:
         (r"^(.+?): exits weren't attached, so I created a server-side (-[\d.]+%) stop", lambda m: f"set a {m.group(2)} stop on {m.group(1)}"),
         (r"^(.+?): .*?stop (-[\d.]+%) live on GMGN", lambda m: f"set a {m.group(2)} stop on {m.group(1)}"),
         (r"^(.+?): (.+?),? market-selling", lambda m: f"selling {m.group(1)} ({_short(_reason(m.group(2)))})"),
-        (r"^Skipped (.+?): (.+)$", lambda m: f"skipped {m.group(1)}"),
+        (r"^Skipped (.+?): (.+)$", lambda m: f"skipped {m.group(1)} ({m.group(2)})"),
         (r"^Refused (.+?): (.+)$", lambda m: f"refused {m.group(1)}"),
         (r"^(.+?) hit the (-[\d.]+%) stop", lambda m: f"stopped {m.group(1)}"),
     ]

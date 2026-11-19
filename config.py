@@ -161,6 +161,9 @@ SPECS: list[Spec] = [
     _s("gmgn.tip_fee_sol", 0.001, 0, 0.01, aliases=("gmgn tip", "tip fee"), fmt="{v:g} SOL"),
     _s("gmgn.sol_reserve", 0.02, 0.005, 1, aliases=("gmgn reserve", "sol reserve"), fmt="{v:g} SOL"),
     _s("gmgn.fee_pct", 1.0, 0, 5, aliases=("gmgn fee",), fmt="{v:g}%"),
+    # DECISION 86: skip a new A or B LIVE buy when DexScreener and the on-chain pool differ by more than this.
+    # 0 = off. Not protected: hot-loads. Does not apply to open positions or to the exit price feed.
+    _s("gmgn.max_dex_pool_diff_pct", 30.0, 0, 1000, aliases=("dex pool diff", "max dex pool diff"), fmt="{v:g}%"),
     _s("gmgn.watch_s", 60, 15, 600, aliases=("gmgn watch",), fmt="{v}s"),
     # LIVE buys above this market cap wait for the owner's Approve on Telegram (DECISION 53). 0 = off.
     _s("gmgn.approve_above_mc_usd", 0, 0, 1e12, aliases=("approve above mc", "approval mc", "mc approval"), fmt="${v:,.0f}"),
