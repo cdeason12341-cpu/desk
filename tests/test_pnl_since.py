@@ -152,9 +152,9 @@ def test_app_shows_tonight_main_and_total_aside():
     css = (root / "web" / "app.css").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v35"' in sw
-    assert "app.js?v=35" in html and "app.css?v=35" in html
-    assert "desk-shell-v34" not in sw and "v=34" not in html
+    assert 'const V = "desk-shell-v36"' in sw
+    assert "app.js?v=36" in html and "app.css?v=36" in html
+    assert "desk-shell-v35" not in sw and "v=35" not in html
     assert "function profitCard" in js and "function stratCard" in js
     assert "const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0" in js
     assert "Total ${money(tot)}" in js
@@ -165,15 +165,15 @@ def test_app_shows_tonight_main_and_total_aside():
     assert ".pnltotal" in css and "pnltotal" in js and "pnlrow" in js
 
 
-def test_app_v35_header_and_size_ladder():
-    """Shell v35: A+B LIVE header when both on, size ladder on A and B, 50/50 split when B is live."""
+def test_app_v36_header_and_size_ladder():
+    """Shell v36: A+B LIVE header when both on, size ladder on A and B, 50/50 split when B is live."""
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     js = (root / "web" / "app.js").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v35"' in sw
-    assert "app.js?v=35" in html
+    assert 'const V = "desk-shell-v36"' in sw
+    assert "app.js?v=36" in html
     assert "function bIsLive" in js and "function sizeLadder" in js and "function aIsLive" in js
     assert "A+B LIVE (GTA)" in js and "bLiveLabel" in js
     assert 'bOn ? bLab : "A LIVE"' in js
@@ -188,3 +188,81 @@ def test_app_v35_header_and_size_ladder():
     assert "LIVE (GTA)" in js and "GTA profile is LIVE" in js
     assert "A+B LIVE (GTA)" in js
     assert "startsWith(\"LIVE\")" in js
+
+
+def test_a_paper_pnl_and_feed_separate_from_live():
+    """DECISION 90: paper A P&L and events are published separately and never mixed into live A."""
+    d, c, clock, t = _desk(mode="LIVE")
+    c.s.set("gmgn.mode", "PAPER", source="test", force=True)
+    base = clock.t - 1000
+    c.db.set_meta("gmgn_paper_bankroll_since", base)
+    last = "2026-11-17-0800"
+    _order(c, mint=M2, status="closed", pnl_usd=18.64, pct=12.0, closed_at=clock.t + 10, mode="PAPER", name="JACK")
+    _order(c, mint=M3, status="closed", pnl_usd=-31.11, pct=-20.0, closed_at=clock.t + 20, mode="PAPER", name="Peanut")
+    _order(c, mint=M4, status="open", size_usd=200.0, mode="PAPER", name="Rockstar", pnl_usd=5.0, pct=2.5)
+    _order(c, mint="Pnl5111111111111111111111111111111111pump", status="closed", pnl_usd=50.0, pct=10.0,
+           closed_at=clock.t - 2000, mode="PAPER", name="OldPaper", night=last)
+    _order(c, mint="Pnl6111111111111111111111111111111111pump", status="closed", pnl_usd=9.00, pct=10.0,
+           closed_at=clock.t + 30, mode="LIVE", name="LiveA")
+    files = Builder(d).build()
+    pa, pap = files["strat_feed.json"]["pnl"]["A"], files["strat_feed.json"]["pnl"]["A_paper"]
+    assert pa["pnlTonightUsd"] == 9.00 and pa["pnlUsd"] == 9.00 and pa["mode"] == "LIVE"
+    assert pap["mode"] == "PAPER"
+    assert pap["pnlTonightUsd"] == round(18.64 - 31.11, 2) == -12.47
+    assert pap["pnlUsd"] == -12.47
+    assert pap["closedTonight"] == 2 and pap["closed"] == 2
+    assert pap["winsTonight"] == 1 and pap["lossesTonight"] == 1
+    assert pap["since"] == pnl_since.iso(base)
+    titles = [e["title"] for e in files["strat_feed.json"]["A_paper"]]
+    assert "Bought JACK" in titles and "Sold JACK" in titles
+    assert "Bought Peanut" in titles and "Sold Peanut" in titles
+    assert "Bought Rockstar" in titles
+    assert all(e.get("mode") == "PAPER" for e in files["strat_feed.json"]["A_paper"] if e["kind"] != "approval")
+    assert "LiveA" not in titles
+    assert all("JACK" not in e["title"] and "Peanut" not in e["title"] for e in files["strat_feed.json"]["A"])
+    paper = files["trades.json"]["paper"]
+    assert any(r["name"] == "JACK" and r["source"] == "GMGN" for r in paper["closed"])
+    assert any(r["name"] == "Rockstar" and r["open"] for r in paper["open"])
+    # FOMO paper must not be required for A_paper totals
+    blob = json.dumps(files["strat_feed.json"])
+    for k in LEAK_FIELDS:
+        assert f'"{k}"' not in blob, k
+
+
+def test_app_v36_shows_paper_a_profit():
+    """Shell v36: when A is PAPER, the app shows paper P&L and trades, clearly labeled, not as off/hidden."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "web" / "app.js").read_text()
+    html = (root / "web" / "index.html").read_text()
+    sw = (root / "web" / "sw.js").read_text()
+    css = (root / "web" / "app.css").read_text()
+    assert 'const V = "desk-shell-v36"' in sw
+    assert "app.js?v=36" in html and "app.css?v=36" in html
+    assert "function aIsPaper" in js and "function aPaperBody" in js
+    assert "Strategy A · PAPER · not real money" in js
+    assert "A PAPER" in js
+    assert "pnl?.A_paper" in js
+    assert 'A_paper' in js
+    assert "isPaperTrade" not in js
+    assert "isFomoPaperNoise" in js
+    assert "These numbers are PAPER — not real money, and not the wallet." in js
+    assert "Strategy A is paper trading — its profit is not real money" in js
+    assert "PAPER · not real money" in js
+    assert ".card.paper" in css
+    # paper is not treated as off
+    assert 'el.textContent = aOn ? "LIVE" : aPaper ? "PAPER" : "OFF"' in js
+    assert 'mode === "PAPER"' in js
+
+
+def test_account_changelog_skips_bad_json(tmp_path):
+    """A bad change_log row must not break account.json / publish."""
+    d, c, clock, t = _desk()
+    c.db.x("INSERT INTO change_log(ts,key,old,new,source) VALUES(?,?,?,?,?)",
+           (clock.t, "gmgn.broken_test_key", "not-json", "also-bad", "test-bad-json"))
+    c.db.x("INSERT INTO change_log(ts,key,old,new,source) VALUES(?,?,?,?,?)",
+           (clock.t + 1, "gmgn.enabled", json.dumps(True), json.dumps(True), "test-good-json"))
+    acc = Builder(d).account()
+    assert all(e["key"] != "gmgn.broken_test_key" for e in acc["changeLog"])
+    assert any(e["key"] == "gmgn.enabled" and e["source"] == "test-good-json" for e in acc["changeLog"])
+    json.dumps(acc)   # must stay valid JSON

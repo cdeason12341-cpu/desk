@@ -222,11 +222,15 @@ Every order row also has `mode` ("PAPER"|"LIVE") and `label` ("B PAPER"|"B LIVE"
 ## strat_feed.json (Wallet / Strat A / Strat B tabs) — DECISION 72
 ```
 {v, ts,
- pnl: {A: {strategy, since, sinceLabel, pnlUsd, pnlTonightUsd, closed, closedTonight, wins, losses, winRatePct, winsTonight, lossesTonight, winRateTonightPct}, B: {...same}},
- A: [{t, kind: buy|sell|stop|skip|fail|approval, title, sub, mint, name, symbol, pnlUsd, pct, sizeUsd, tone, link}],   // last 24h, newest first, max 80
+ pnl: {A: {strategy, mode, since, sinceLabel, pnlUsd, pnlTonightUsd, closed, closedTonight, wins, losses, winRatePct, winsTonight, lossesTonight, winRateTonightPct},
+       A_paper: {…same, mode:"PAPER"}, B: {...same}},
+ A: [{t, kind: buy|sell|stop|skip|fail|approval, title, sub, mint, name, symbol, pnlUsd, pct, sizeUsd, tone, link}],   // LIVE, last 24h, newest first, max 80
+ A_paper: [{…same, mode:"PAPER"}],   // Strategy A PAPER only (DECISION 90)
  B: [...same, no approvals]}
 ```
 The app's main profit figure is `pnlTonightUsd`: LIVE closes on the current 8 AM CT night (the desk's `night` id, e.g. `2026-11-18-0800`). It resets automatically at each 8 AM CT rollover. The small-print "Total" next to it is `pnlUsd`: LIVE closes at/after `since` (settings `gmgn.pnl_since` / `strat_b.pnl_since`, the 2026-11-17 6:20 PM CT reset). Display only. `winsTonight` / `lossesTonight` / `winRateTonightPct` / `closedTonight` are the current night; `wins` / `losses` / `winRatePct` / `closed` are the total since `since`. trades.json `real.since` and strat_b.json `live.since/sinceLabel/earlier/earlierClosed/earlierPnlUsd` follow the same baseline. Both the live droplet bundle and the Pages bundle carry these fields from the publisher.
+
+**Strategy A PAPER (DECISION 90).** When `state.json` `gmgn.mode` is `PAPER`, the Strat A tab, Wallet Strat A card, A's feed, and Activity show `pnl.A_paper` and `A_paper` / GMGN PAPER rows, each labeled PAPER so they cannot be mistaken for real money. `pnl.A` and `A` stay LIVE-only. `A_paper` totals count only `gmgn_orders` with `mode='PAPER'` (not FOMO paper positions, not B). Tonight is the current 8 AM CT night; Total is since the paper-bankroll reset (`gmgn_paper_bankroll_since`), or all paper closes if that meta is unset.
 
 ## push (in state.json) — phone notifications (DECISION 62)
 `state.json.push` = `{vapid, subs: [{id, cats, device, lastOk, fails}], cats, last: {t, title} | null}` or `null`.

@@ -152,6 +152,9 @@ canvas.ring{width:56px;height:56px;flex:none}#disc{width:220px!important;height:
 .seg a.on.real{background:rgba(34,197,94,.16);color:var(--green)}
 .seg a.on.paper{background:rgba(251,191,36,.14);color:var(--amber)}
 .card.paper{border-color:rgba(251,191,36,.3)}
+.card.paper .big{font-size:36px}
+.card.paper .pnltotal{font-size:13px}
+.card.paper .rowx>.sub{flex:1;min-width:0;margin-right:8px}
 .badge.bypass{background:rgba(168,85,247,.16);color:#c084fc;border-color:rgba(168,85,247,.45);font-size:10px;padding:4px 6px}
 .row .src{font:600 10px/1 var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:3px 5px;margin-left:4px;vertical-align:middle}
 .row .bpline{margin:4px 0 2px}

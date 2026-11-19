@@ -66,7 +66,31 @@ def a_live(db, s, night: str) -> dict:
     pos = db.rows("SELECT pnl_usd, night FROM positions WHERE mode='LIVE' AND status='closed' AND closed_at>=?", (t0,))
     rows = list(gm) + list(pos)
     out = summarize([r["pnl_usd"] or 0 for r in rows], [r["pnl_usd"] or 0 for r in rows if r["night"] == night])
-    out.update(strategy="A", since=iso(ts), sinceLabel=label(ts))
+    out.update(strategy="A", mode="LIVE", since=iso(ts), sinceLabel=label(ts))
+    return out
+
+
+PAPER_BANKROLL_META = "gmgn_paper_bankroll_since"   # DECISION 68 / 90: paper display baseline, not the live pnl_since reset
+
+
+def paper_since(db) -> float | None:
+    """Epoch of the Strategy A paper-bankroll reset, or None if it has never been set."""
+    try:
+        ts = float(db.meta(PAPER_BANKROLL_META) or 0)
+    except (TypeError, ValueError):
+        return None
+    return ts or None
+
+
+def a_paper(db, s, night: str) -> dict:
+    """Strategy A PAPER realized results: GMGN PAPER orders only. Not real money, not FOMO paper, not B.
+    Tonight is the current 8 AM CT night. Total is since the paper-bankroll reset, or all paper closes if
+    there is no reset. Display only (DECISION 90)."""
+    ts = paper_since(db)
+    t0 = ts if ts is not None else 0.0
+    gm = db.rows("SELECT pnl_usd, night FROM gmgn_orders WHERE mode='PAPER' AND closed_at IS NOT NULL AND closed_at>=?", (t0,))
+    out = summarize([r["pnl_usd"] or 0 for r in gm], [r["pnl_usd"] or 0 for r in gm if r["night"] == night])
+    out.update(strategy="A", mode="PAPER", since=iso(ts), sinceLabel=label(ts))
     return out
 
 

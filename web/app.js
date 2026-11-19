@@ -292,6 +292,7 @@
     el.className = "status hidden";
   }
   function aIsLive() { return gmgnState()?.mode === "LIVE"; }
+  function aIsPaper() { return gmgnState()?.mode === "PAPER" && gmgnState()?.enabled !== false; }
   function bIsLive(b) {
     const sb = b || F("strat_b.json");
     const mode = (F("state.json")?.gmgn || gmgnState())?.bMode || sb?.mode;
@@ -322,12 +323,13 @@
   function chrome() {
     const st = F("state.json");
     const b = $("#modeBadge");
-    const aOn = aIsLive(), bOn = bIsLive();
+    const aOn = aIsLive(), aPaper = aIsPaper(), bOn = bIsLive();
     const bLab = bLiveLabel();
     if (aOn || bOn) { b.classList.remove("hidden"); b.textContent = aOn && bOn ? (bProfile() === "gta" ? "A+B LIVE (GTA)" : "A+B LIVE") : bOn ? bLab : "A LIVE"; b.classList.add("live"); }
+    else if (aPaper) { b.classList.remove("hidden"); b.textContent = "A PAPER"; b.classList.remove("live"); }
     else if (st) { b.classList.remove("hidden"); b.textContent = st.mode; b.classList.toggle("live", st.mode === "LIVE"); }
     else b.classList.add("hidden");
-    document.querySelectorAll(".tabs a[data-tab=strata] .tabbadge").forEach(el => { el.textContent = aOn ? "LIVE" : "OFF"; el.classList.toggle("off", !aOn); });
+    document.querySelectorAll(".tabs a[data-tab=strata] .tabbadge").forEach(el => { el.textContent = aOn ? "LIVE" : aPaper ? "PAPER" : "OFF"; el.classList.toggle("off", !aOn && !aPaper); });
     document.querySelectorAll(".tabs a[data-tab=stratb] .tabbadge").forEach(el => { el.textContent = bOn ? (bProfile() === "gta" ? "GTA" : "LIVE") : "OFF"; el.classList.toggle("off", !bOn); });
     const act = F("activity.json"); const seen = +(localStorage.getItem("desk.seen") || 0);
     const top = act && act.items && act.items[0] ? act.items[0].id : 0;
@@ -477,7 +479,7 @@
     }
     const right = r.pnlUsd != null ? money(r.pnlUsd) : pct(r.pct);
     const inner = `<div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span></div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
+      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span>${r.mode === "PAPER" ? ` <span class="badge">PAPER</span>` : ""}</div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
       <div class="r"><div class="${up ? "green" : "red"}">${right}</div><div class="s">${pct(r.pct)}</div></div>`;
     return r.mint ? `<a class="row${r.bypass ? " byp" : ""}" href="#/coin/${encodeURIComponent(r.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
@@ -494,7 +496,7 @@
       <div class="card stat"><div class="v">${c.pools}</div><div class="k">pools seen</div></div>
       <div class="card stat"><div class="v">${c.scannerPassed}</div><div class="k">passed Scanner</div></div>
       <div class="card stat"><div class="v">${c.audited - c.auditRejected}/${c.audited}</div><div class="k">cleared Auditor</div></div>
-      <div class="card stat"><div class="v">${F("trades.json")?.real?.closedTonight ?? 0}</div><div class="k">A LIVE trades closed</div></div></div>`;
+      <div class="card stat"><div class="v">${aIsPaper() ? (F("strat_feed.json")?.pnl?.A_paper?.closedTonight ?? 0) : (F("trades.json")?.real?.closedTonight ?? 0)}</div><div class="k">${aIsPaper() ? "A PAPER trades closed" : "A LIVE trades closed"}</div></div></div>`;
   }
   function shareLine(bu, who, size) {
     if (!bu) return "";
@@ -505,28 +507,45 @@
       + (size ? `<span class="pill">${esc(size)}</span>` : "") + `</div>`;
   }
   function aBadge(mode) {
-    return mode === "LIVE" ? `<span class="badge" style="background:#c62828;color:#fff">A LIVE</span>` : `<span class="badge">A off</span>`;
+    if (mode === "LIVE") return `<span class="badge" style="background:#c62828;color:#fff">A LIVE</span>`;
+    if (mode === "PAPER") return `<span class="badge">A PAPER</span>`;
+    return `<span class="badge">A off</span>`;
   }
   // DECISION 72: profit since the owner's reset (strat_feed.json pnl.A / pnl.B), history kept below it
   function sinceText(p) { return p && p.sinceLabel ? `since ${p.sinceLabel}` : "all time"; }
   // DECISION 83: the big number is tonight's LIVE profit (8 AM CT night). Total since the
   // owner's pnl_since reset sits in small print beside it.
-  function profitCard(label, p, mode, badge, budget, who, size) {
+  function profitCard(label, p, mode, badge, budget, who, size, opts) {
     const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
     const closed = p?.closedTonight ?? 0, wins = p?.winsTonight ?? 0, losses = p?.lossesTonight ?? 0;
     const wr = p?.winRateTonightPct;
-    return `<div class="card real"><div class="rowx"><div class="sub">${label}${String(mode || "").startsWith("LIVE") ? "" : " · not active"}</div>${badge}</div>
+    const paper = !!(opts && opts.paper) || mode === "PAPER";
+    const active = String(mode || "").startsWith("LIVE") || paper;
+    return `<div class="card ${paper ? "paper" : "real"}"><div class="rowx"><div class="sub">${label}${active ? "" : " · not active"}</div>${badge}</div>
       <div class="k2">Tonight</div>
       <div class="pnlrow"><div class="big ${t >= 0 ? "green" : "red"}">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
       <div class="sub">${closed} closed · ${wins}W ${losses}L${wr == null ? "" : " · " + wr + "% win rate"}</div>
-      ${shareLine(budget, who, size)}</div>`;
+      ${paper ? (opts && opts.pills || "") : shareLine(budget, who, size)}</div>`;
   }
   const afterSince = (since, t) => !since || (t && new Date(t) >= new Date(since));
   function earlierBlock(rows, rowFn, n) {
     if (!rows.length) return "";
     return `<details class="card list earlier"><summary>Before the reset · ${rows.length} trade${rows.length === 1 ? "" : "s"} (kept, not counted)</summary>${rows.slice(0, n || 15).map(rowFn).join("")}</details>`;
   }
+  function aPaperPills(gm) {
+    const p = gm && gm.paper;
+    if (!p) return `<div class="sub" style="white-space:normal;margin-top:8px">These numbers are PAPER — not real money, and not the wallet.</div>`;
+    return `<div class="pills"><span class="pill">Paper bankroll ${money(p.bankrollUsd)}</span>`
+      + `<span class="pill green">${money(p.freeUsd)} free</span>`
+      + `<span class="pill">${money(p.inPositionsUsd ?? 0)} in paper positions</span>`
+      + (p.tradeUsd != null ? `<span class="pill">${esc(usdShort(p.tradeUsd) || money(p.tradeUsd))} paper size</span>` : "")
+      + `</div><div class="sub" style="white-space:normal;margin-top:8px">These numbers are PAPER — not real money, and not the wallet.</div>`;
+  }
+  function aGmgnPaperRows(rows) {
+    return (rows || []).filter(r => r.source === "GMGN" || (!r.source && r.mode === "PAPER"));
+  }
   function aLiveBody(gm, tr, full) {
+    if (aIsPaper()) return aPaperBody(gm, tr, full);
     const real = tr?.real, on = gm?.mode === "LIVE";
     const p = F("strat_feed.json")?.pnl?.A || (real ? { pnlUsd: real.pnlAllUsd, pnlTonightUsd: real.pnlTonightUsd, wins: real.wins, losses: real.losses, closed: (real.wins || 0) + (real.losses || 0) } : null);
     let h = profitCard("Strategy A · real money · GMGN", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A", sizeLadder(gm));
@@ -540,12 +559,29 @@
     if (full) h += earlierBlock(before, tradeRow);
     return h;
   }
-  function stratCard(href, title, badge, p, bu, openN) {
+  function aPaperBody(gm, tr, full) {
+    const paper = tr?.paper;
+    const p = F("strat_feed.json")?.pnl?.A_paper;
+    let h = profitCard("Strategy A · PAPER · not real money", p, "PAPER", aBadge("PAPER"), null, "A", null, { paper: true, pills: aPaperPills(gm) });
+    const open = paper ? aGmgnPaperRows(paper.open) : (gm?.open || []).filter(q => q.mode === "PAPER");
+    h += `<h1>A PAPER positions</h1>` + (open.length ? `<div class="card list">${open.map(paper ? tradeRow : gmgnPosRow).join("")}</div>`
+      : emptyBox("No A PAPER positions open", "A is paper trading. Buys are simulated and do not touch the wallet."));
+    const since = p?.since;
+    const closed = paper ? aGmgnPaperRows(paper.closed).filter(r => r.pnlUsd != null || r.closedAt) : [];
+    const now = closed.filter(r => afterSince(since, r.closedAt)), before = closed.filter(r => !afterSince(since, r.closedAt));
+    h += `<h1>A PAPER trades ${esc(sinceText(p))}</h1>` + (now.length ? `<div class="card list">${(full ? now : now.slice(0, 10)).map(tradeRow).join("")}</div>` : emptyBox("No A PAPER trades closed yet", "Paper closes show up here and count toward the PAPER profit above. Not real money."));
+    if (full) h += earlierBlock(before, tradeRow);
+    return h;
+  }
+  function stratCard(href, title, badge, p, bu, openN, paperNote) {
     const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
+    const foot = paperNote
+      ? `<div class="sub" style="margin-top:6px">PAPER · not real money</div>`
+      : `<div class="sub" style="margin-top:6px">${bu?.sharePct ?? "?"}% share · <b class="green">${bu?.budgetUsd != null ? money(bu.budgetUsd) : "—"}</b> free</div>`;
     return `<a class="card tap scard" href="${href}"><div class="rowx"><div class="t1">${title}</div>${badge}</div>
       <div class="pnlrow"><div class="${t >= 0 ? "green" : "red"} sv">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
       <div class="sub">tonight · ${p?.closedTonight ?? 0} closed</div>
-      <div class="sub" style="margin-top:6px">${bu?.sharePct ?? "?"}% share · <b class="green">${bu?.budgetUsd != null ? money(bu.budgetUsd) : "—"}</b> free</div>
+      ${foot}
       <div class="sub">${openN ?? 0} open · ${p?.wins ?? 0}W ${p?.losses ?? 0}L ›</div></a>`;
   }
   function wallet() {
@@ -571,11 +607,16 @@
       h += `<h1>A ${bg.A.sharePct}% of wallet</h1><div class="card">
         <div class="sv">${bg.A.shareUsd != null ? money(bg.A.shareUsd) : solAmt(bg.A.shareSol)}</div>
         <div class="sub green">${bg.A.budgetUsd != null ? money(bg.A.budgetUsd) : "—"} free to buy</div>
-        <div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions${bOn ? "" : " · Strategy B is off"}</div></div>`;
+        <div class="sub">${money(bg.A.inPositionsUsd ?? 0)} in positions${bOn ? "" : " · Strategy B is off"}${aIsPaper() ? " · A is on PAPER, so it is not buying with this wallet" : ""}</div></div>`;
     }
-    h += `<h1>Strategies</h1><div class="grid2">` + stratCard("#/strata", "Strat A", aBadge(gm.mode), sf?.pnl?.A, bg.A, bg.A?.openCount)
+    const aPnl = aIsPaper() ? (sf?.pnl?.A_paper || sf?.pnl?.A) : sf?.pnl?.A;
+    const aOpen = aIsPaper() ? aGmgnPaperRows(F("trades.json")?.paper?.open).length : bg.A?.openCount;
+    h += `<h1>Strategies</h1><div class="grid2">` + stratCard("#/strata", "Strat A", aBadge(gm.mode), aPnl, bg.A, aOpen, aIsPaper())
       + stratCard("#/stratb", "Strat B", bBadge(bLiveLabel(b)), sf?.pnl?.B, bg.B, bg.B?.openCount) + `</div>`;
-    return h + `<div class="hint">${bOn ? "Both strategies trade real money from this wallet, each only from its own share. They never hold the same coin." : "Strategy A trades real money from this wallet. Strategy B is off and places no real orders."} This app is read-only.</div>`;
+    const hint = bOn ? "Both strategies trade real money from this wallet, each only from its own share. They never hold the same coin."
+      : aIsPaper() ? "Strategy A is paper trading — its profit is not real money and does not change this wallet. Strategy B is off."
+      : "Strategy A trades real money from this wallet. Strategy B is off and places no real orders.";
+    return h + `<div class="hint">${hint} This app is read-only.</div>`;
   }
   function stratA() {
     const g = gate(); if (g) return g;
@@ -587,14 +628,18 @@
     const ic = { buy: "↗", sell: "↘", stop: "■", skip: "✕", fail: "!", approval: "?" }[e.kind] || "•";
     const right = e.pnlUsd != null ? `<div class="${e.pnlUsd >= 0 ? "green" : "red"}">${money(e.pnlUsd)}</div><div class="s">${pct(e.pct)}</div>`
       : e.sizeUsd != null ? `<div>${money(e.sizeUsd)}</div>` : "";
-    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
+    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}${e.mode === "PAPER" ? ` <span class="badge">PAPER</span>` : ""}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
     return e.mint ? `<a class="row" href="#/coin/${encodeURIComponent(e.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
   function evFeed(who, items, empty) {
     return `<h1>${who} buys, exits and skips</h1>` + ((items || []).length ? `<div class="card list">${items.slice(0, 40).map(evRow).join("")}</div>`
       : emptyBox(`No ${who} activity in the last 24 hours`, empty));
   }
-  function aFeed() { return evFeed("A's", F("strat_feed.json")?.A, "A's real buys, sells, stops, skips and approvals show up here."); }
+  function aFeed() {
+    const paper = aIsPaper();
+    return evFeed(paper ? "A's PAPER" : "A's", F("strat_feed.json")?.[paper ? "A_paper" : "A"],
+      paper ? "A's paper buys, sells, stops and skips show up here. Not real money." : "A's real buys, sells, stops, skips and approvals show up here.");
+  }
   // ---------- Strategy B (read-only; DECISION 54, B LIVE real money since DECISION 66)
   function bBadge(mode) {
     const on = String(mode || "").startsWith("LIVE");
@@ -1003,14 +1048,21 @@
     if (a?.items?.length) localStorage.setItem("desk.seen", String(a.items[0].id));
     const names = coins();
     const fomoPaper = (F("state.json")?.mode || "PAPER") !== "LIVE";
-    const isPaperTrade = i => i.mode === "PAPER" || /\bPAPER\b/.test(i.sub || "") || /\bPAPER\b/.test(i.title || "")
-      || (fomoPaper && (i.agent === "executor" || i.agent === "risk") && ["buy", "sell", "stop", "dip"].includes(i.kind));
-    const items = (a?.items || []).concat(gmgnActivityItems(gmgnState()?.liveOrders || gmgnState()?.orders)).filter(i => !isPaperTrade(i)).sort((x, y) => new Date(y.t) - new Date(x.t));
-    if (!items.length) return `<h1>Activity</h1>` + emptyBox("Nothing yet tonight", "Buys, sells, stops and rejects show up here.");
+    const isFomoPaperNoise = i => {
+      if (i.mode === "LIVE" || (i.sub || "").includes("GMGN")) return false;
+      return i.mode === "PAPER" || /\bPAPER\b/.test(i.sub || "") || /\bPAPER\b/.test(i.title || "")
+        || (fomoPaper && (i.agent === "executor" || i.agent === "risk") && ["buy", "sell", "stop", "dip"].includes(i.kind));
+    };
+    const rawOrders = (gmgnState()?.orders || []).concat(gmgnState()?.liveOrders || []);
+    const seenOrd = new Set();
+    const gmOrders = rawOrders.filter(o => o && (o.id == null || !seenOrd.has(o.id)) && (o.id == null || seenOrd.add(o.id) || true));
+    const items = (a?.items || []).concat(gmgnActivityItems(gmOrders)).filter(i => !isFomoPaperNoise(i)).sort((x, y) => new Date(y.t) - new Date(x.t));
+    if (!items.length) return `<h1>Activity</h1>` + emptyBox("Nothing yet tonight", "Buys, sells, stops and rejects show up here. Strategy A paper trades are labeled PAPER.");
     return `<h1>Activity</h1><div class="card list">${items.map(i => {
       const ic = { buy: "↗", sell: "↘", stop: "■", reject: "✕" }[i.kind] || "•";
-      const live = i.mode === "LIVE" || (i.sub || "").includes("LIVE");
-      const inner = `<div class="ico ${i.tone === "cyan" ? "cyan" : i.tone}">${ic}</div><div class="grow"><div class="t">${esc(i.title)}${live ? ` <span class="badge live">LIVE</span>` : ""}</div><div class="s">${esc(i.sub)} · ${tm(i.t)}</div></div>
+      const live = i.mode === "LIVE" || ((i.sub || "").includes("LIVE") && !(i.sub || "").includes("PAPER"));
+      const paper = i.mode === "PAPER" || (i.sub || "").includes("PAPER");
+      const inner = `<div class="ico ${i.tone === "cyan" ? "cyan" : i.tone}">${ic}</div><div class="grow"><div class="t">${esc(i.title)}${live ? ` <span class="badge live">LIVE</span>` : paper ? ` <span class="badge">PAPER</span>` : ""}</div><div class="s">${esc(i.sub)} · ${tm(i.t)}</div></div>
         <div class="r"><div class="${i.tone === "red" ? "red" : i.tone === "green" ? "green" : ""}">${esc(i.right1)}</div><div class="s">${esc(i.right2)}</div></div>`;
       return i.mint ? `<a class="row" href="#/coin/${encodeURIComponent(i.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
     }).join("")}</div>`;

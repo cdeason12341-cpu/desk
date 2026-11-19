@@ -75,11 +75,15 @@ class Builder:
         import pnl_since
         c, s = self.c, self.c.s
         since_t = time.time() - self.FEED_WINDOW_S
-        out = {"v": 1, "ts": iso(), "pnl": {}, "A": [], "B": []}
+        out = {"v": 1, "ts": iso(), "pnl": {}, "A": [], "A_paper": [], "B": []}
         try:
             out["pnl"]["A"] = pnl_since.a_live(c.db, s, c.night)
         except Exception as e:
             c.error("publisher", "strat_feed A pnl", str(e)[:200])
+        try:
+            out["pnl"]["A_paper"] = pnl_since.a_paper(c.db, s, c.night)
+        except Exception as e:
+            c.error("publisher", "strat_feed A paper pnl", str(e)[:200])
         try:
             out["pnl"]["B"] = pnl_since.b_live(c.db, s, c.night)
         except Exception as e:
@@ -120,6 +124,37 @@ class Builder:
                             a["mint"], a["name"], a["symbol"], tone="amber"))
         except Exception:
             pass
+        A_paper = out["A_paper"] = []
+        for o in c.db.rows("SELECT * FROM gmgn_orders WHERE mode='PAPER' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
+                           (since_t, since_t)):
+            nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
+            if o["status"] == "refused":
+                A_paper.append(ev(o["ts"], "skip", f"Skipped {nm}", o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                A_paper[-1]["mode"] = "PAPER"
+                continue
+            if o["status"] == "failed":
+                A_paper.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
+                A_paper[-1]["mode"] = "PAPER"
+                continue
+            A_paper.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
+                        o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
+            A_paper[-1]["mode"] = "PAPER"
+            if o["closed_at"]:
+                stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
+                A_paper.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
+                            (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
+                            pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
+                A_paper[-1]["mode"] = "PAPER"
+        try:
+            for a in c.db.rows("SELECT * FROM gmgn_approvals WHERE ts>=? ORDER BY id DESC LIMIT 30", (since_t,)):
+                nm = a["name"] or a["symbol"] or (a["mint"] or "")[:6]
+                A_paper.append(ev(a["ts"], "approval", f"Approval {a['status']} · {nm}",
+                            f"market cap ${(a['mc'] or 0):,.0f}" + (f" · score {a['score']}" if a["score"] is not None else ""),
+                            a["mint"], a["name"], a["symbol"], tone="amber"))
+                A_paper[-1]["mode"] = "PAPER"
+        except Exception:
+            pass
+
         B = out["B"]
         try:
             rows = c.db.rows("SELECT * FROM strat_b_orders WHERE mode='LIVE' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
@@ -142,7 +177,7 @@ class Builder:
                 B.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
                             (o.get("exit_reason") or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
                             pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
-        for k in ("A", "B"):
+        for k in ("A", "A_paper", "B"):
             out[k] = sorted(out[k], key=lambda e: e["t"] or "", reverse=True)[:80]
         return out
 
@@ -659,9 +694,21 @@ class Builder:
                 "fomoHandle": s["desk.fomo_handle"],
                 "profileUrl": links.profile_url(s["desk.fomo_handle"]), "signupUrl": links.SIGNUP_URL,
                 "settings": c.s.specs_public(),
-                "changeLog": [{"t": iso(r["ts"]), "key": r["key"], "old": json.loads(r["old"]), "new": json.loads(r["new"]), "source": r["source"]} for r in ch],
+                "changeLog": self._change_log_entries(ch),
                 "telegramBot": "@Denarpobot", "editVia": "telegram",
                 "gmgn": self.gmgn()}
+
+    def _change_log_entries(self, rows):
+        """Skip a bad change_log row instead of failing the whole publish (invalid old/new JSON)."""
+        out = []
+        for r in rows:
+            try:
+                old, new = json.loads(r["old"]), json.loads(r["new"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self.c.error("publisher", "change_log", f"skip id={r['id']} key={r['key']}: invalid JSON")
+                continue
+            out.append({"t": iso(r["ts"]), "key": r["key"], "old": old, "new": new, "source": r["source"]})
+        return out
 
 
     def gmgn_position(self, o):
