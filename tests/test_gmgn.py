@@ -38,7 +38,7 @@ def _client(handler):
     return gmgn.Gmgn(api_key="testkey", pem=VEC["pem"], transport=httpx.MockTransport(handler))
 
 
-def test_post_never_retried_get_retried_once_and_wallet_lock():
+def test_post_never_retried_429_closes_gate_and_wallet_lock():
     calls = []
     def h(req):
         calls.append(req.method)
@@ -49,9 +49,9 @@ def test_post_never_retried_get_retried_once_and_wallet_lock():
     assert calls == ["POST"]
     calls.clear()
     with pytest.raises(gmgn.GmgnError):
-        run(g.gas_price())
-    assert calls == ["GET", "GET"]
-    calls.clear()
+        run(g.gas_price())                 # DECISION 88: the 429 closed the gate, so nothing is sent (no GET retry)
+    assert calls == []
+    gmgn.GATE.reset()
     with pytest.raises(gmgn.WalletRefused):
         run(g.swap({"from_address": "So11111111111111111111111111111111111111112"}))
     assert calls == []

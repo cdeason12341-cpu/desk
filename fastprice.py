@@ -288,8 +288,10 @@ class FastPrice:
         amount = max(1, int(QUOTE_USD / entry * 10 ** int(dec)))
         self.quote_at = now
         try:
+            import gmgn as _g
             from gmgn import SOL as GSOL
-            q = await client.quote(mint, GSOL, amount, int(self.s["gmgn.slippage_pct"]))
+            with _g.kind("price"):                       # DECISION 88: price fallback quotes never wait or crowd out a sell
+                q = await client.quote(mint, GSOL, amount, int(self.s["gmgn.slippage_pct"]))
             out = int(float((q or {}).get("output_amount") or 0))
         except Exception as e:
             self.quote_until = now + QUOTE_BACKOFF_S

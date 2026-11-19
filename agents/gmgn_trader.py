@@ -839,6 +839,8 @@ class GmgnTrader:
         self._trail_armed: set = set()   # order ids whose desk trail is armed (logged once)
         self._trail_seen: set = set()    # order ids the desk trail has started watching (logged once)
         self._trail_retry: dict = {}     # order id -> earliest retry after a failed desk-trail sell
+        self._sell_fails: dict = {}      # order id -> consecutive failed market sells (DECISION 88 backoff)
+        self._gate_logged = 0.0          # last "GMGN gate closed" log line (throttled)
         self._trail_peak: dict = {}      # order id -> trail peak (in memory; seeded from the row on first sight)
         self._strip_retry: dict = {}     # order id -> earliest retry after a failed profit_stop_trace strip
         self._trail_below_floor: set = set()  # armed ids last seen under the net floor (DECISION 81 bounce)
@@ -1218,6 +1220,10 @@ class GmgnTrader:
             await self.push(f"{self.prefix()}Buy {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · {self.open_label('PAPER')} · simulated fill\n{exits}\nQuote: {qnote}", mint=mint)
             c.event("fill", mint)
             return {"status": "paper", "id": oid, "body": body}
+        gated = gmgn.GATE.buy_blocked()                         # DECISION 88: skip LIVE buys while the GMGN gate is closed
+        if gated:
+            self._gate_log(mint, "buy skipped", name, gated)
+            return {"status": "refused", "reason": gated}
         wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every LIVE sizing
         # DECISION 71: size against A's share of the wallet (never more than the free SOL on chain)
         size, lamports, why = pick_size(s, strategy_free_lamports(s, c.db, "A", wallet), sol_usd, self.pool_cap_usd(liq))
@@ -1265,6 +1271,10 @@ class GmgnTrader:
             self._refuse(mint, name, "LIVE", size, str(e))
             await self.push(f"GMGN · Refused {name}: {e}", kind="gmgn_refused", mint=mint)
             return {"status": "refused", "reason": str(e)}
+        gated = gmgn.GATE.buy_blocked()                   # DECISION 88: no buy while GMGN is banning us or a sell is queued
+        if gated:
+            self._gate_log(mint, "buy skipped", name, gated)
+            return {"status": "refused", "reason": gated}
         oid = self._row(ts=c.clock(), night=c.night, mode="LIVE", mint=mint, name=name, symbol=symbol, status="submitting",
                         reason=REENTRY_REASON if reentry is not None else None,
                         size_usd=size, sol_usd=sol_usd, lamports=lamports, entry_price=price, peak=price, last_price=price, last_liq=liq,
@@ -1448,8 +1458,12 @@ class GmgnTrader:
 
     async def safe_sell(self, oid, reason) -> str:
         """Market sell with guards: never a second sell while one is pending/done, never a sell with 0 tokens held.
-        -> 'sent' | 'already' | 'none_held' | 'failed'."""
+        -> 'sent' | 'already' | 'none_held' | 'failed'.
+        DECISION 88: while the GMGN gate is closed (429 ban) nothing is sent; it returns 'failed' and the caller backs off."""
         o = self.c.db.one("SELECT * FROM gmgn_orders WHERE id=?", (oid,))
+        if gmgn.GATE.closed():
+            self._gate_log(o["mint"], f"market sell #{oid} held", reason)
+            return "failed"
         if o["sell_order_id"]:
             try:
                 q = await self.client.query_order(o["sell_order_id"])
@@ -1473,6 +1487,17 @@ class GmgnTrader:
             self._upd(oid, repair=(o["repair"] or "") + f" market_sell failed: {str(e)[:120]}")
             self._log("LIVE", o["mint"], "market sell failed", str(e)[:200])
             return "failed"
+
+    def _gate_log(self, mint, *what):
+        now = time.time()
+        if now - self._gate_logged >= 30:
+            self._gate_logged = now
+            self._log("LIVE", mint, *what, gmgn.GATE.note())
+
+    def _sell_retry_at(self, oid, now, base_s):
+        """DECISION 88: per-order sell retry with backoff (x2 per failure up to 120 s), never before a GMGN ban ends."""
+        n = self._sell_fails[oid] = self._sell_fails.get(oid, 0) + 1
+        return gmgn.GATE.retry_at(now, base_s, n)
 
     async def market_sell(self, oid, reason):
         return await self.safe_sell(oid, reason) in ("sent", "already", "none_held")
@@ -2179,7 +2204,7 @@ class GmgnTrader:
                 self._upd(oid, last_check=0)
                 self._surge.pop(oid, None); return
             if res == "failed":
-                self._surge_retry[oid] = now + SURGE_RETRY_S
+                self._surge_retry[oid] = self._sell_retry_at(oid, now, SURGE_RETRY_S)
                 if not o["repair"] or "surge sell failed" not in (o["repair"] or ""):
                     self._upd(oid, repair=((self.c.db.one("SELECT repair FROM gmgn_orders WHERE id=?", (oid,)) or {}).get("repair") or "") + " surge sell failed")
                     await self.push(f"GMGN · ALERT {o['name']}: it surged and topped, but the market sell failed. "
@@ -2188,7 +2213,7 @@ class GmgnTrader:
             # sent: the server-side exits are no longer needed; cancel them so nothing fires on a later re-buy
             await self._cancel_mint_strategies(o)
             self._upd(oid, last_check=0)                 # watcher confirms the close from the chain next pass
-            self._surge.pop(oid, None); self._surge_retry.pop(oid, None)
+            self._surge.pop(oid, None); self._surge_retry.pop(oid, None); self._sell_fails.pop(oid, None)
             if floor:
                 up = 100 * (price / o["entry_price"] - 1) if o["entry_price"] else 0
                 await self.push(f"GMGN · {self._tag(o)}{o['name']}: surged +{gain:.0f}% then fell to the "
@@ -2290,7 +2315,8 @@ class GmgnTrader:
                 await self.strip_server_trails()
                 n = await self.trail_once()
                 self.c.hb("gmgn_trail", f"watching={n} armed={len(self._trail_armed)}"
-                                        + (f" src={self.fast.note()}" if self.fast is not None and n else ""))
+                                        + (f" src={self.fast.note()}" if self.fast is not None and n else "")
+                                        + (f" {gmgn.GATE.note()}" if gmgn.GATE.closed() else ""))
                 backoff = 0.0
             except Exception as e:
                 import net as _net
@@ -2393,7 +2419,8 @@ class GmgnTrader:
         if not amount:
             return None
         try:
-            q = await self.client.quote(o["mint"], SOL, int(amount), max(int(self.s["gmgn.slippage_pct"]), 25))
+            with gmgn.kind("price"):                     # DECISION 88: optional, never waits or delays the sell
+                q = await self.client.quote(o["mint"], SOL, int(amount), max(int(self.s["gmgn.slippage_pct"]), 25))
             out = int(float((q or {}).get("output_amount") or 0))
         except Exception:
             return None
@@ -2430,13 +2457,14 @@ class GmgnTrader:
                     self._upd(oid, exit_reason=o["exit_reason"])
                 self._upd(oid, last_check=0); return
             if res == "failed":
-                self._trail_retry[oid] = now + TRAIL_RETRY_S
+                self._trail_retry[oid] = self._sell_retry_at(oid, now, TRAIL_RETRY_S)
                 if f"{reason} sell failed" not in (o["repair"] or ""):
                     self._upd(oid, repair=((self.c.db.one("SELECT repair FROM gmgn_orders WHERE id=?", (oid,)) or {}).get("repair") or "") + f" {reason} sell failed")
                     await self.push(f"GMGN · ALERT {o['name']}: {EXIT_LABEL[reason]} hit, but the market sell failed. "
                                     f"The GMGN stop is still on. I'll retry.", kind="gmgn_alert", mint=o["mint"])
                 return
             await self._cancel_mint_strategies(o)
+            self._sell_fails.pop(oid, None); self._trail_retry.pop(oid, None)
             self._upd(oid, last_check=0)
             entry = o["entry_price"]
             if reason == DESK_TRAIL:

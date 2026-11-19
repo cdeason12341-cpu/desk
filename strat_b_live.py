@@ -22,7 +22,7 @@ same signed client as Strategy A (ctx.gmgn), with A's safety:
 Never reads or asks for a private key; secrets are never logged (log lines are redacted)."""
 from __future__ import annotations
 import asyncio, collections, json, time
-import chain, links
+import chain, gmgn, links
 from ctx import iso
 from agents import gmgn_trader as A
 from gmgn import LAMPORTS, MAIN_WALLET, SOL
@@ -87,12 +87,20 @@ class BLive:
         self._busy: set = set()
         self._retry_buy: dict = {}      # mint -> (until, reason)
         self._retry_sell: dict = {}     # order id -> earliest retry
+        self._sell_fails: dict = {}     # order id -> consecutive failed sells (DECISION 88 backoff)
+        self._gate_logged = 0.0
         self._last_close = 0.0
         self._trail_below_floor: set = set()
 
     @property
     def t(self):
         return getattr(self.c, "gmgn", None)
+
+    def _gate_log(self, *parts):
+        now = time.time()
+        if now - self._gate_logged >= 30:
+            self._gate_logged = now
+            self._log(*parts, gmgn.GATE.note())
 
     def _log(self, *parts):
         import secrets_store
@@ -165,6 +173,10 @@ class BLive:
             return await self._refuse(w, "GMGN client not configured", 0, now)
         if t.halted():
             return await self._refuse(w, "GMGN halted (/halt)", 0, now)
+        gated = gmgn.GATE.buy_blocked()               # DECISION 88: no buy while GMGN bans us or a sell is queued (no row, no push)
+        if gated:
+            self._gate_log("LIVE buy skipped", mint, name, gated)
+            return {"status": "refused", "reason": gated}
         import strat_b_gta as G
         gta = G.is_gta_profile(s)
         if not gta:
@@ -199,6 +211,10 @@ class BLive:
             return await self._refuse(w, "swap body mismatch", size, now)
         if t.halted() or s["strat_b.mode"] != "LIVE":                    # last line of defence before the signed swap
             return await self._refuse(w, "halted or not LIVE at send time", size, now)
+        gated = gmgn.GATE.buy_blocked()
+        if gated:
+            self._gate_log("LIVE buy skipped", mint, name, gated)
+            return {"status": "refused", "reason": gated}
         oid = self._row(ts=now, night=c.night, mode="LIVE", mint=mint, name=name, symbol=w.get("symbol"), status="submitting",
                         size_usd=size, lamports=lamports, sol_usd=sol_usd, signal_price=m["price"], entry_price=m["price"],
                         peak=m["price"], last_price=m["price"], last_liq=m["liq"], entry_liq=m["liq"], mc_entry=m["mc"],
@@ -433,6 +449,9 @@ class BLive:
     async def _market_sell(self, oid, reason) -> str:
         """Guarded market sell: never a 2nd sell while one is pending/done, never with 0 held. sent|already|none_held|failed|unknown."""
         t, o = self.t, self._get(oid)
+        if gmgn.GATE.closed():                       # DECISION 88: nothing is sent during a GMGN ban
+            self._gate_log("LIVE sell held", o["mint"], f"#{oid}", reason)
+            return "failed"
         if o["sell_order_id"]:
             try:
                 st = ((await t.client.query_order(o["sell_order_id"])) or {}).get("status")
@@ -468,7 +487,8 @@ class BLive:
                 return None
             res = await self._market_sell(oid, reason)
             if res in ("failed", "unknown"):
-                self._retry_sell[oid] = now + SELL_RETRY_S
+                n = self._sell_fails[oid] = self._sell_fails.get(oid, 0) + 1
+                self._retry_sell[oid] = gmgn.GATE.retry_at(now, SELL_RETRY_S, n)   # backoff, never before a ban ends
                 if res == "failed" and "alerted" not in (o["note"] or ""):
                     self._upd(oid, note=((self._get(oid)["note"] or "") + " alerted")[-500:])
                     await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: {reason} hit, but the market sell failed. "
@@ -479,7 +499,7 @@ class BLive:
                                                       "repair": o["note"]})
                 e = o["entry_price"] or price
                 await self._push(f"{LIVE_LABEL} · {o['name']}: {reason} at {100 * (price / e - 1):+.0f}% from entry, market-selling", o["mint"])
-            self._retry_sell.pop(oid, None)
+            self._retry_sell.pop(oid, None); self._sell_fails.pop(oid, None)
             return res
         finally:
             self._busy.discard(oid)

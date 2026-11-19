@@ -49,6 +49,8 @@ class Desk:
         self.executor, self.risk = Executor(self.ctx), Risk(self.ctx)
         from agents.gmgn_trader import GmgnTrader
         import gmgn as gmgn_api
+        if with_telegram:                                           # DECISION 88: a GMGN ban survives a restart
+            gmgn_api.GATE.configure(str(ROOT / "data" / "gmgn_gate.json"))
         client = gmgn_api.Gmgn() if with_telegram else None        # tests build the Desk without network clients
         self.gmgn = GmgnTrader(self.ctx, client if (client and client.configured) else None)
         self.ctx.gmgn = self.gmgn if self.gmgn.client else None
