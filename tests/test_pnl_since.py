@@ -145,16 +145,16 @@ def test_tonight_resets_with_night_total_stays_since_baseline():
 
 
 def test_app_shows_tonight_main_and_total_aside():
-    """Shell v33: big number is pnlTonightUsd; muted Total $X sits beside it on A, B, and Wallet."""
+    """Shell: big number is pnlTonightUsd; muted Total $X sits beside it on A, B, and Wallet."""
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     js = (root / "web" / "app.js").read_text()
     css = (root / "web" / "app.css").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v33"' in sw
-    assert "app.js?v=33" in html and "app.css?v=33" in html
-    assert "desk-shell-v32" not in sw and "v=32" not in html
+    assert 'const V = "desk-shell-v34"' in sw
+    assert "app.js?v=34" in html and "app.css?v=34" in html
+    assert "desk-shell-v33" not in sw and "v=33" not in html
     assert "function profitCard" in js and "function stratCard" in js
     assert "const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0" in js
     assert "Total ${money(tot)}" in js
@@ -165,18 +165,21 @@ def test_app_shows_tonight_main_and_total_aside():
     assert ".pnltotal" in css and "pnltotal" in js and "pnlrow" in js
 
 
-def test_app_v33_b_off_header_and_size_ladder():
-    """Shell v33: B off/paused, header A LIVE, size ladder, 100% of wallet."""
+def test_app_v34_header_and_size_ladder():
+    """Shell v34: A+B LIVE header when both on, size ladder on A and B, 50/50 split when B is live."""
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     js = (root / "web" / "app.js").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v33"' in sw
-    assert "app.js?v=33" in html
+    assert 'const V = "desk-shell-v34"' in sw
+    assert "app.js?v=34" in html
     assert "function bIsLive" in js and "function sizeLadder" in js and "function aIsLive" in js
     assert 'b.textContent = aOn && bOn ? "A+B LIVE" : bOn ? "B LIVE" : "A LIVE"' in js
     assert "bBadge(\"LIVE\")" not in js
     assert "Strategy B is off" in js and "B is paused and places no real orders" in js
     assert "A ${bg.A.sharePct}% of wallet" in js
     assert "sizeLabel" in js
+    assert "function shareLine(bu, who, size)" in js
+    assert "sizeLadder(gm)" in js
+    assert "b.sizeLabel" in js

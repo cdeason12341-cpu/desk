@@ -3,7 +3,9 @@
 A second, separate strategy built from the research Page "What top memecoin traders do vs the desk".
 It reads the same scanner + auditor feed as the live GMGN strategy (A) but decides on its own:
 it waits out the post-graduation dump, buys a pullback that is bouncing, sizes flat from its own simulated
-bankroll, and exits with a wide stop, a 2x full sell, a spike sell, a late-arming trail and a 24h time stop.
+bankroll, and exits with a wide stop (a looser first-window stop, then the normal -35%), a 2x full sell,
+Strategy A's trailing take-profit (arm at +20%, sell on a 20% drop from the peak, only at +5% net after fees),
+and a 24h time stop. The old spike sell was replaced by that trail (DECISION 85).
 
 PAPER: every fill is simulated from a DexScreener price with slippage and fees.
 LIVE (strat_b.mode, owner command only): entry logic is identical; new buys and their exits go through strat_b_live.BLive,
@@ -191,24 +193,115 @@ def fill_sell(s, price, tokens, liq) -> dict:
     return {"price": fill, "proceeds": max(0.0, gross - fees), "fees": fees}
 
 
-# ---------- exits
-def exit_check(s, o, price, liq, hist, now) -> tuple[str | None, dict]:
-    """o: open order row. hist: [(ts, price)] recent samples (incl. this one). Returns (reason|None, updates)."""
+# ---------- exits (DECISION 85: A's trail + first-window wider stop; spike sell retired)
+class _BTrailS:
+    """Settings view so A's trail_net_* helpers use B's trail keys and the same GMGN fee math as A."""
+    MAP = {"risk.trail_start_pct": ("strat_b.trail_start_pct", "risk.trail_start_pct"),
+           "risk.trail_pct": ("strat_b.trail_pct", "risk.trail_pct"),
+           "risk.trail_floor_pct": ("strat_b.trail_floor_pct", "risk.trail_floor_pct")}
+
+    def __init__(self, s):
+        self._s = s
+
+    def __getitem__(self, k):
+        if k in self.MAP:
+            primary, fallback = self.MAP[k]
+            try:
+                v = self._s[primary]
+            except Exception:
+                v = None
+            if v is not None:
+                return v
+            return self._s[fallback]
+        return self._s[k]
+
+
+def b_trail_settings(s):
+    return _BTrailS(s)
+
+
+def b_size_ladder_text(s) -> str:
+    """Public B size text, e.g. '$50, then $20'. LIVE uses strat_b.trade_usd then A's fallback / shrink."""
+    from agents.gmgn_trader import _usd_plain
+    top, mid = float(s["strat_b.trade_usd"]), float(s["gmgn.fallback_trade_usd"])
+    parts = [_usd_plain(top)]
+    if 0 < mid < top:
+        parts.append(_usd_plain(mid))
+    return ", then ".join(parts)
+
+
+def early_fields(s, start) -> dict:
+    """exits_phase / early_until at fill (or at the original buy time for an adopt)."""
+    mins = float(s["strat_b.early_stop_min"] or 0)
+    if mins > 0:
+        return {"exits_phase": "early", "early_until": float(start) + mins * 60}
+    return {"exits_phase": "normal", "early_until": None}
+
+
+def early_clock_open(s, o, now) -> bool:
+    """True while this order is still inside the first-window wider stop."""
+    if float(s["strat_b.early_stop_min"] or 0) <= 0:
+        return False
+    if (o.get("exits_phase") or "") != "early":
+        return False
+    until = o.get("early_until")
+    if until is None:
+        until = (o.get("opened_at") or 0) + float(s["strat_b.early_stop_min"]) * 60
+    return now < until
+
+
+def early_window_ended(s, o, now) -> bool:
+    """Still marked early, but the clock has elapsed (or the early window was turned off)."""
+    if (o.get("exits_phase") or "") != "early":
+        return False
+    return not early_clock_open(s, o, now)
+
+
+def b_stop_pct(s, o, now) -> float:
+    """Desk stop: -early_stop_pct in the first window, then -stop_pct. Pre-DECISION 85 rows (no phase) use -35%."""
+    if early_clock_open(s, o, now):
+        return float(s["strat_b.early_stop_pct"])
+    return float(s["strat_b.stop_pct"])
+
+
+def b_exits_text(s, o=None, now=None) -> str:
+    """Buy-push / rules line for B's exits."""
+    early_m = float(s["strat_b.early_stop_min"] or 0)
+    stop = (f"stop -{s['strat_b.early_stop_pct']:g}% for the first {early_m:g} min, then -{s['strat_b.stop_pct']:g}%"
+            if early_m > 0 else f"stop -{s['strat_b.stop_pct']:g}%")
+    if o is not None and now is not None and early_clock_open(s, o, now):
+        stop = f"stop -{s['strat_b.early_stop_pct']:g}% for the first {early_m:g} min, then -{s['strat_b.stop_pct']:g}%"
+    trail = (f"trail arms at +{s['strat_b.trail_start_pct']:g}%, sells on a {s['strat_b.trail_pct']:g}% drop from the high, "
+             f"only when expected net after fees is at least +{s['strat_b.trail_floor_pct']:g}%")
+    return f"{stop} · sell all at +{s['strat_b.take_profit_pct']:g}% · {trail}"
+
+
+def _b_trail_order(o) -> dict:
+    """Order row for A's trail_net_* helpers (entry + optional chain size)."""
+    return o if isinstance(o, dict) else dict(o)
+
+
+def exit_check(s, o, price, liq, hist, now, below_floor=False) -> tuple[str | None, dict]:
+    """o: open order row. hist is kept for callers; the spike sell is gone (DECISION 85).
+    Returns (reason|None, updates). The take-profit trail reuses A's net-floor math."""
+    from agents.gmgn_trader import trail_should_sell, trail_net_floor_price
     e = o["entry_price"]
     peak = max(o["peak"] or e, price)
-    armed = bool(o["trail_armed"]) or peak >= e * (1 + s["strat_b.trail_start_pct"] / 100.0)
-    upd = {"peak": peak, "trail_armed": 1 if armed else 0}
+    ts = b_trail_settings(s)
+    armed = bool(o["trail_armed"]) or peak >= e * (1 + float(ts["risk.trail_start_pct"]) / 100.0)
+    upd = {"peak": peak, "trail_armed": 1 if armed else 0, "below_floor": 0}
     if o.get("entry_liq") and liq is not None and liq < o["entry_liq"] * 0.2:
         return PULLED, upd
-    if price <= e * (1 - s["strat_b.stop_pct"] / 100.0):
+    if price <= e * (1 - b_stop_pct(s, o, now) / 100.0):
         return STOP, upd
     if price >= e * (1 + s["strat_b.take_profit_pct"] / 100.0):
         return TP, upd
-    win = [p for t, p in hist if now - t <= s["strat_b.spike_window_s"]]
-    if win and price > e and price >= min(win) * (1 + s["strat_b.spike_pct"] / 100.0):
-        return SPIKE, upd
-    if armed and price <= peak * (1 - s["strat_b.trail_pct"] / 100.0):
+    row = _b_trail_order(o)
+    if trail_should_sell(ts, row, price, peak, below_floor=below_floor):
         return TRAIL, upd
+    floor_px = trail_net_floor_price(ts, row)
+    if armed and floor_px is not None and price < floor_px:
+        upd["below_floor"] = 1
     if now - o["opened_at"] >= s["strat_b.time_stop_h"] * 3600:
         return TIME, upd
     return None, upd
@@ -234,14 +327,16 @@ def rules(s) -> list[dict]:
                if v("strat_b.mode") == "LIVE"
                else f"no new buys after -{v('strat_b.daily_loss_stop_pct'):g}% of bankroll in a night"),
          "why": "LIVE uses real money, not the paper bankroll (DECISION 69); PAPER stays a -10% daily stop (MoonHydra)"},
-        {"k": "Stop", "v": f"-{v('strat_b.stop_pct'):g}% from entry, from the first second" + (" (server-side on GMGN in LIVE)" if v("strat_b.mode") == "LIVE" else ""),
-         "why": "Guides cluster at -30% to -40% (three.ws uses -35%)"},
+        {"k": "Stop", "v": (f"-{v('strat_b.early_stop_pct'):g}% for the first {v('strat_b.early_stop_min'):g} min, then -{v('strat_b.stop_pct'):g}% from entry"
+                            if float(v('strat_b.early_stop_min') or 0) > 0
+                            else f"-{v('strat_b.stop_pct'):g}% from entry, from the first second")
+               + (" (server-side on GMGN in LIVE; placed at the early stop, then tightened)" if v("strat_b.mode") == "LIVE" else ""),
+         "why": "Normal stop stays -35% (three.ws). First 5 min uses -50% so a volatile open doesn't get stopped out (DECISION 85)"},
         {"k": "Take profit", "v": f"sell everything at +{v('strat_b.take_profit_pct'):g}%",
          "why": "Guides take money at 2x; pros sell 90%+ in one go (KOL Brain)"},
-        {"k": "Spike", "v": f"+{v('strat_b.spike_pct'):g}% within {v('strat_b.spike_window_s')}s (above entry) → sell everything now",
-         "why": "Pros sell into strength in one sell on 71–87% of positions (KOL Brain)"},
-        {"k": "Trail", "v": f"arms at +{v('strat_b.trail_start_pct'):g}%, sells on a {v('strat_b.trail_pct'):g}% drop from the high",
-         "why": "clusterz: trail from +50% on a 20% drop locks in about +20%"},
+        {"k": "Trail", "v": (f"arms at +{v('strat_b.trail_start_pct'):g}%, sells on a {v('strat_b.trail_pct'):g}% drop from the high, "
+                             f"only when expected net after fees is at least +{v('strat_b.trail_floor_pct'):g}%"),
+         "why": "Same trailing take-profit as Strategy A (DECISION 85); replaced the old spike sell so winners can run"},
         {"k": "Time stop", "v": f"sell after {v('strat_b.time_stop_h'):g}h", "why": "24h time stop (three.ws)"},
         {"k": "Fills", "v": f"DexScreener price ± {v('strat_b.slippage_pct'):g}% + 2×size/liquidity impact, {v('strat_b.fee_pct'):g}% fee + ${v('strat_b.net_fee_usd'):.2f} per side",
          "why": "Close to GMGN's 1% fee and priority/tip fees"},
@@ -258,6 +353,7 @@ class StratB:
         self.backoff_until = 0.0
         self._last_reason: dict[str, str] = {}
         self._loss_logged = None
+        self._trail_below_floor: set = set()    # order ids whose trail is under the net floor (DECISION 85)
         from strat_b_live import BLive                 # the only path to real orders; acts only when strat_b.mode == LIVE
         self.live = BLive(self)
 
@@ -505,10 +601,13 @@ class StratB:
         c, s = self.c, self.c.s
         size = float(s["strat_b.trade_usd"])
         f = fill_buy(s, m["price"], size, m["liq"])
+        ef = early_fields(s, now)
         cur = c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,symbol,status,size_usd,signal_price,entry_price,tokens,buy_fees_usd,peak,"
-                     "last_price,last_liq,entry_liq,mc_entry,trail_armed,opened_at,why,last_seen,mode) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0,?,?,?,'PAPER')",
+                     "last_price,last_liq,entry_liq,mc_entry,trail_armed,opened_at,why,last_seen,mode,exits_phase,early_until) "
+                     "VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,0,?,?,?,'PAPER',?,?)",
                      (now, c.night, w["mint"], w["name"], w["symbol"], size, m["price"], f["price"], f["tokens"], f["fees"], f["price"],
-                      m["price"], m["liq"], m["liq"], m["mc"], now, json.dumps(dict(m, reason=why)), now))
+                      m["price"], m["liq"], m["liq"], m["mc"], now, json.dumps(dict(m, reason=why)), now,
+                      ef["exits_phase"], ef["early_until"]))
         c.db.x("UPDATE strat_b_watch SET status='bought', reason=?, updated=? WHERE mint=?", (why, now, w["mint"]))
         self._last_reason.pop(w["mint"], None)
         self.hist[w["mint"]] = collections.deque([(now, m["price"])])
@@ -516,7 +615,7 @@ class StratB:
                       f"\tfees=${f['fees']:.2f}\tmc={m['mc']}\tliq={m['liq']}\t{why}")
         text = (f"{LABEL} · Bought {w['name']} · ${size:,.2f} @ ${f['price']:.6g}\n"
                 f"mc ${m['mc']:,.0f} · {why}\n"
-                f"stop -{s['strat_b.stop_pct']:g}% · sell all at +{s['strat_b.take_profit_pct']:g}% or on a spike · trail from +{s['strat_b.trail_start_pct']:g}%")
+                f"{b_exits_text(s)}")
         await self._push(text, w["mint"])
         c.event("fill", w["mint"])
 
@@ -535,13 +634,23 @@ class StratB:
         if live:                                         # real position: B's exits with real sells (DECISION 66)
             await self.live.manage(o, price, liq, now)
             return
+        if early_window_ended(s, o, now):
+            c.db.x("UPDATE strat_b_orders SET exits_phase='normal' WHERE id=?", (o["id"],))
+            o = dict(o, exits_phase="normal")
+            self.log.info(f"{iso(now)}\tearly stop over\t{o['mint']}\t{o['name']}\t#{o['id']}\tnow -{s['strat_b.stop_pct']:g}%")
         hist = self._sample(o["mint"], now, price)
-        reason, upd = exit_check(s, o, price, liq, hist, now)
+        below = o["id"] in self._trail_below_floor
+        reason, upd = exit_check(s, o, price, liq, hist, now, below_floor=below)
         c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=?, last_seen=? WHERE id=?",
                (upd["peak"], upd["trail_armed"], price, liq, now, o["id"]))
+        if upd.get("below_floor"):
+            self._trail_below_floor.add(o["id"])
+        elif o["id"] in self._trail_below_floor and not reason:
+            self._trail_below_floor.discard(o["id"])
         if upd["trail_armed"] and not o["trail_armed"]:
             self.log.info(f"{iso(now)}\ttrail armed\t{o['mint']}\t{o['name']}\t#{o['id']}\tpeak={upd['peak']:.6g}")
         if reason:
+            self._trail_below_floor.discard(o["id"])
             await self._sell(dict(o, **upd), price, liq, reason, now)
 
     async def _sell(self, o, price, liq, reason, now):
@@ -591,9 +700,15 @@ def _order_view(s, o):
         else:
             est = fill_sell(s, last, o["tokens"], o["last_liq"] or o["entry_liq"])
             pnl = est["proceeds"] - o["size_usd"]
+        from agents.gmgn_trader import trail_trigger, trail_net_floor_price
+        now = o.get("last_seen") or o.get("opened_at")
+        ts = b_trail_settings(s)
+        floor_px = trail_net_floor_price(ts, o) if o["trail_armed"] else None
+        trail_line = (trail_trigger(ts, e, o["peak"], floor=floor_px) if o["trail_armed"] and e else None)
         v.update(pnlUsd=round(pnl, 2), pct=round(pnl / o["size_usd"] * 100, 2), trailArmed=bool(o["trail_armed"]),
-                 stopLine=e * (1 - s["strat_b.stop_pct"] / 100.0), tpLine=e * (1 + s["strat_b.take_profit_pct"] / 100.0),
-                 trailLine=(o["peak"] * (1 - s["strat_b.trail_pct"] / 100.0)) if o["trail_armed"] else None,
+                 stopLine=e * (1 - b_stop_pct(s, o, now) / 100.0) if e else None,
+                 tpLine=e * (1 + s["strat_b.take_profit_pct"] / 100.0) if e else None,
+                 trailLine=trail_line,
                  timeStopAt=iso(o["opened_at"] + s["strat_b.time_stop_h"] * 3600))
     else:
         v.update(pnlUsd=round(o["pnl_usd"] or 0, 2), pct=o["pct"], exitReason=o["exit_reason"], exitPrice=o["exit_price"],
@@ -665,7 +780,9 @@ def scorecard(c, limit=40) -> dict:
             "profitFactor": round(gw / gl, 2) if gl > 0 else None,
             "watching": w.get("watching", 0), "skipped": w.get("skipped", 0), "expired": w.get("expired", 0),
             "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
-            "rules": rules(s)}
+            "rules": rules(s), "tradeUsd": float(s["strat_b.trade_usd"]),
+            "fallbackTradeUsd": float(s["gmgn.fallback_trade_usd"]), "minTradeUsd": float(s["gmgn.min_trade_usd"]),
+            "sizeLabel": b_size_ladder_text(s)}
 
 
 def _src_chip(src):

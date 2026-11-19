@@ -96,8 +96,8 @@ signing keys, swap bodies, quotes, tx hashes, or broker order ids.
 {"mode":"LIVE","enabled":true,"halted":false,
  "wallet":"JAP5hC5dxCz8Q9kKXMshRKEwoN7fXX3JFpkKQ7Mo5zC2","walletShort":"JAP5…5zC2",
  "sol":1.02,"usd":71.40,"solUsd":70.0,"updatedAt":"2026-11-15T02:40:00Z",
- "capTradeUsd":75.0,"stepTradeUsd":50.0,"fallbackTradeUsd":20.0,"minTradeUsd":1.0,
- "sizeLabel":"$75, then $50, then $20",
+ "capTradeUsd":50.0,"stepTradeUsd":0.0,"fallbackTradeUsd":20.0,"minTradeUsd":1.0,
+ "sizeLabel":"$50, then $20",
  "ticketsUsed":0,"ticketsMax":4,"nightSpendUsd":0.0,"nightCapUsd":300.0,
  "reserveSol":0.02,
  "paper":{"bankrollUsd":2500.0,"tradeUsd":500.0,"pnlUsd":0.0,"inPositionsUsd":0.0,"freeUsd":2500.0,"since":"2026-11-17T16:20:00Z"},
@@ -119,7 +119,7 @@ the FOMO $200 PAPER stack is labeled "FOMO practice balance (PAPER, not real mon
 since the bankroll reset, cash in open paper tickets, and free cash. It is not real money and is
 not limited by the wallet or `capTradeUsd`. `since` is an ISO timestamp or null.
 `stepTradeUsd` is the optional middle size between the top cap and the fallback (0 = off).
-`sizeLabel` is the public size text shown in the app and Telegram, e.g. `$75, then $50, then $20` (DECISION 84).
+`sizeLabel` is the public size text shown in the app and Telegram, e.g. `$50, then $20` (DECISION 85; a middle `stepTradeUsd` is included only when it sits between the cap and the fallback).
 
 
 ## scores.json (Analyst scores list, newest first, max 50 tonight)
@@ -185,11 +185,13 @@ Simulated strategy, separate from GMGN and from trades.json. Never real money; t
  "bankrollStart":1000.0,"bankroll":1012.4,"free":962.4,"inPositions":50.0,"unrealizedUsd":-3.1,
  "pnlAllUsd":12.4,"pnlTonightUsd":12.4,"closedTonight":2,"closedAll":2,"wins":1,"losses":1,"winRatePct":50.0,"profitFactor":1.8,
  "watching":7,"skipped":12,"expired":3,
+ "tradeUsd":50.0,"fallbackTradeUsd":20.0,"minTradeUsd":1.0,"sizeLabel":"$50, then $20",
  "open":[{"id":3,"mint","name","symbol","mode":"PAPER","status":"open","sizeUsd":50.0,"entryPrice":0.0001,"signalPrice":0.0000988,
           "lastPrice":0.000097,"peakPrice":0.0001,"openedAt":"…Z","mcEntry":120000,"why":"pullback -18% then +6% bounce, 74m after graduation",
           "pnlUsd":-3.1,"pct":-6.2,"trailArmed":false,"stopLine":0.000065,"tpLine":0.0002,"trailLine":null,"timeStopAt":"…Z","link":"…r=savipww…"}],
  "closed":[{… "status":"closed","pnlUsd":20.1,"pct":40.2,"exitReason":"stop|take profit 2x|spike|trail|time stop|liquidity pulled","exitPrice":…,"closedAt":"…Z"}],
- "rules":[{"k":"Stop","v":"-35% from entry, from the first second","why":"…"}]}
+ "rules":[{"k":"Stop","v":"-50% for the first 5 min, then -35% from entry","why":"…"},
+          {"k":"Trail","v":"arms at +20%, sells on a 20% drop from the high, only when expected net after fees is at least +5%","why":"…"}]}
 ```
 `state.json` also carries `stratB`: `{label, mode, enabled, bankroll, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, watching, openCount, live:{label, active, pnlAllUsd, pnlTonightUsd, closedAll, wins, losses, winRatePct, freeSol, refusedTonight, openCount}}`.
 

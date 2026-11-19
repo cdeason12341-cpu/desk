@@ -4,16 +4,21 @@ Only the fill / exit path of Strategy B. Entry (filters, triggers, watch logic, 
 Used only when strat_b.mode == LIVE (force-only, owner command). Real GMGN swaps from the same main wallet and the
 same signed client as Strategy A (ctx.gmgn), with A's safety:
 - free SOL = wallet - 0.02 SOL reserve (gmgn.sol_reserve) - SOL in flight (A LIVE + B LIVE); refuse with a reason if short.
-- size: strat_b.trade_usd when free SOL covers it with fees and rent, else A's own rule (pick_size): the
-  gmgn.fallback_trade_usd size, else whatever free SOL covers down to gmgn.min_trade_usd (owner 8:15 AM CT, t305u).
+- size: strat_b.trade_usd when that strategy's share of free SOL covers it with fees and rent, else A's own rule
+  (pick_size): gmgn.fallback_trade_usd, else whatever free SOL covers down to gmgn.min_trade_usd (owner 8:15 AM CT,
+  t305u; $50 then $20 then $1 as of DECISION 85).
 - A's per-trade cap (gmgn.cap_trade_usd); since DECISION 71 B has its own LIVE slots (strat_b.live_max_open) and night
   tickets (strat_b.live_max_tickets_night), and sizes against its own share of the wallet (strat_b.live_wallet_share_pct,
   formula in agents/gmgn_trader.py). A coin held by A LIVE is never bought by B (and vice versa).
 - /halt stops B LIVE buys too.
-- a GMGN server-side loss_stop at -strat_b.stop_pct rides on the buy (survives box sleep). If GMGN doesn't show it
-  after the fill, a limit stop_loss is created for the held amount; if that fails, market-sell and alert.
-- the desk runs B's other exits (take profit, spike, trail, time stop, liquidity pulled, plus a backup stop) with real
-  sells on A's real-time pool price feed. Closes and P&L come from the chain only (SOL in vs SOL out, fees included).
+- a GMGN server-side loss_stop rides on the buy (survives box sleep): -strat_b.early_stop_pct (default 50) for the
+  first strat_b.early_stop_min (default 5) minutes, then the desk creates a new -strat_b.stop_pct (35) stop and
+  cancels the old one (create-new then cancel-old, same pattern as A's grace swap). If the box was paused past the
+  window, the tighten runs on resume. If GMGN doesn't show the stop after the fill, a limit stop_loss is created
+  at the current window's percent; if that fails, market-sell and alert.
+- the desk runs B's other exits (take profit, trailing take-profit with A's +5% net floor, time stop, liquidity
+  pulled, plus a backup stop) with real sells on A's real-time pool price feed. The old spike sell is gone
+  (DECISION 85). Closes and P&L come from the chain only (SOL in vs SOL out, fees included).
 Never reads or asks for a private key; secrets are never logged (log lines are redacted)."""
 from __future__ import annotations
 import asyncio, collections, json, time
@@ -29,14 +34,19 @@ CLOSE_CHECK_S = 15.0          # chain close check / pending settle cadence
 SELL_RETRY_S = 15.0
 
 
-def b_conditions(s) -> list[dict]:
-    """B's only server-side exit: the -strat_b.stop_pct loss stop (B runs TP / spike / trail / time stop itself)."""
-    return [{"order_type": "loss_stop", "side": "sell", "price_scale": f"{s['strat_b.stop_pct']:g}", "sell_ratio": "100"}]
+def b_conditions(s, phase=None) -> list[dict]:
+    """B's only server-side exit: the hard stop. phase='early' uses -early_stop_pct; 'normal' uses -stop_pct.
+    B runs TP / trail / time stop itself. phase=None means whatever a new buy would attach."""
+    import strat_b as B
+    if phase is None:
+        phase = "early" if float(s["strat_b.early_stop_min"] or 0) > 0 else "normal"
+    stop = s["strat_b.early_stop_pct"] if phase == "early" else s["strat_b.stop_pct"]
+    return [{"order_type": "loss_stop", "side": "sell", "price_scale": f"{stop:g}", "sell_ratio": "100"}]
 
 
-def b_buy_body(s, mint: str, lamports: int) -> dict:
+def b_buy_body(s, mint: str, lamports: int, phase=None) -> dict:
     body = A.buy_body(s, mint, lamports)
-    body["condition_orders"] = b_conditions(s)
+    body["condition_orders"] = b_conditions(s, phase)
     return body
 
 
@@ -73,6 +83,7 @@ class BLive:
         self._retry_buy: dict = {}      # mint -> (until, reason)
         self._retry_sell: dict = {}     # order id -> earliest retry
         self._last_close = 0.0
+        self._trail_below_floor: set = set()
 
     @property
     def t(self):
@@ -145,7 +156,9 @@ class BLive:
         held = A.mint_held_live(c.db, mint)          # re-check after the awaits above; nothing awaits from here to the row insert
         if held:
             return await self._refuse(w, f"already held by {held} LIVE in the wallet", 0, now)
-        body = b_buy_body(s, mint, lamports)
+        import strat_b as B
+        ef = B.early_fields(s, now)
+        body = b_buy_body(s, mint, lamports, phase=ef["exits_phase"])
         if body["from_address"] != MAIN_WALLET or body["input_token"] != SOL or int(body["input_amount"]) != lamports:
             return await self._refuse(w, "swap body mismatch", size, now)
         if t.halted() or s["strat_b.mode"] != "LIVE":                    # last line of defence before the signed swap
@@ -153,7 +166,8 @@ class BLive:
         oid = self._row(ts=now, night=c.night, mode="LIVE", mint=mint, name=name, symbol=w.get("symbol"), status="submitting",
                         size_usd=size, lamports=lamports, sol_usd=sol_usd, signal_price=m["price"], entry_price=m["price"],
                         peak=m["price"], last_price=m["price"], last_liq=m["liq"], entry_liq=m["liq"], mc_entry=m["mc"],
-                        trail_armed=0, opened_at=now, why=json.dumps(dict(m, reason=why)), last_seen=now)
+                        trail_armed=0, opened_at=now, why=json.dumps(dict(m, reason=why)), last_seen=now,
+                        exits_phase=ef["exits_phase"], early_until=ef["early_until"])
         c.db.x("UPDATE strat_b_watch SET status='bought', reason=?, updated=? WHERE mint=?", (f"{LIVE_LABEL}: {why}", now, mint))
         self._retry_buy.pop(mint, None)
         self._busy.add(oid)
@@ -172,8 +186,7 @@ class BLive:
             self._log("LIVE BUY sent", mint, name, f"#{oid}", f"${size:.2f}", f"{lamports / LAMPORTS:.4f} SOL",
                       f"signal={m['price']:.6g}", f"mc={m['mc']}", why, (r or {}).get("order_id"))
             await self._push(f"{LIVE_LABEL} · Buying {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · mc ${m['mc']:,.0f}\n"
-                             f"{why}\nstop -{s['strat_b.stop_pct']:g}% on GMGN (server-side) · sell all at +{s['strat_b.take_profit_pct']:g}% "
-                             f"or on a spike · trail from +{s['strat_b.trail_start_pct']:g}%", mint)
+                             f"{why}\n{B.b_exits_text(s)} (stop is server-side on GMGN)", mint)
             return await self._settle(oid, r)
         finally:
             self._busy.discard(oid)
@@ -234,8 +247,9 @@ class BLive:
             if sid:
                 self._upd(oid, strategy_order_id=sid)
                 self._log("LIVE stop on GMGN", mint, f"#{oid}", sid)
+                import strat_b as B
                 await self._push(f"{LIVE_LABEL} · Bought {o['name']} · ${o['size_usd']:,.2f} @ ${o['entry_price'] or 0:.6g} · "
-                                 f"stop -{s['strat_b.stop_pct']:g}% live on GMGN", mint)
+                                 f"{B.b_exits_text(s, o, self.c.clock())} (stop live on GMGN)", mint)
                 return {"status": "open", "id": oid, "strategy_order_id": sid}
             held = await t.token_balance(mint)
             if i >= self.ATTACH_GRACE_POLLS - 1 and (held is None or held > 0):
@@ -249,15 +263,16 @@ class BLive:
         amount = held or filled
         for attempt in range(4):
             try:
+                import strat_b as B
                 r = await t.client.strategy_create(A.stop_strategy_body(s, mint, o["entry_price"], o["sol_usd"], amount,
-                                                                         stop_pct=s["strat_b.stop_pct"]))
+                                                                         stop_pct=B.b_stop_pct(s, o, self.c.clock())))
                 sid = (r or {}).get("order_id")
                 if not sid:
                     raise A.GmgnError(200, error="NO_ORDER_ID", message="strategy create returned no order_id")
                 self._upd(oid, strategy_order_id=sid, note="stop_loss strategy created")
                 self._log("LIVE stop created", mint, f"#{oid}", sid)
-                await self._push(f"{LIVE_LABEL} · Bought {o['name']} · ${o['size_usd']:,.2f} · stop -{s['strat_b.stop_pct']:g}% "
-                                 f"created on GMGN", mint)
+                await self._push(f"{LIVE_LABEL} · Bought {o['name']} · ${o['size_usd']:,.2f} · "
+                                 f"{B.b_exits_text(s, o, self.c.clock())} (stop created on GMGN)", mint)
                 return {"status": "open", "id": oid, "repair": "strategy"}
             except Exception as e:
                 self._log("LIVE stop create failed", mint, str(e)[:200])
@@ -322,7 +337,13 @@ class BLive:
                 entry_mc = round(entry * supply_ui, 2)
         except Exception:
             pass
-        stop_pct = float(s["strat_b.stop_pct"])
+        import strat_b as B
+        now = c.clock()
+        opened = float(ts) or now
+        ef = B.early_fields(s, opened)
+        if ef["exits_phase"] == "early" and now >= ef["early_until"]:
+            ef = {"exits_phase": "normal", "early_until": None}
+        stop_pct = float(s["strat_b.early_stop_pct"] if ef["exits_phase"] == "early" else s["strat_b.stop_pct"])
         existing = []
         for tag in ("STMix", "LimitOrder"):
             try:
@@ -349,24 +370,23 @@ class BLive:
         held = A.mint_held_live(c.db, mint)
         if held:
             return {"status": "refused", "reason": f"already held by {held} LIVE in the wallet"}
-        now = c.clock()
-        opened = float(ts) or now
         audit = {"adopted": True,
                  "buys": [{"sig": l["sig"], "ts": l["ts"], "sol": l["sol"], "tok": l["tok"]} for l in legs],
-                 "tok_raw": tok, "sol_lamports": lam, "phase": "normal", "strategy_kind": "limit_order",
+                 "tok_raw": tok, "sol_lamports": lam, "phase": ef["exits_phase"], "strategy_kind": "limit_order",
                  "note": note or "adopted manual buy"}
         oid = self._row(ts=opened, night=c.night, mode="LIVE", mint=mint, name=name, symbol=symbol, status="open",
                         reason="adopted manual buy", size_usd=size, sol_usd=sol_usd, lamports=lam,
                         signal_price=entry, entry_price=entry, tokens=tokens, peak=entry, last_price=entry,
                         mc_entry=entry_mc, trail_armed=0, opened_at=opened, last_seen=now, order_id="",
                         strategy_order_id=sid, note=repair, tx=legs[-1]["sig"], entry_src="chain",
-                        audit=json.dumps(audit), why=json.dumps({"reason": "adopted manual buy"}))
+                        audit=json.dumps(audit), why=json.dumps({"reason": "adopted manual buy"}),
+                        exits_phase=ef["exits_phase"], early_until=ef["early_until"])
         self._log("LIVE adopted", mint, name, f"#{oid}", f"${size:.2f}", f"stop={sid}", repair)
+        stub = {"exits_phase": ef["exits_phase"], "early_until": ef["early_until"], "opened_at": opened}
         await self._push(
             f"{LIVE_LABEL} · {symbol}: your manual buy is now managed by Strategy B (#{oid}) · "
             f"${size:,.2f} ({lam / LAMPORTS:.4f} SOL) · server-side -{stop_pct:g}% stop created on GMGN · "
-            f"trail {s['strat_b.trail_pct']:g}% from +{s['strat_b.trail_start_pct']:g}% · "
-            f"take profit +{s['strat_b.take_profit_pct']:g}%, spike rule, {s['strat_b.time_stop_h']:g}h time stop",
+            f"{B.b_exits_text(s, stub, now)}",
             mint)
         return {"status": "open", "id": oid, "strategy_order_id": sid, "entry_price": entry,
                 "size_usd": size, "lamports": lam, "tokens": tokens, "mc_entry": entry_mc,
@@ -427,20 +447,130 @@ class BLive:
         finally:
             self._busy.discard(oid)
 
+    def _b_strategy_type(self, o) -> str:
+        note = o.get("note") or ""
+        return "limit_order" if "stop_loss strategy created" in note else "smart_trade"
+
+    async def promote_early_stop(self, oid):
+        """Replace the first-window -early_stop_pct GMGN stop with the normal -stop_pct stop.
+        Create-new then cancel-old so there is never a gap with no server-side stop (same as A's grace swap)."""
+        import strat_b as B
+        if oid in self._busy:
+            return {"status": "busy"}
+        self._busy.add(oid)
+        try:
+            return await self._promote_early_stop(oid)
+        finally:
+            self._busy.discard(oid)
+
+    async def _promote_early_stop(self, oid):
+        import strat_b as B
+        o = self._get(oid)
+        if not o or o["status"] != "open" or not B.early_window_ended(self.c.s, o, self.c.clock()):
+            return {"status": o["status"] if o else "missing"}
+        s, t = self.c.s, self.t
+        if t is None or t.client is None:
+            return {"status": "open", "promote": "no client"}
+        old_sid, old_type = o.get("strategy_order_id"), self._b_strategy_type(o)
+        amount = await t.token_balance(o["mint"])
+        if amount == 0:
+            return {"status": "open", "promote": "none_held"}
+        sol_usd = o["sol_usd"] or await t.sol_usd()
+        new_sid = None
+        created_first = False
+        try:
+            body = A.stop_strategy_body(s, o["mint"], o["entry_price"], sol_usd, amount or None,
+                                        stop_pct=s["strat_b.stop_pct"])
+            new_sid = await t._create_strategy(body)
+            created_first = True
+        except Exception as e:
+            self._log("LIVE early-stop promote create-first failed", o["mint"], str(e)[:200])
+
+        if created_first:
+            cancelled = await t._cancel_strategy(old_sid, old_type)
+            note = "early_stop_swap" if cancelled else "early_stop_swap: new stop on, old cancel failed"
+            self._upd(oid, strategy_order_id=new_sid, exits_phase="normal",
+                      note=((o.get("note") or "") + (" " + note if o.get("note") else note))[-500:])
+            if cancelled:
+                await self._push(f"{LIVE_LABEL} · {o['name']}: first {s['strat_b.early_stop_min']:g} min over · "
+                                 f"stop tightened to -{s['strat_b.stop_pct']:g}% on GMGN", o["mint"])
+                return {"status": "open", "promote": "ok"}
+            await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: the -{s['strat_b.stop_pct']:g}% stop is on, "
+                             f"but I couldn't cancel the old -{s['strat_b.early_stop_pct']:g}% early stop. Both are live.",
+                             o["mint"])
+            return {"status": "open", "promote": "new_on_old_cancel_failed"}
+
+        cancelled = False
+        for _ in range(getattr(t, "SWAP_TRIES", 3)):
+            if await t._cancel_strategy(old_sid, old_type):
+                cancelled = True
+                break
+            await asyncio.sleep(getattr(t, "SWAP_GAP_S", 2))
+        if not cancelled:
+            if "early_stop_swap: cancel_failed" not in (o.get("note") or ""):
+                self._upd(oid, note=((o.get("note") or "") + " early_stop_swap: cancel_failed")[-500:])
+                await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: the early-stop window ended, but I couldn't switch "
+                                 f"to the -{s['strat_b.stop_pct']:g}% stop. The -{s['strat_b.early_stop_pct']:g}% stop "
+                                 f"is still on GMGN. I'll keep trying. The desk will sell at -{s['strat_b.stop_pct']:g}% while I'm awake.",
+                                 o["mint"])
+            return {"status": "open", "promote": "cancel_failed"}
+
+        for _ in range(getattr(t, "SWAP_TRIES", 3)):
+            try:
+                body = A.stop_strategy_body(s, o["mint"], o["entry_price"], sol_usd, amount or None,
+                                            stop_pct=s["strat_b.stop_pct"])
+                new_sid = await t._create_strategy(body)
+                self._upd(oid, strategy_order_id=new_sid, exits_phase="normal",
+                          note=((o.get("note") or "") + " early_stop_swap: cancel-then-create")[-500:])
+                await self._push(f"{LIVE_LABEL} · {o['name']}: first {s['strat_b.early_stop_min']:g} min over · "
+                                 f"stop tightened to -{s['strat_b.stop_pct']:g}% on GMGN", o["mint"])
+                return {"status": "open", "promote": "cancel_then_create"}
+            except Exception as e:
+                self._log("LIVE early-stop promote create after cancel failed", o["mint"], str(e)[:200])
+                await asyncio.sleep(getattr(t, "SWAP_GAP_S", 2))
+
+        res = await self._market_sell(oid, "no server-side stop after early-stop swap")
+        if res in ("sent", "already"):
+            await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: the early stop was cancelled and I couldn't attach "
+                             f"the -{s['strat_b.stop_pct']:g}% stop, so I market-sold it.", o["mint"])
+            return {"status": "exiting", "promote": "market_sell"}
+        if res == "none_held":
+            return {"status": "exiting", "promote": "none_held"}
+        await self._push(f"{LIVE_LABEL} · ALERT {o['name']}: the early stop was cancelled and I couldn't attach a new "
+                         f"stop or market-sell. Open GMGN and sell it yourself now.", o["mint"])
+        return {"status": "open", "promote": "failed"}
+
     # ---------- exits on the fast feed
     async def manage(self, o, price, liq, now):
-        from strat_b import exit_check
+        from strat_b import exit_check, TRAIL, b_trail_settings
         s = self.c.s
         if o["id"] in self._busy:
             return None
         hist = self.sb._sample(o["mint"], now, price)
-        reason, upd = exit_check(s, o, price, liq, hist, now)
+        below = o["id"] in self._trail_below_floor or o["id"] in self.sb._trail_below_floor
+        reason, upd = exit_check(s, o, price, liq, hist, now, below_floor=below)
         self.c.db.x("UPDATE strat_b_orders SET peak=?, trail_armed=?, last_price=?, last_liq=COALESCE(?, last_liq), last_seen=? WHERE id=?",
                     (upd["peak"], upd["trail_armed"], price, liq, now, o["id"]))
+        if upd.get("below_floor"):
+            self._trail_below_floor.add(o["id"])
+            self.sb._trail_below_floor.add(o["id"])
         if upd["trail_armed"] and not o["trail_armed"]:
             self._log("trail armed", o["mint"], o["name"], f"#{o['id']}", f"peak={upd['peak']:.6g}")
+        if reason == TRAIL and self.t is not None:
+            qsol = await self.t._trail_sell_quote_sol(o)
+            if qsol is not None and not A.trail_net_ok(b_trail_settings(s), o, price, quote_sol_out=qsol):
+                self._trail_below_floor.add(o["id"])
+                self.sb._trail_below_floor.add(o["id"])
+                self._log("trail held under net floor (quote)", o["mint"], o["name"], f"#{o['id']}",
+                          f"quote_sol={qsol:.6g}")
+                return None
         if reason:
+            self._trail_below_floor.discard(o["id"])
+            self.sb._trail_below_floor.discard(o["id"])
             return await self.sell(dict(o, **upd), reason, price, now)
+        if o["id"] in self._trail_below_floor and not upd.get("below_floor"):
+            self._trail_below_floor.discard(o["id"])
+            self.sb._trail_below_floor.discard(o["id"])
         return None
 
     def _rows(self, statuses):
@@ -451,6 +581,11 @@ class BLive:
         if t is None or t.client is None:
             return "no GMGN client"
         now = self.c.clock() if now is None else now
+        import strat_b as B
+        rows = [o for o in self._rows(("open",)) if o["entry_price"]]
+        for o in list(rows):
+            if B.early_window_ended(self.c.s, o, now) and o["id"] not in self._busy:
+                await self.promote_early_stop(o["id"])
         rows = [o for o in self._rows(("open",)) if o["entry_price"]]
         if rows:
             px = await t.exit_prices(rows, pairs)

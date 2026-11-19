@@ -488,12 +488,13 @@
       <div class="card stat"><div class="v">${c.audited - c.auditRejected}/${c.audited}</div><div class="k">cleared Auditor</div></div>
       <div class="card stat"><div class="v">${F("trades.json")?.real?.closedTonight ?? 0}</div><div class="k">A LIVE trades closed</div></div></div>`;
   }
-  function shareLine(bu, who) {
+  function shareLine(bu, who, size) {
     if (!bu) return "";
     const b = bu.budgetUsd != null ? money(bu.budgetUsd) : (bu.budgetSol != null ? solAmt(bu.budgetSol) : "—");
     const sh = bu.shareUsd != null ? money(bu.shareUsd) : (bu.shareSol != null ? solAmt(bu.shareSol) : "—");
     return `<div class="pills"><span class="pill">${bu.sharePct}% of wallet · ${sh}</span><span class="pill green">${b} free to buy</span>`
-      + `<span class="pill">${money(bu.inPositionsUsd ?? 0)} in ${who} positions</span><span class="pill">${bu.openCount ?? 0}/${bu.maxOpen ?? "?"} open</span></div>`;
+      + `<span class="pill">${money(bu.inPositionsUsd ?? 0)} in ${who} positions</span><span class="pill">${bu.openCount ?? 0}/${bu.maxOpen ?? "?"} open</span>`
+      + (size ? `<span class="pill">${esc(size)}</span>` : "") + `</div>`;
   }
   function aBadge(mode) {
     return mode === "LIVE" ? `<span class="badge" style="background:#c62828;color:#fff">A LIVE</span>` : `<span class="badge">A off</span>`;
@@ -502,7 +503,7 @@
   function sinceText(p) { return p && p.sinceLabel ? `since ${p.sinceLabel}` : "all time"; }
   // DECISION 83: the big number is tonight's LIVE profit (8 AM CT night). Total since the
   // owner's pnl_since reset sits in small print beside it.
-  function profitCard(label, p, mode, badge, budget, who) {
+  function profitCard(label, p, mode, badge, budget, who, size) {
     const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
     const closed = p?.closedTonight ?? 0, wins = p?.winsTonight ?? 0, losses = p?.lossesTonight ?? 0;
     const wr = p?.winRateTonightPct;
@@ -510,7 +511,7 @@
       <div class="k2">Tonight</div>
       <div class="pnlrow"><div class="big ${t >= 0 ? "green" : "red"}">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
       <div class="sub">${closed} closed · ${wins}W ${losses}L${wr == null ? "" : " · " + wr + "% win rate"}</div>
-      ${shareLine(budget, who)}</div>`;
+      ${shareLine(budget, who, size)}</div>`;
   }
   const afterSince = (since, t) => !since || (t && new Date(t) >= new Date(since));
   function earlierBlock(rows, rowFn, n) {
@@ -520,7 +521,7 @@
   function aLiveBody(gm, tr, full) {
     const real = tr?.real, on = gm?.mode === "LIVE";
     const p = F("strat_feed.json")?.pnl?.A || (real ? { pnlUsd: real.pnlAllUsd, pnlTonightUsd: real.pnlTonightUsd, wins: real.wins, losses: real.losses, closed: (real.wins || 0) + (real.losses || 0) } : null);
-    let h = profitCard("Strategy A · real money · GMGN", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A");
+    let h = profitCard("Strategy A · real money · GMGN", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A", sizeLadder(gm));
     const open = real ? real.open : (gm?.open || []).filter(q => q.mode === "LIVE");
     h += `<h1>A positions</h1>` + (open.length ? `<div class="card list">${open.map(real ? tradeRow : gmgnPosRow).join("")}</div>`
       : emptyBox("No A LIVE positions open", on ? "A buys on its own when a coin passes the desk. Its stop sits on GMGN." : "Strategy A isn't LIVE right now."));
@@ -666,7 +667,8 @@
     const p = F("strat_feed.json")?.pnl?.B || { pnlUsd: lv.pnlAllUsd, pnlTonightUsd: lv.pnlTonightUsd, closed: lv.closedAll, wins: lv.wins, losses: lv.losses, winRatePct: lv.winRatePct, sinceLabel: lv.sinceLabel };
     const gb = (F("state.json")?.gmgn || gmgnState())?.budgets?.B;     // same numbers as the Wallet tab
     const bOn = bIsLive(b);
-    let h = profitCard("Strategy B · real money · GMGN", p, bOn ? "LIVE" : (b.mode || "PAPER"), bBadge(bOn ? "LIVE" : "PAPER"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B");
+    const bSize = b.sizeLabel || sizeLadder({ capTradeUsd: b.tradeUsd, fallbackTradeUsd: b.fallbackTradeUsd, sizeLabel: b.sizeLabel });
+    let h = profitCard("Strategy B · real money · GMGN", p, bOn ? "LIVE" : (b.mode || "PAPER"), bBadge(bOn ? "LIVE" : "PAPER"), (gb && gb.budgetSol != null) ? gb : lv.budget, "B", bSize);
     if (lr) h += `<div class="sub" style="white-space:normal;margin:-4px 2px 10px">Last skipped: ${esc(lr.name)} ${tmCT(lr.t)}: ${esc(lr.reason)} (${lv.refusedTonight} tonight)</div>`;
     h += `<h1>B positions</h1>` + ((lv.open || []).length ? `<div class="card list">${lv.open.map(stratBRow).join("")}</div>` : emptyBox(bOn ? "No B LIVE positions open" : "Strategy B is off", bOn ? "B will buy when a coin qualifies and its share of the wallet can cover it." : "B is paused and places no real orders."));
     h += `<h1>B trades ${esc(sinceText(p))}</h1>` + ((lv.closed || []).length ? `<div class="card list">${lv.closed.map(stratBRow).join("")}</div>` : emptyBox("No B trades closed since the reset", "New closes count toward the profit above."));

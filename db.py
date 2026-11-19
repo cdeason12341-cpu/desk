@@ -87,7 +87,9 @@ class DB:
                   # DECISION 77: adopted manual buys on B LIVE (reason + audit, same shape as gmgn_orders)
                   ("strat_b_orders", "reason", "TEXT"), ("strat_b_orders", "audit", "TEXT"),
                   # DECISION 69: drop watches whose market cap stays under the floor, or whose liquidity is $0
-                  ("strat_b_watch", "under_floor_evals", "INTEGER"), ("strat_b_watch", "under_floor_since", "REAL"))
+                  ("strat_b_watch", "under_floor_evals", "INTEGER"), ("strat_b_watch", "under_floor_since", "REAL"),
+                  # DECISION 85: B early-stop window (-50% for first N min, then -35%)
+                  ("strat_b_orders", "exits_phase", "TEXT"), ("strat_b_orders", "early_until", "REAL"))
 
     def _migrate(self):
         for table, col, typ in self.MIGRATIONS:

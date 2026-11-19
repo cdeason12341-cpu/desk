@@ -214,8 +214,13 @@ SPECS: list[Spec] = [
     _s("strat_b.bounce_pct", 5.0, 0, 100, aliases=("b bounce",), fmt="+{v:g}%"),
     _s("strat_b.stop_pct", 35.0, 1, 90, aliases=("b stop",), fmt="-{v:g}%", neg=True),
     _s("strat_b.take_profit_pct", 100.0, 5, 10000, aliases=("b take profit", "b tp"), fmt="+{v:g}%"),
-    _s("strat_b.trail_start_pct", 50.0, 1, 10000, aliases=("b trail start",), fmt="+{v:g}%"),
+    _s("strat_b.trail_start_pct", 20.0, 1, 10000, aliases=("b trail start",), fmt="+{v:g}%"),
     _s("strat_b.trail_pct", 20.0, 1, 90, aliases=("b trail",), fmt="{v:g}%"),
+    _s("strat_b.trail_floor_pct", 5, 0, 100, aliases=("b trail floor", "b profit floor"), fmt="+{v:g}%"),
+    # first-window wider stop (DECISION 85): -early_stop_pct for early_stop_min, then -stop_pct. 0 min = off.
+    _s("strat_b.early_stop_pct", 50.0, 1, 90, aliases=("b early stop",), fmt="-{v:g}%", neg=True),
+    _s("strat_b.early_stop_min", 5, 0, 180, aliases=("b early stop min", "b early window"), fmt="{v}m"),
+    # spike keys kept for old rows / settings; the spike sell was replaced by the trail (DECISION 85)
     _s("strat_b.spike_pct", 30.0, 1, 1000, aliases=("b spike",), fmt="+{v:g}%"),
     _s("strat_b.spike_window_s", 60, 10, 3600, aliases=("b spike window",), fmt="{v}s"),
     _s("strat_b.time_stop_h", 24.0, 0.25, 168, aliases=("b time stop",), fmt="{v:g}h"),

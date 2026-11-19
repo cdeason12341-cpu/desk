@@ -78,11 +78,12 @@ def test_live_buy_50_with_gmgn_stop_and_real_entry():
     sw = _swaps(cl)
     assert len(sw) == 1 and sw[0]["from_address"] == gmgn.MAIN_WALLET and sw[0]["input_token"] == gmgn.SOL
     assert int(sw[0]["input_amount"]) == int(50 / SOL_USD * LAMPORTS)
-    assert sw[0]["condition_orders"] == [{"order_type": "loss_stop", "side": "sell", "price_scale": "35", "sell_ratio": "100"}]
+    assert sw[0]["condition_orders"] == [{"order_type": "loss_stop", "side": "sell", "price_scale": "50", "sell_ratio": "100"}]
     assert o["entry_src"] == "chain" and o["entry_price"] == pytest.approx(0.75 * SOL_USD / (o["tokens"]), rel=1e-6)
+    assert o["exits_phase"] == "early" and o["early_until"] > o["opened_at"]
     st = [b for k, b in cl.calls if k == "strategy_create"]               # GMGN showed no strategy -> stop created
     assert st and st[0]["sub_order_type"] == "stop_loss"
-    assert float(st[0]["check_price"]) == pytest.approx(o["entry_price"] * 0.65, rel=1e-6)
+    assert float(st[0]["check_price"]) == pytest.approx(o["entry_price"] * 0.50, rel=1e-6)
     assert o["strategy_order_id"] == "s1"
     assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders")["n"] == 0        # A's table untouched
     assert c.db.one("SELECT status FROM strat_b_watch WHERE mint=?", (M,))["status"] == "bought"
@@ -334,7 +335,8 @@ def test_adopt_manual_buy_sets_stop_counts_caps_and_blocks_a():
     st = [b for k, b in cl.calls if k == "strategy_create"]
     assert len(st) == 1 and st[0]["sub_order_type"] == "stop_loss" and st[0]["amount_in_percent"] == "100"
     assert st[0]["amount_in"] == str(4_000_000_000)
-    assert float(st[0]["check_price"]) == pytest.approx(o["entry_price"] * 0.65, rel=1e-9)
+    assert float(st[0]["check_price"]) == pytest.approx(o["entry_price"] * 0.50, rel=1e-9)
+    assert o["exits_phase"] == "early"
     assert r["strategy_order_id"] == "s1" and o["strategy_order_id"] == "s1"
     assert not _swaps(cl)
     assert mint_held_live(c.db, M) == "B"
@@ -398,3 +400,25 @@ def test_adopt_reuses_existing_stop_and_close_sums_multileg_buys():
     assert closed["status"] == "closed"
     assert closed["pnl_usd"] == round((0.6 - 0.5) * SOL_USD, 2)
     assert closed["pct"] == pytest.approx(20.0, rel=1e-6)
+
+
+def test_early_stop_tightens_to_35_after_5_min():
+    """Buy attaches a -50% GMGN stop; after 5 min the desk creates -35% first, then cancels the old stop."""
+    c, clock, sb, cl, chain = _live(wallet_sol=5.0)
+    _signal(c, clock, sb, chain)
+    o = _orders(c)[0]
+    assert o["status"] == "open" and o["exits_phase"] == "early"
+    opened, entry = o["opened_at"], o["entry_price"]
+    # still inside the window: desk holds a -40% mark
+    assert strat_b.exit_check(c.s, o, entry * 0.60, 50000, [(opened + 60, entry * 0.60)], opened + 60)[0] is None
+    clock.t = opened + 5 * 60 + 1
+    r = run(sb.live.promote_early_stop(o["id"]))
+    assert r["promote"] in ("ok", "cancel_then_create")
+    o = _orders(c)[0]
+    assert o["exits_phase"] == "normal"
+    creates = [b for k, b in cl.calls if k == "strategy_create"]
+    assert len(creates) >= 2
+    assert float(creates[-1]["check_price"]) == pytest.approx(entry * 0.65, rel=1e-6)
+    assert any(k == "strategy_cancel" for k, _ in cl.calls)
+    # desk now uses the normal -35%
+    assert strat_b.exit_check(c.s, o, entry * 0.64, 50000, [(clock.t, entry * 0.64)], clock.t)[0] == strat_b.STOP

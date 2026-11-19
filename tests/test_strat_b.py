@@ -2,7 +2,7 @@
 import json, pathlib
 import pytest
 import config, strat_b
-from strat_b import StratB, entry_check, exit_check, fill_buy, fill_sell, static_check, STOP, TP, SPIKE, TRAIL, TIME
+from strat_b import StratB, entry_check, exit_check, fill_buy, fill_sell, static_check, STOP, TP, TRAIL, TIME, b_size_ladder_text, b_exits_text
 from tests.helpers import make_ctx, pair, run
 
 M = "StrB1111111111111111111111111111111111pump"
@@ -95,9 +95,10 @@ def test_module_reaches_gmgn_only_through_strat_b_live():
     order is strat_b_live, which uses Strategy A's client and never touches keys."""
     src, mods = _imports(strat_b.__file__)
     assert mods <= {"__future__", "asyncio", "collections", "json", "time", "fields", "links", "ctx", "agents.scanner",
-                    "strat_b_live", "agents", "pnl_since"}, mods   # pnl_since: display-only baseline (DECISION 72)
+                    "strat_b_live", "agents", "agents.gmgn_trader", "pnl_since"}, mods
+    # agents.gmgn_trader: trail net-floor math only (DECISION 85). Still no GMGN client, wallet, or secrets.
     code = src.split('"""', 2)[2]
-    for bad in ("import gmgn", "gmgn_trader", "import solana", "secrets_store", "keypair", "private", "swap(", "notifier.send"):
+    for bad in ("import gmgn", "import solana", "secrets_store", "keypair", "private", "swap(", "notifier.send"):
         assert bad not in code, bad
     import strat_b_live
     lsrc, lmods = _imports(strat_b_live.__file__)
@@ -231,15 +232,61 @@ def test_exit_rules():
     assert exit_check(s, _o(), 0.64, 50000, [(100, 0.64)], 100)[0] == STOP
     assert exit_check(s, _o(), 0.70, 50000, [(100, 0.70)], 100)[0] is None          # -30%: holds (A would be out at -20%)
     assert exit_check(s, _o(), 2.01, 50000, [(100, 2.01)], 100)[0] == TP
-    assert exit_check(s, _o(), 1.40, 50000, [(50, 1.05), (100, 1.40)], 100)[0] == SPIKE   # +33% in 50s
-    assert exit_check(s, _o(), 1.40, 50000, [(100, 1.40)], 100)[0] is None          # slow climb: no spike
+    # spike sell is gone (DECISION 85): a fast +33% climb arms the trail but does not sell
+    r, upd = exit_check(s, _o(), 1.40, 50000, [(50, 1.05), (100, 1.40)], 100)
+    assert r is None and upd["trail_armed"] == 1
     r, upd = exit_check(s, _o(), 1.55, 50000, [(100, 1.55)], 100)
     assert r is None and upd["trail_armed"] == 1 and upd["peak"] == 1.55
     assert exit_check(s, _o(peak=1.55, trail_armed=1), 1.30, 50000, [(200, 1.30)], 200)[0] is None
     assert exit_check(s, _o(peak=1.55, trail_armed=1), 1.23, 50000, [(200, 1.23)], 200)[0] == TRAIL
-    assert exit_check(s, _o(peak=1.3), 1.05, 50000, [(200, 1.05)], 200)[0] is None   # +30% peak: trail never armed
+    assert exit_check(s, _o(peak=1.15), 1.05, 50000, [(200, 1.05)], 200)[0] is None   # +15% peak: trail never armed
     assert exit_check(s, _o(), 1.0, 50000, [(86400, 1.0)], 86400)[0] == TIME
     assert exit_check(s, _o(), 1.0, 5000, [(100, 1.0)], 100)[0] == "liquidity pulled"
+
+
+def test_b_trail_and_early_stop_settings():
+    c, _ = make_ctx()
+    assert c.s["strat_b.trail_start_pct"] == 20
+    assert c.s["strat_b.trail_pct"] == 20
+    assert c.s["strat_b.trail_floor_pct"] == 5
+    assert c.s["strat_b.early_stop_pct"] == 50
+    assert c.s["strat_b.early_stop_min"] == 5
+    assert c.s["strat_b.stop_pct"] == 35
+    for k in ("strat_b.trail_floor_pct", "strat_b.early_stop_pct", "strat_b.early_stop_min", "strat_b.trail_start_pct"):
+        assert k not in config.PROTECTED
+    assert config.resolve("b trail floor").key == "strat_b.trail_floor_pct"
+    assert config.resolve("b early stop").key == "strat_b.early_stop_pct"
+    assert config.resolve("b early stop min").key == "strat_b.early_stop_min"
+    assert b_size_ladder_text(c.s) == "$50, then $20"
+    assert "first 5 min" in b_exits_text(c.s) and "+5%" in b_exits_text(c.s)
+    rules = {r["k"]: r["v"] for r in strat_b.rules(c.s)}
+    assert "Spike" not in rules
+    assert "first 5 min" in rules["Stop"] and "-50%" in rules["Stop"] and "-35%" in rules["Stop"]
+    assert "at least +5%" in rules["Trail"] and "arms at +20%" in rules["Trail"]
+
+
+def test_early_stop_holds_then_tightens():
+    c, _ = make_ctx()
+    s = c.s
+    early = _o(opened_at=0, exits_phase="early", early_until=300)
+    assert exit_check(s, early, 0.60, 50000, [(100, 0.60)], 100)[0] is None          # -40% in the first 5 min: hold
+    assert exit_check(s, early, 0.49, 50000, [(100, 0.49)], 100)[0] == STOP         # -51%: early stop
+    assert exit_check(s, early, 0.64, 50000, [(400, 0.64)], 400)[0] == STOP         # after 5 min, desk uses -35%
+    # pre-DECISION 85 rows (no phase) keep the normal -35% immediately
+    assert exit_check(s, _o(), 0.64, 50000, [(100, 0.64)], 100)[0] == STOP
+
+
+def test_trail_net_floor_holds_for_a_bounce():
+    """A 20% drop from a barely-armed peak lands under the +5% net floor: hold, then sell on the bounce."""
+    c, _ = make_ctx(**{"gmgn.fee_pct": 1.0, "gmgn.priority_fee_sol": 0, "gmgn.tip_fee_sol": 0})
+    s = c.s
+    o = _o(peak=1.25, trail_armed=1)                        # trigger 1.00, net floor ~1.0707
+    r, upd = exit_check(s, o, 1.00, 50000, [(200, 1.00)], 200)
+    assert r is None and upd["below_floor"] == 1 and upd["trail_armed"] == 1
+    assert exit_check(s, o, 1.00, 50000, [(200, 1.00)], 200, below_floor=True)[0] is None
+    assert exit_check(s, o, 1.08, 50000, [(300, 1.08)], 300, below_floor=True)[0] == TRAIL
+    # a high peak: 20% drop stays above the floor and still sells
+    assert exit_check(s, _o(peak=1.55, trail_armed=1), 1.23, 50000, [(200, 1.23)], 200)[0] == TRAIL
 
 
 def test_sell_closes_once_with_pnl_and_ping():
@@ -278,6 +325,10 @@ def test_scorecard_and_publisher_files():
     assert card["mode"] == "PAPER" and card["label"] == "STRATEGY B · PAPER"
     assert len(card["open"]) == 1 and card["open"][0]["pnlUsd"] < 0 and "r=savipww" in card["open"][0]["link"]
     assert card["skipped"] == 1 and card["bankroll"] == 1000 and card["rules"]
+    assert card["sizeLabel"] == "$50, then $20" and card["tradeUsd"] == 50 and card["fallbackTradeUsd"] == 20
+    assert not any(r["k"] == "Spike" for r in card["rules"])
+    trail = next(r for r in card["rules"] if r["k"] == "Trail")
+    assert "at least +5%" in trail["v"]
     st = files["state.json"]["stratB"]
     assert st["openCount"] == 1 and st["mode"] == "PAPER"
     tr = files["trades.json"]                                    # A's real/paper lists never include B
