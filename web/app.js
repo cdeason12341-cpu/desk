@@ -515,7 +515,7 @@
     const t = p?.pnlTonightUsd ?? 0, tot = p?.pnlUsd ?? 0;
     const closed = p?.closedTonight ?? 0, wins = p?.winsTonight ?? 0, losses = p?.lossesTonight ?? 0;
     const wr = p?.winRateTonightPct;
-    return `<div class="card real"><div class="rowx"><div class="sub">${label}${mode === "LIVE" ? "" : " · not active"}</div>${badge}</div>
+    return `<div class="card real"><div class="rowx"><div class="sub">${label}${String(mode || "").startsWith("LIVE") ? "" : " · not active"}</div>${badge}</div>
       <div class="k2">Tonight</div>
       <div class="pnlrow"><div class="big ${t >= 0 ? "green" : "red"}">${money(t)}</div><div class="pnltotal">Total ${money(tot)}</div></div>
       <div class="sub">${closed} closed · ${wins}W ${losses}L${wr == null ? "" : " · " + wr + "% win rate"}</div>
@@ -597,7 +597,9 @@
   function aFeed() { return evFeed("A's", F("strat_feed.json")?.A, "A's real buys, sells, stops, skips and approvals show up here."); }
   // ---------- Strategy B (read-only; DECISION 54, B LIVE real money since DECISION 66)
   function bBadge(mode) {
-    return mode === "LIVE" ? `<span class="badge" style="background:#c62828;color:#fff">B LIVE</span>` : `<span class="badge">B off</span>`;
+    const on = String(mode || "").startsWith("LIVE");
+    const lab = (mode && mode !== "LIVE" && on) ? mode : "B LIVE";
+    return on ? `<span class="badge" style="background:#c62828;color:#fff">${lab}</span>` : `<span class="badge">B off</span>`;
   }
   function stratBRow(r) {
     const name = r.name || r.symbol || short(r.mint);

@@ -187,3 +187,4 @@ def test_app_v35_header_and_size_ladder():
     assert "function bLiveLabel" in js and "function bProfile" in js
     assert "LIVE (GTA)" in js and "GTA profile is LIVE" in js
     assert "A+B LIVE (GTA)" in js
+    assert "startsWith(\"LIVE\")" in js
