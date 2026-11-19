@@ -268,7 +268,7 @@ def test_live_every_other_buy_20_each_60_cap(monkeypatch):
     assert b[0]["condition_orders"] == [{"order_type": "loss_stop", "side": "sell", "price_scale": "50", "sell_ratio": "100"}]
     assert "condition_orders" not in b[1] and "condition_orders" not in b[2]   # adds ride the first buy's backstop
     assert json.loads(o["audit"])["buys"] and json.loads(o["audit"]).get("pending") == []
-    assert w.state()["buys"] == 7
+    assert w.state()["buys"] == 7 and w.state()["mint_buys"][MT] == 7
     assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders WHERE status='refused'")["n"] == 0
     # he sells half -> 50% of our whole position; then the rest -> 100%, row exits, closes when the wallet is empty
     clock.t += 5
@@ -287,6 +287,20 @@ def test_live_every_other_buy_20_each_60_cap(monkeypatch):
     bal["tok"][MT] = 0
     run(w.live_tick(o, 0.01, 1000, clock.t))
     assert c.db.one("SELECT status FROM gmgn_orders WHERE id=?", (o["id"],))["status"] == "closed"
+
+
+def test_live_every_other_counts_per_coin(monkeypatch):
+    # DECISION 94 (owner 5:40 PM CT): every other buy IN THE SAME COIN; a new coin's first buy is always copied
+    c, clock, t, w, ch, bal = live(monkeypatch, wallet_sol=40.0)
+    seq = [MT, M2, MT, M2, MT]                       # per coin: MT #1 #2 #3, M2 #1 #2
+    for i, m in enumerate(seq):
+        clock.t += 5
+        ch.add(tx(f"p{i}", 100 * L, 99 * L, i * 10, i * 10 + 10, mint=m), clock.t)
+        run(w.poll_once())
+    rows = {o["mint"]: o for o in c.db.rows("SELECT * FROM gmgn_orders WHERE a_kind='copy' AND mode='LIVE'")}
+    assert rows[MT]["size_usd"] == 40.0 and rows[M2]["size_usd"] == 20.0   # MT #1 + #3; M2 #1 only
+    assert len(swaps(t)) == 3
+    assert w.state()["mint_buys"] == {MT: 3, M2: 2} and w.state()["buys"] == 5
 
 
 def test_live_max_5_coins_and_insufficient_balance_no_gmgn_call(monkeypatch):

@@ -170,7 +170,7 @@ def status(c) -> dict:
             "lastDelayS": st.get("last_delay_s"), "seenTrades": int(st.get("trades") or 0),
             "mode": s["gmgn.mode"], "paperOnly": s["gmgn.mode"] != "LIVE", "everyN": int(s["copy.every_n"]),
             "maxPositionUsd": float(s["copy.max_position_usd"]), "flatUsd": float(s["copy.flat_usd"]),
-            "hisBuys": int(st.get("buys") or 0), "smallLive": False}
+            "hisBuys": int(st.get("buys") or 0), "everyNPer": "coin", "smallLive": False}
 
 
 class CopyWatcher:
@@ -258,8 +258,13 @@ class CopyWatcher:
                         ev["delay_s"] = round(ev["detected"] - (ev["ts"] or ev["detected"]), 1)
                         st["last_delay_s"] = ev["delay_s"]
                         st["trades"] = int(st.get("trades") or 0) + 1
-                        if ev["side"] == "buy":                  # DECISION 93: every-other counts all his buys
-                            st["buys"] = ev["nth"] = int(st.get("buys") or 0) + 1
+                        if ev["side"] == "buy":                  # DECISION 94: every-other counts his buys PER COIN
+                            st["buys"] = int(st.get("buys") or 0) + 1
+                            mb = st.setdefault("mint_buys", {})
+                            mb[ev["mint"]] = ev["nth"] = int(mb.get(ev["mint"]) or 0) + 1
+                            if len(mb) > 500:                    # bounded: drop the oldest coins
+                                for k in list(mb)[:len(mb) - 500]:
+                                    mb.pop(k, None)
                         self.save({**st, "last_sig": sig, "last_poll": now})
                         try:
                             if ev["side"] == "buy":
@@ -348,8 +353,8 @@ class CopyWatcher:
         mode = held["mode"] if held and held.get("a_kind") == "copy" else s["gmgn.mode"]
         lab = label(s, mode)
         n_every, nth = int(s["copy.every_n"]), int(ev.get("nth") or 1)
-        if n_every > 1 and (nth - 1) % n_every:          # owner 5:19 PM CT: copy every other of his buys (1st, 3rd, ...)
-            return self._log("buy ignored", mint, f"his buy #{nth}: copying every {n_every}", f"tx={ev['sig']}")
+        if n_every > 1 and (nth - 1) % n_every:          # owner 5:19/5:40 PM CT: every other of his buys IN THE SAME COIN
+            return self._log("buy ignored", mint, f"his buy #{nth} of this coin: copying every {n_every} per coin", f"tx={ev['sig']}")
         sol_usd = await (self._sol_px() if mode == "LIVE" else t.sol_usd())
         price, liq, name, symbol, src, his_px = await self._price(mint, ev, sol_usd)
         name = name or mint[:6]

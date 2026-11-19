@@ -572,7 +572,7 @@
       : `A mode: <b>normal</b> · ${cp.profile === "hybrid" ? `small ${money(cp.smallUsd)} PAPER trades (max ${cp.smallMaxOpen} open) · ` : ""}watching ${esc(who)} for his next buy`;
     const extra = [cp.lastDelayS != null ? `last copy delay ${Number(cp.lastDelayS).toFixed(0)}s` : null,
       cp.lastPoll ? `checked ${tmCT(cp.lastPoll)}` : null, `copy book ${money(cp.bookUsd)}`].filter(Boolean).join(" · ");
-    return `<div class="card"><div class="t">${state}</div><div class="sub" style="white-space:normal;margin-top:6px">${cp.mode === "LIVE" ? `copies LIVE · ${money(cp.flatUsd)} per buy, every ${cp.everyN === 2 ? "other" : cp.everyN + "th"} buy of his, max ${money(cp.maxPositionUsd)} per coin · small scanner trades stay PAPER` : "PAPER · not real money"} · ${esc(extra)}</div></div>`;
+    return `<div class="card"><div class="t">${state}</div><div class="sub" style="white-space:normal;margin-top:6px">${cp.mode === "LIVE" ? `copies LIVE · ${money(cp.flatUsd)} per buy, every ${cp.everyN === 2 ? "other" : cp.everyN + "th"} buy of his in each coin, max ${money(cp.maxPositionUsd)} per coin · small scanner trades stay PAPER` : "PAPER · not real money"} · ${esc(extra)}</div></div>`;
   }
   function aPaperBody(gm, tr, full) {
     const paper = tr?.paper;

@@ -998,3 +998,11 @@ done") and 5:23 PM CT ("If it has to it can draw from b").
   GMGN fee + 2 x 0.0012 SOL priority/tip + ~0.002 SOL token-account rent, about $0.40 or ~8-9% of $5 before slippage,
   so they are not economic. App: copies show "LIVE · copying 9s4ji", the A page shows the copy status line and the
   PAPER small trades.
+
+## 94. Copy "every other buy" counts per coin, not globally
+
+Owner 2026-11-19 5:40 PM CT: "When I said for it to only copy his every other trade I meant in the same coin".
+`copy.every_n 2` now uses a per-mint counter in the `copy_watch` state (`mint_buys`, bounded to 500 coins): for each
+coin A copies his 1st, 3rd, 5th ... buy of that coin, so every new coin's first buy is always copied. Counters start
+at 0 for coins he buys from now on (no 9s4ji buys had been seen since the 5:19 PM CT baseline). Everything else in
+DECISION 93 is unchanged.
