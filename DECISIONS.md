@@ -1006,3 +1006,26 @@ Owner 2026-11-19 5:40 PM CT: "When I said for it to only copy his every other tr
 coin A copies his 1st, 3rd, 5th ... buy of that coin, so every new coin's first buy is always copied. Counters start
 at 0 for coins he buys from now on (no 9s4ji buys had been seen since the 5:19 PM CT baseline). Everything else in
 DECISION 93 is unchanged.
+
+## 95. Copy trades get their own notifications ("🔁 Copied buy · A")
+
+Owner 2026-11-19 5:46 PM CT: "make sure the app gives a different notification like copied buy".
+
+- New push kinds from copytrade.py (and GmgnTrader._paper_close for paper copy rows): `gmgn_copy_buy`,
+  `gmgn_copy_sell`, `gmgn_copy_pending`, `gmgn_copy_skip`. Text is two lines, title then body, used for both the phone
+  and Telegram (notif_label keeps the first line as the headline):
+  - `🔁 Copied buy · A` / `Copied 9s4ji: bought $20 of SYMBOL (his buy #N in this coin) · delay Xs` (+ `now $40 in it`
+    on adds, `borrowed from B's unused share`, `paper` on paper rows). LIVE sends a quiet `🔁 Copying buy · A` when the
+    swap goes out; the confirmed fill replaces it (same tag).
+  - `🔁 Copied sell · A` / `Copied 9s4ji: sold X% of SYMBOL · P&L $Y` (partial LIVE sells show `est. P&L` from the
+    mark; the final close shows the on-chain P&L). A full LIVE sell first shows a quiet `🔁 Copying sell · A`.
+  - `🔁 Copy stop · A` when the −50% backstop closes a copy.
+  - `🔁 Copy skipped · A` / `9s4ji bought SYMBOL · not copied: <reason>` for refusals (sell check, insufficient balance,
+    caps, per-coin cap on adds). At most one per coin (meta `copy_skip_pushed`), silent on the phone, Telegram
+    `disable_notification`. Every refusal is still logged as a refused row.
+- Phone: new push category `copy` ("Copied trades", on by default, also for phones subscribed before it existed) and
+  tag `copy-<mint>` (`copyskip-<mint>` for skips), so copies never collapse into normal `trade-<mint>` A buy alerts or
+  B's `b-<mint>`. Copy buys / sells are sent urgent; skips are not. sw.js honours `silent`.
+- App feed / activity: copy rows read `🔁 Copied buy · X`, `🔁 Copied sell · X`, `🔁 Copy stop · X`,
+  `🔁 Copy skipped · X`, with the `LIVE · copying 9s4ji` / `PAPER · copying 9s4ji` badge. App shell desk-shell-v41.
+- Telegram `copy test` (owner chat only) sends a sample `🔁 Copied buy · TEST` push; nothing is bought.

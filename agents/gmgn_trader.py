@@ -2113,8 +2113,19 @@ class GmgnTrader:
         self._upd(o["id"], status="closed", exit_reason=reason, exit_price=price, pnl_usd=pnl, pct=pct, closed_at=now)
         sign = "+" if pnl >= 0 else "-"
         kind = o.get("a_kind")
-        pre = (__import__("copytrade").label(self.s, "PAPER") + " · " if kind == "copy" else "PAPER · small · GMGN · " if kind == "small"
-               else "PAPER · GMGN · ")
+        if kind == "copy":                               # DECISION 95: copy closes get the copied-sell push
+            import copytrade as _ct
+            who = self.s["copy.name"] or (self.s["copy.wallet"] or "")[:6]
+            sym = o.get("symbol") or o["name"]
+            pl = f"P&L {_ct.money(pnl)} ({pct:+.1f}%)"
+            if reason == "copy stop":
+                await self.push(f"{_ct.T_STOP}\nCopied {who}: {sym} hit the -{self.s['copy.backstop_pct']:g}% backstop · sold 100% · {pl} · paper",
+                                kind="gmgn_copy_sell", mint=o["mint"])
+            else:
+                await self.push(f"{_ct.T_SELL}\nCopied {who}: sold 100% of {sym} · {pl} · paper", kind="gmgn_copy_sell", mint=o["mint"])
+            self.c.event("exit", o["mint"])
+            return
+        pre = "PAPER · small · GMGN · " if kind == "small" else "PAPER · GMGN · "
         await self.push(f"{pre}Sold {o['name']} · {EXIT_LABEL.get(reason, reason)} · {sign}${abs(pnl):,.2f} ({pct:+.1f}%)", mint=o["mint"])
         self.c.event("exit", o["mint"])
 

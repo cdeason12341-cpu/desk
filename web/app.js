@@ -40,8 +40,8 @@
   const PUSH_SALT = "grok-bot-desk/v1/push:", NTFY = "https://ntfy.sh/";
   const PCATS = [["trades", "Trades", "GMGN live buys and sells with P&L"], ["approvals", "Approvals", "Big market-cap buys waiting for you, with Approve / Skip"],
     ["alerts", "Alerts", "Stop or sell failures, out of SOL, desk problems"], ["pipeline", "Pipeline", "A coin passing Scanner → Auditor → Analyst (one notification per coin, updated in place)"],
-    ["stratb", "Strategy B", "Paper buys and sells, labelled PAPER"], ["paper", "FOMO paper test", "Paper test buys and sells"]];
-  const PDEF = { trades: true, approvals: true, alerts: true, pipeline: true, stratb: true, paper: false };
+    ["stratb", "Strategy B", "Paper buys and sells, labelled PAPER"], ["paper", "FOMO paper test", "Paper test buys and sells"], ["copy", "Copied trades", "🔁 Copied buys and sells of the wallet A copies, plus one quiet note per coin it skips"]];
+  const PDEF = { trades: true, approvals: true, alerts: true, pipeline: true, stratb: true, paper: false, copy: true };
   const P = { busy: false, msg: "", sub: null, hash: null, checked: false };
   function pushCats() { try { return Object.assign({}, PDEF, JSON.parse(localStorage.getItem("desk.pushCats") || "{}")); } catch (_) { return Object.assign({}, PDEF); } }
   let ekeyP = null;
@@ -644,7 +644,7 @@
     const ic = { buy: "↗", sell: "↘", stop: "■", skip: "✕", fail: "!", approval: "?" }[e.kind] || "•";
     const right = e.pnlUsd != null ? `<div class="${e.pnlUsd >= 0 ? "green" : "red"}">${money(e.pnlUsd)}</div><div class="s">${pct(e.pct)}</div>`
       : e.sizeUsd != null ? `<div>${money(e.sizeUsd)}</div>` : "";
-    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}${e.mode === "PAPER" ? ` <span class="badge">${esc(e.label || "PAPER")}</span>` : ""}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
+    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}${e.mode === "PAPER" || e.label ? ` <span class="badge${e.mode === "LIVE" ? " live" : ""}">${esc(e.label || "PAPER")}</span>` : ""}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
     return e.mint ? `<a class="row" href="#/coin/${encodeURIComponent(e.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
   function evFeed(who, items, empty) {

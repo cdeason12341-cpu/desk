@@ -1,6 +1,6 @@
 // App shell cache so Chrome offers Install. Data (/d/...) is never cached here.
 // Push (DECISION 62): the desk sends {title, body, tag, url, renotify, actions, aid, bot}; nothing secret is in a payload.
-const V = "desk-shell-v40";
+const V = "desk-shell-v41";
 const SHELL = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "icons/badge-96.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))).then(() => self.skipWaiting())); });
@@ -18,7 +18,7 @@ self.addEventListener("push", e => {
   try { d = e.data ? e.data.json() : {}; } catch (_) { d = { title: "Desk", body: e.data ? e.data.text() : "" }; }
   const opts = {
     body: String(d.body || ""), icon: "icons/icon-192.png", badge: "icons/badge-96.png", data: d,
-    timestamp: d.ts || Date.now(), requireInteraction: !!d.requireInteraction,
+    timestamp: d.ts || Date.now(), requireInteraction: !!d.requireInteraction, silent: !!d.silent,
   };
   if (d.tag) { opts.tag = String(d.tag); opts.renotify = d.renotify !== false; }   // same tag = replaced in place
   if (Array.isArray(d.actions) && d.actions.length) opts.actions = d.actions.slice(0, 2).map(a => ({ action: String(a.action), title: String(a.title) }));

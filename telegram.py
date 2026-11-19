@@ -8,6 +8,7 @@ from ctx import iso
 
 HELP = ("Commands:\n"
         "buy X · sell X · why X\n"
+        "copy test (sample copied-buy notification)\n"
         "pause Scanner / resume Scanner (any agent; Risk not while a position is open)\n"
         "set stop to -8% (any setting by name or alias)\n"
         "scanner: set young first 60 · set surge 25% · set surge window 60 · set surge watch 150 · set surge poll 10\n"
@@ -75,7 +76,8 @@ class Telegram:
             self.c.error("telegram", "label", str(e)[:200])
         ok = True
         try:
-            await self.send(text, buttons, mentions=self.mentions([mint] if mint else []))
+            quiet = {"silent": True} if kind == "gmgn_copy_skip" else {}   # DECISION 95: copy skips are low priority
+            await self.send(text, buttons, mentions=self.mentions([mint] if mint else []), **quiet)
         except Exception as e:
             ok = False
             self.c.error("telegram", "push", str(e))
@@ -92,9 +94,11 @@ class Telegram:
                 out.append((c.get("name") or c.get("symbol"), mt))
         return out
 
-    async def send(self, text, buttons=None, chat_id=None, mentions=None):
+    async def send(self, text, buttons=None, chat_id=None, mentions=None, silent=False):
         body = {"chat_id": chat_id or self.owner, "text": self.linkify(text, mentions), "parse_mode": "HTML",
                 "disable_web_page_preview": True}
+        if silent:
+            body["disable_notification"] = True
         if buttons:
             body["reply_markup"] = {"inline_keyboard": buttons}
         return await self.api("sendMessage", **body)
@@ -266,6 +270,12 @@ class Telegram:
             return f"LIVE {msg}" + (f"\n{extra}" if extra else ""), None, []
         if low == "status":
             return self.cmd_status()
+        if low in ("copy test", "test copy"):            # DECISION 95: owner-only sample of the copied-buy push
+            if not self.from_owner:
+                return "Refused: owner chat only.", None, []
+            await self.push("🔁 Copied buy · TEST\nTEST · this is what a copied buy looks like (Copied 9s4ji: bought $20 of "
+                            "SYMBOL, his buy #1 in this coin · delay 3s) · nothing was bought", kind="gmgn_copy_buy", mint=None)
+            return "Sent a TEST copied-buy notification to your phone app and here. Nothing was bought.", None, []
         if low == "paper":
             if s["desk.mode"] == "PAPER":
                 return "Already PAPER.", None, []

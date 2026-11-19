@@ -102,6 +102,8 @@ def action(core: str) -> str | None:
 
 def headline(kind: str, text: str) -> tuple[str, str]:
     first = (text or "").split("\n", 1)[0]
+    if (kind or "").startswith("gmgn_copy"):            # DECISION 95: "🔁 Copied buy · A" etc. is already the headline
+        return "Strat A", first.strip()
     w = who(kind, text)
     core, flags = strip_tags(first)
     act = action(core) if w != "Desk" or kind in ("buy", "sell", "risk") else None

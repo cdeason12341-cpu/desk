@@ -290,6 +290,25 @@ class CopyWatcher:
             return fr["price"], fr.get("liq"), fr.get("name"), fr.get("symbol"), "dex", his
         return his, None, None, None, "his fill", his
 
+    def who(self) -> str:
+        return self.s["copy.name"] or (self.s["copy.wallet"] or "")[:6]
+
+    async def _push(self, kind, title, body, mint):
+        """DECISION 95: copy trades get their own push kinds (gmgn_copy_*), their own 'copy' category and a copy-<mint>
+        tag on the phone, so they never collapse into normal A / B buy alerts. Telegram gets the same two lines."""
+        return await self.t.push(f"{title}\n{body}", kind=kind, mint=mint)
+
+    async def push_skip(self, mint, sym, why, mode):
+        sent = self.c.db.meta(SKIP_META) or []
+        if not isinstance(sent, list):
+            sent = []
+        if mint in sent:
+            return False
+        self.c.db.set_meta(SKIP_META, (sent + [mint])[-300:])
+        await self._push("gmgn_copy_skip", T_SKIP, f"{self.who()} bought {sym} · not copied: {why}"
+                         + (" · paper" if mode == "PAPER" else ""), mint)
+        return True
+
     def _src(self, ev, **kw):
         return {"wallet": self.s["copy.wallet"], "name": self.s["copy.name"], "sig": ev["sig"], "block_ts": ev["ts"],
                 "detected_ts": ev["detected"], "delay_s": ev["delay_s"], "his_sol": round(ev["sol"] / LAMPORTS, 6),
@@ -364,14 +383,15 @@ class CopyWatcher:
         self._log("his buy", name, mint, f"#{nth}", f"tx={ev['sig']}", f"his {ev['sol'] / LAMPORTS:.4f} SOL of {ev['pre_sol'] / LAMPORTS:.4f}",
                   f"frac={ev['frac']:.4f}", f"size=${size:,.2f}", f"mode={mode}", f"delay={ev['delay_s']}s")
 
-        def refuse(why):
+        async def refuse(why):
             t._row(ts=c.clock(), night=c.night, mode=mode, mint=mint, name=name, symbol=symbol, status="refused",
                    reason=f"copy: {why}", size_usd=size, a_kind="copy", copy_src=json.dumps(self._src(ev, **info)))
             self._log("copy skipped", mode, name, mint, why)
+            await self.push_skip(mint, symbol or name, why, mode)
             return {"status": "refused", "reason": why}
 
         if not price or not sol_usd:
-            return refuse("no price")
+            return await refuse("no price")
         if s["copy.first_buy_only"]:                    # owner 5:17 PM CT (off since 5:19): only his first buy of each coin
             why = None
             if ev.get("pre_tok"):
@@ -384,26 +404,28 @@ class CopyWatcher:
             if why:
                 return self._log("buy ignored", name, mint, why)
         if held and held.get("a_kind") != "copy":
-            return refuse(f"A already holds it ({held.get('a_kind') or held['mode']} #{held['id']})")
+            return await refuse(f"A already holds it ({held.get('a_kind') or held['mode']} #{held['id']})")
         if held:                                         # he adds: add to our copy up to the per-coin cap
             room = float(s["copy.max_position_usd"]) - float(held["size_usd"] or 0) - _pending_usd(held)
             add = round(min(size, room), 2)
             if add <= 0 or add < min(float(s["copy.min_usd"]), size) - 1e-9:
-                return self._log("add skipped", name, f"position ${held['size_usd']:,.2f} at the ${s['copy.max_position_usd']:,.2f} per-coin cap")
+                self._log("add skipped", name, f"position ${held['size_usd']:,.2f} at the ${s['copy.max_position_usd']:,.2f} per-coin cap")
+                await self.push_skip(mint, symbol or name, f"already ${held['size_usd']:,.0f} in it (${s['copy.max_position_usd']:,.0f} per-coin cap)", mode)
+                return None
         else:
             n = len(open_copies(c.db))
             if n >= int(s["copy.max_open"]):
-                return refuse(f"{n}/{int(s['copy.max_open'])} copy coins already open")
+                return await refuse(f"{n}/{int(s['copy.max_open'])} copy coins already open")
             add = size
         if mode == "LIVE":
             return await self.live_buy(ev, mint, name, symbol, price, liq, add, held, info, sol_usd, refuse)
         import agents.gmgn_trader as A
         free = A.paper_free_usd(s, c.db)
         if free + 1e-9 < add:
-            return refuse(f"paper free ${free:,.2f} can't cover ${add:,.2f}")
+            return await refuse(f"paper free ${free:,.2f} can't cover ${add:,.2f}")
         sc = await self._sell_check(mint, add)
         if not sc["ok"]:
-            return refuse(sc["why"])
+            return await refuse(sc["why"])
         lam = int(add / sol_usd * LAMPORTS)
         now = c.clock()
         if held:
@@ -414,8 +436,8 @@ class CopyWatcher:
             t._upd(held["id"], size_usd=round(old + add, 2), lamports=int(held["lamports"] or 0) + lam, entry_price=entry,
                    copy_src=json.dumps(src_list))
             self._log("PAPER", mint, "copy add", f"+${add:,.2f}", f"now ${old + add:,.2f}", f"entry={entry:.10g}", sc["why"])
-            await t.push(f"{lab} · Added to {name} · +${add:,.2f} (now ${old + add:,.2f}) · his buy #{nth} "
-                         f"· {ev['delay_s']:.0f}s after his buy", mint=mint)
+            await self._push("gmgn_copy_buy", T_BUY, f"Copied {self.who()}: bought ${add:,.0f} more of {symbol or name} (his buy #{nth} "
+                             f"in this coin) · now ${old + add:,.0f} · delay {ev['delay_s']:.0f}s · paper", mint)
             return {"status": "added", "id": held["id"], "add": add}
         oid = t._row(ts=now, night=c.night, mode="PAPER", mint=mint, name=name, symbol=symbol, status="open", size_usd=add,
                      sol_usd=sol_usd, lamports=lam, entry_price=price, peak=price, last_price=price, last_liq=liq,
@@ -423,9 +445,8 @@ class CopyWatcher:
                      copy_src=json.dumps([self._src(ev, **info, sell_check=sc["why"])]))
         self._log("PAPER", mint, "copy sim-fill", f"${add:,.2f}", f"price={price}", f"src={src}", f"his_px={his_px}", sc["why"])
         self._announce_state()
-        await t.push(f"{lab} · Buy {name} · ${add:,.2f} · his buy #{nth} ({ev['sol'] / LAMPORTS:.3f} SOL) · "
-                     f"{ev['delay_s']:.0f}s after his buy\n"
-                     f"Exits: his sells, -{s['copy.backstop_pct']:g}% backstop · simulated fill", mint=mint)
+        await self._push("gmgn_copy_buy", T_BUY, f"Copied {self.who()}: bought ${add:,.0f} of {symbol or name} (his buy #{nth} in this coin) "
+                         f"· delay {ev['delay_s']:.0f}s · paper\nExits: his sells, -{s['copy.backstop_pct']:g}% backstop · simulated fill", mint)
         c.event("fill", mint)
         return {"status": "paper", "id": oid}
 
@@ -443,28 +464,28 @@ class CopyWatcher:
         c, s, t = self.c, self.s, self.t
         lab, nth = label(s, "LIVE"), info.get("nth")
         if t.halted() or not s["gmgn.enabled"] or t.client is None or not t.client.configured:
-            return refuse("halted, GMGN off or GMGN keys missing")
+            return await refuse("halted, GMGN off or GMGN keys missing")
         if add > float(s["gmgn.cap_trade_usd"]) + 1e-9:
-            return refuse(f"${add:,.2f} is over the ${s['gmgn.cap_trade_usd']:,.2f} per-trade cap")
+            return await refuse(f"${add:,.2f} is over the ${s['gmgn.cap_trade_usd']:,.2f} per-trade cap")
         other = A.mint_held_live(c.db, mint)
         if other == "B" or (other == "A" and not held):
-            return refuse(f"already held LIVE by {other} in the wallet")
+            return await refuse(f"already held LIVE by {other} in the wallet")
         lam = int(add / sol_usd * LAMPORTS)
         need = A.buy_cost_lamports(s, lam)
         wallet = await self._wallet_rpc()                # public RPC: a refusal here never calls GMGN
         bud = self.live_budget(wallet, need, sol_usd)
         if not bud["ok"]:
-            return refuse(bud["why"])
+            return await refuse(bud["why"])
         if bud["borrow"]:
             self._log("BORROW from B", name, mint, f"need {need / LAMPORTS:.4f} SOL", f"A share {bud['own'] / LAMPORTS:.4f}",
                       f"borrowed {bud['borrow'] / LAMPORTS:.4f}", f"wallet free {bud['free'] / LAMPORTS:.4f}",
                       f"kept for B {bud['b_keep'] / LAMPORTS:.4f}")
         sc = await self._sell_check(mint, add)
         if not sc["ok"]:
-            return refuse(sc["why"])
+            return await refuse(sc["why"])
         gated = gmgn.GATE.buy_blocked()
         if gated:
-            return refuse(f"GMGN gate: {gated}")
+            return await refuse(f"GMGN gate: {gated}")
         body = A.buy_body(s, mint, lam)
         if held:                                         # adds ride the first buy's server-side backstop (sells 100% of holdings)
             body.pop("condition_orders", None)
@@ -473,7 +494,7 @@ class CopyWatcher:
             body["condition_orders"] = [{"order_type": "loss_stop", "side": "sell",
                                          "price_scale": f"{float(s['copy.backstop_pct']):g}", "sell_ratio": "100"}]
         if body["from_address"] != A.MAIN_WALLET or body["input_token"] != SOL or int(body["input_amount"]) != lam:
-            return refuse("swap body mismatch")
+            return await refuse("swap body mismatch")
         now = c.clock()
         src_entry = self._src(ev, **info, add_usd=add, sell_check=sc["why"], borrow_lamports=bud["borrow"])
         if held:
@@ -510,9 +531,9 @@ class CopyWatcher:
         else:
             t._upd(oid, status="pending", order_id=r.get("order_id"), tx=r.get("hash"), strategy_order_id=r.get("strategy_order_id"))
         self._log("LIVE", mint, "copy swap sent", "add" if held else "buy", f"${add:,.2f}", f"{lam / LAMPORTS:.4f} SOL", r.get("order_id"))
-        await t.push(f"{lab} · {'Adding to' if held else 'Buying'} {name} · ${add:,.2f} ({lam / LAMPORTS:.4f} SOL) · his buy #{nth} · "
-                     f"{ev['delay_s']:.0f}s after his buy" + (" · borrowed from B's unused share" if bud["borrow"] else "")
-                     + ("" if held else f"\nExits: his sells, -{s['copy.backstop_pct']:g}% backstop on GMGN"), mint=mint)
+        await self._push("gmgn_copy_pending", T_BUYING, f"Copying {self.who()}: buying ${add:,.0f} of {symbol or name} (his buy #{nth} in this coin) · "
+                         f"delay {ev['delay_s']:.0f}s" + (" · borrowed from B's unused share" if bud["borrow"] else "")
+                         + ("" if held else f"\nExits: his sells, -{s['copy.backstop_pct']:g}% backstop on GMGN"), mint)
         res = await self._confirm(r)
         if res["status"] == "pending":
             return {"status": "pending", "id": oid}       # live_tick keeps polling query_order
@@ -574,7 +595,14 @@ class CopyWatcher:
                 t._upd(oid, entry_price=entry, entry_src="chain", **({} if is_add else {"peak": entry, "last_price": entry}))
         c.event("fill", o["mint"])
         self._announce_state()
-        await t.push(f"{label(self.s, 'LIVE')} · {'Added to' if is_add else 'Bought'} {o['name']} · now ${size:,.2f} in it", mint=o["mint"])
+        src = next((x for x in reversed(_srcs(o)) if x.get("add_usd") is not None), {})
+        sym = o["symbol"] or o["name"]
+        body = (f"Copied {self.who()}: bought ${add or size:,.0f} {'more ' if is_add else ''}of {sym}"
+                + (f" (his buy #{src['nth']} in this coin)" if src.get("nth") else "")
+                + (f" · delay {float(src['delay_s']):.0f}s" if src.get("delay_s") is not None else "")
+                + (f" · now ${size:,.0f} in it" if is_add else "")
+                + (" · borrowed from B's unused share" if src.get("borrow_lamports") else ""))
+        await self._push("gmgn_copy_buy", T_BUY, body, o["mint"])
 
     async def live_sell(self, o, bps: int, reason: str, ev=None) -> bool:
         import agents.gmgn_trader as A
@@ -600,8 +628,21 @@ class CopyWatcher:
             upd.update(status="exiting", exit_reason=reason, sell_order_id=r.get("order_id"))
         t._upd(o["id"], **upd)
         self._log("LIVE", o["mint"], "copy sell sent", reason, f"{bps / 100:.1f}%", r.get("order_id"))
-        delay = f" · {ev['delay_s']:.0f}s after his sell" if ev else ""
-        await t.push(f"{label(s, 'LIVE')} · Selling {bps / 100:.0f}% of {o['name']} ({A_EXIT.get(reason, reason)}){delay}", mint=o["mint"])
+        delay = f" · delay {ev['delay_s']:.0f}s" if ev else ""
+        sym = o["symbol"] or o["name"]
+        if bps < 10000:                                  # partial: chain P&L comes at the final close; estimate from the mark
+            part = float(o["size_usd"] or 0) * bps / 10000
+            px, ent = o.get("last_price"), o.get("entry_price")
+            est = f" · est. P&L {money(part * (px / ent - 1))}" if px and ent else ""
+            await self._push("gmgn_copy_sell", T_SELL, f"Copied {self.who()}: sold {bps / 100:.0f}% of {sym}{est}{delay}", o["mint"])
+        else:
+            if reason == "copy stop":
+                what = "backstop stop"
+            elif not ev or ev["frac"] >= 0.98:
+                what = "he sold all"
+            else:
+                what = f"he sold {ev['frac'] * 100:.0f}%"
+            await self._push("gmgn_copy_pending", T_SELLING, f"Copying {self.who()}: selling 100% of {sym} ({what}){delay}", o["mint"])
         return True
 
     async def live_tick(self, o, price, liq, now):
@@ -685,7 +726,12 @@ class CopyWatcher:
         tail = (f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f} ({upd['pct']:+.1f}%) on chain" if pnl is not None
                 else "P&L pending chain read")
         self._log("LIVE", o["mint"], "copy closed", reason, tail)
-        await t.push(f"{label(self.s, 'LIVE')} · Closed {o['name']} · {A_EXIT.get(reason, reason)} · {tail}", mint=o["mint"])
+        sym = o["symbol"] or o["name"]
+        pl = f"P&L {money(pnl)} ({upd['pct']:+.1f}%)" if pnl is not None else "P&L pending chain read"
+        if reason == "copy stop":
+            await self._push("gmgn_copy_sell", T_STOP, f"Copied {self.who()}: {sym} hit the -{self.s['copy.backstop_pct']:g}% backstop · sold 100% · {pl}", o["mint"])
+        else:
+            await self._push("gmgn_copy_sell", T_SELL, f"Copied {self.who()}: sold 100% of {sym} · {pl}", o["mint"])
 
     async def copy_sell(self, ev):
         c, s, t = self.c, self.s, self.t
@@ -725,13 +771,22 @@ class CopyWatcher:
         t._upd(held["id"], size_usd=round(size - part, 2), lamports=int((held["lamports"] or 0) * (1 - frac)),
                copy_src=json.dumps(src_list), last_price=price)
         sign = "+" if pnl >= 0 else "-"
-        await t.push(f"{label(s, "PAPER")} · Sold {frac * 100:.0f}% of {held['name']} (he sold {frac * 100:.0f}%) · {sign}${abs(pnl):,.2f} "
-                     f"({pct:+.1f}%) · ${size - part:,.2f} left · {ev['delay_s']:.0f}s after his sell", mint=mint)
+        await self._push("gmgn_copy_sell", T_SELL, f"Copied {self.who()}: sold {frac * 100:.0f}% of {held['symbol'] or held['name']} · "
+                         f"P&L {money(pnl)} ({pct:+.1f}%) · ${size - part:,.0f} left · delay {ev['delay_s']:.0f}s · paper", mint)
         c.event("exit", mint)
         return {"status": "partial", "id": held["id"], "child": cid}
 
 
 A_EXIT = {"copy sell": "his sell", "copy stop": "backstop stop"}
+
+
+T_BUY, T_BUYING, T_SELL, T_SELLING, T_STOP, T_SKIP = ("🔁 Copied buy · A", "🔁 Copying buy · A", "🔁 Copied sell · A",
+                                                     "🔁 Copying sell · A", "🔁 Copy stop · A", "🔁 Copy skipped · A")
+SKIP_META = "copy_skip_pushed"   # DECISION 95: at most one "Copy skipped" push per coin
+
+
+def money(p) -> str:
+    return f"{'+' if (p or 0) >= 0 else '−'}${abs(p or 0):,.2f}"
 
 
 def _audit(o) -> dict:

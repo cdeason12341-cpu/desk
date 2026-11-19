@@ -104,18 +104,24 @@ class Builder:
                            (since_t, since_t)):
             nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
             if o["status"] == "refused":
-                A.append(ev(o["ts"], "skip", f"Skipped {nm}", o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                A.append(ev(o["ts"], "skip", _copy_title(o, "skip", f"Skipped {nm}"), o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                if o.get("a_kind") == "copy":
+                    A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
                 continue
-            if o["status"] == "failed":
-                A.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
+            if o["status"] in ("failed", "unknown"):
+                A.append(ev(o["ts"], "fail", _copy_title(o, "fail", f"Buy failed · {nm}"), o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
                 continue
-            A.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
+            A.append(ev(o["ts"], "buy", _copy_title(o, "buy", f"Bought {nm}"), f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
                         o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
+            if o.get("a_kind") == "copy":
+                A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
             if o["closed_at"]:
                 stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
-                A.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
+                A.append(ev(o["closed_at"], "stop" if stop else "sell", _copy_title(o, "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}"),
                             (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
                             pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
+                if o.get("a_kind") == "copy":
+                    A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
         try:
             for a in c.db.rows("SELECT * FROM gmgn_approvals WHERE ts>=? ORDER BY id DESC LIMIT 30", (since_t,)):
                 nm = a["name"] or a["symbol"] or (a["mint"] or "")[:6]
@@ -132,19 +138,19 @@ class Builder:
                            (since_t, since_t)):
             nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
             if o["status"] == "refused":
-                A_paper.append(ev(o["ts"], "skip", f"Skipped {nm}", o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
+                A_paper.append(ev(o["ts"], "skip", _copy_title(o, "skip", f"Skipped {nm}"), o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
                 A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
                 continue
             if o["status"] == "failed":
-                A_paper.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
+                A_paper.append(ev(o["ts"], "fail", _copy_title(o, "fail", f"Buy failed · {nm}"), o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
                 A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
                 continue
-            A_paper.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
+            A_paper.append(ev(o["ts"], "buy", _copy_title(o, "buy", f"Bought {nm}"), f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
                         o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
             A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
             if o["closed_at"]:
                 stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
-                A_paper.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
+                A_paper.append(ev(o["closed_at"], "stop" if stop else "sell", _copy_title(o, "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}"),
                             (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
                             pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
                 A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
@@ -919,6 +925,15 @@ class Builder:
         paper["overrideCount"] = sum(1 for r in paper["open"] + paper["closed"] if r["tag"] == "OVERRIDE")
         real["overrideCount"] = sum(1 for r in real["open"] + real["closed"] if r["tag"] == "OVERRIDE")
         return {"v": 1, "ts": iso(), "deskMode": c.mode(), "gmgnMode": c.s["gmgn.mode"], "real": real, "paper": paper}
+
+def _copy_title(o, kind, default):
+    """DECISION 95: A copy rows read 'Copied buy · X' / 'Copied sell · X' / 'Copy stop · X' / 'Copy skipped · X' in the feed."""
+    if o.get("a_kind") != "copy":
+        return default
+    nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
+    return {"buy": f"🔁 Copied buy · {nm}", "sell": f"🔁 Copied sell · {nm}", "stop": f"🔁 Copy stop · {nm}",
+            "skip": f"🔁 Copy skipped · {nm}", "fail": f"🔁 Copy buy failed · {nm}"}.get(kind, default)
+
 
 def _a_label(s, o):
     """DECISION 92: badge for an A order row: 'PAPER · copying <name>', 'PAPER · small', 'PAPER', or 'LIVE'."""

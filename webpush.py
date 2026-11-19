@@ -22,7 +22,9 @@ from ctx import iso
 
 NTFY = "https://ntfy.sh"
 TOPIC_SALT = "grok-bot-desk/v1/push:"
-CATS = {"trades": True, "approvals": True, "alerts": True, "pipeline": True, "stratb": True, "paper": False}
+CATS = {"trades": True, "approvals": True, "alerts": True, "pipeline": True, "stratb": True, "paper": False,
+        "copy": True}   # DECISION 95: copied buys / sells (on by default for existing phones too)
+COPY_KINDS = ("gmgn_copy_buy", "gmgn_copy_sell", "gmgn_copy_pending", "gmgn_copy_skip")
 APP_URL = "https://cdeason12341-cpu.github.io/desk/"
 VAPID_SUB = "mailto:desk-push@users.noreply.github.com"
 PUSH_HOSTS = (".googleapis.com", ".mozilla.com", ".notify.windows.com", ".push.apple.com", ".mozaws.net")
@@ -253,6 +255,12 @@ def render(kind: str, text: str, mint: str | None = None, ctx=None) -> dict | No
             return n("stratb", "B PAPER · " + money_title("Sold", m.group(1), m.group(3), m.group(4), m.group(5)),
                      " · ".join(x for x in (m.group(2), f"held {m.group(6)}" if m.group(6) else "") if x), f"b-{mint}")
         return n("stratb", "B PAPER · " + t, "")
+    # ---- DECISION 95: copy trades: own category, own tag per coin (never merged with normal buys), skips are quiet
+    if kind in COPY_KINDS:
+        body = _first(text.partition("\n")[2])
+        if kind == "gmgn_copy_skip":
+            return n("copy", first, body, f"copyskip-{mint}" if mint else None, url="#/strata", renotify=False, silent=True)
+        return n("copy", first, body, f"copy-{mint}" if mint else None, url="#/strata", renotify=kind != "gmgn_copy_pending")
     # ---- FOMO paper test (off by default)
     if kind in ("buy", "sell"):
         t = first.replace("PAPER · ", "")
@@ -425,7 +433,8 @@ class WebPush:
             if not cats.get(cat, False) and cat != "system":
                 continue
             sent += 1
-            ok = await self._post(s, body, urgent=cat in ("approvals", "alerts", "trades"), topic_tag=note.get("tag"))
+            ok = await self._post(s, body, urgent=cat in ("approvals", "alerts", "trades") or (cat == "copy" and not note.get("silent")),
+                                  topic_tag=note.get("tag"))
             ok_n += 1 if ok else 0
         self.sent.append(payload); del self.sent[:-50]
         self.c.db.x("INSERT INTO webpushes(ts,cat,tag,title,body,sent,ok,kind) VALUES(?,?,?,?,?,?,?,?)",
