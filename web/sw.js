@@ -1,6 +1,6 @@
 // App shell cache so Chrome offers Install. Data (/d/...) is never cached here.
 // Push (DECISION 62): the desk sends {title, body, tag, url, renotify, actions, aid, bot}; nothing secret is in a payload.
-const V = "desk-shell-v36";
+const V = "desk-shell-v37";
 const SHELL = ["./", "index.html", "app.css", "app.js", "chart.js", "manifest.json",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "icons/badge-96.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"})))).then(() => self.skipWaiting())); });

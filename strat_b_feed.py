@@ -109,6 +109,8 @@ class BFeed:
             return "off"
         if G.is_gta_profile(s):
             return await self._gta_poll(now, payloads, s)
+        if __import__("strat_b_research").is_research_profile(s):
+            return "off (research profile: scanner coins only)"
         if not s["strat_b.feed_enabled"]:
             return "off"
         if payloads is None and (now - self.last < s["strat_b.feed_poll_s"] or now < self.backoff_until):

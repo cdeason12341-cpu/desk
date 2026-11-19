@@ -232,7 +232,7 @@ SPECS: list[Spec] = [
     _s("strat_b.net_fee_usd", 0.25, 0, 10, aliases=("b network fee",), fmt="${v:,.2f}"),
     _s("strat_b.poll_s", 10, 3, 120, aliases=("b poll",), fmt="{v}s"),
     # DECISION 87: GTA profile (not protected except kill-switch restore of standard B, which uses force=True)
-    _s("strat_b.profile", "default", kind="choice", choices=("default", "gta"), aliases=("b profile", "strategy b profile")),
+    _s("strat_b.profile", "default", kind="choice", choices=("default", "gta", "research"), aliases=("b profile", "strategy b profile")),
     _s("strat_b.gta_stop_pct", 30.0, 1, 90, aliases=("gta stop", "b gta stop"), fmt="-{v:g}%", neg=True),
     _s("strat_b.gta_tp_pct", 20.0, 1, 1000, aliases=("gta tp", "b gta take profit"), fmt="+{v:g}%"),
     _s("strat_b.gta_profit_hold_s", 60, 1, 3600, aliases=("gta profit hold", "b gta hold"), fmt="{v}s"),
@@ -243,6 +243,20 @@ SPECS: list[Spec] = [
     _s("strat_b.gta_kill_pct", 50.0, 1, 100, aliases=("gta kill", "gta kill switch"), fmt="{v:g}%"),
     _s("strat_b.gta_poll_s", 3, 1, 30, aliases=("gta poll",), fmt="{v}s"),
     _s("strat_b.gta_hunt_s", 30, 5, 600, aliases=("gta hunt",), fmt="{v}s"),
+    # DECISION 91: research profile (paper test of the "How profitable crypto bot users set up their bots" Page). Not protected.
+    _s("strat_b.rs_trade_usd", 20.0, 20, 1000, aliases=("research size", "b research size"), fmt="${v:,.2f}"),
+    _s("strat_b.rs_max_open", 1, 1, 10, aliases=("research max open",), fmt="{v}"),
+    _s("strat_b.rs_entry_window_s", 120, 30, 3600, aliases=("research entry window",), fmt="{v}s"),
+    _s("strat_b.rs_stop_pct", 50.0, 1, 90, aliases=("research stop",), fmt="-{v:g}%", neg=True),
+    _s("strat_b.rs_fee_check_min", 5.0, 1, 60, aliases=("research fee check", "research time stop"), fmt="{v:g}m"),
+    _s("strat_b.rs_hard_close_min", 10.0, 1, 120, aliases=("research hard close",), fmt="{v:g}m"),
+    _s("strat_b.rs_trail_start_pct", 15.0, 1, 1000, aliases=("research trail start",), fmt="+{v:g}%"),
+    _s("strat_b.rs_trail_pct", 8.0, 1, 90, aliases=("research trail",), fmt="{v:g}%"),
+    _s("strat_b.rs_trail_floor_pct", 8.0, 0, 100, aliases=("research trail floor", "research profit floor"), fmt="+{v:g}%"),
+    _s("strat_b.rs_protocol_fee_pct", 1.25, 0, 10, aliases=("research protocol fee",), fmt="{v:g}%"),
+    _s("strat_b.rs_sell_check", True, aliases=("research sell check", "can it sell check")),
+    _s("strat_b.rs_book_small_usd", 34.0, 1, 1_000_000, aliases=("research small book",), fmt="${v:,.2f}"),
+    _s("strat_b.rs_book_large_usd", 500.0, 1, 1_000_000, aliases=("research large book",), fmt="${v:,.2f}"),
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.

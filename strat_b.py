@@ -63,6 +63,9 @@ def static_check(s, audit) -> str | None:
 def entry_check(s, w, pair, now, hist=None) -> tuple[bool, str, dict]:
     """w: watch row with high/low (since the high). Returns (buy?, reason, metrics)."""
     import strat_b_gta as G
+    import strat_b_research as R
+    if R.is_research_profile(s):
+        return R.entry_check(s, w, pair, now)
     g = lambda p: fields.get(pair, p)
     price, liq, mc = num(g("priceUsd")), num(g("liquidity.usd"), 0.0), num(g("marketCap")) or num(g("fdv"))
     m = {"price": price, "liq": liq, "mc": mc}
@@ -116,6 +119,9 @@ def _usd(v):
 
 
 def checks(s, w, pair, now) -> list[dict]:
+    import strat_b_research as R
+    if R.is_research_profile(s):
+        return R.checks(s, w, pair, now)
     g = lambda p: fields.get(pair, p) if pair else None
     out = []
 
@@ -161,6 +167,9 @@ def checks(s, w, pair, now) -> list[dict]:
 def away(s, w, ck, now) -> list[str]:
     """How far a watched coin is from the buy zone, in words (failing or unknown checks only)."""
     c = {x["k"]: x for x in ck}
+    if "wait" not in c:                                  # research profile (DECISION 91) has its own checks
+        import strat_b_research as R
+        return R.away(ck)
     out = []
     if c["wait"]["pass"] is False and w.get("grad_at"):
         out.append(f"{max(0, s['strat_b.min_age_min'] - (now - w['grad_at']) / 60):.0f}m left of the wait")
@@ -242,7 +251,7 @@ def b_size_ladder_text(s) -> str:
 def early_fields(s, start, profile=None) -> dict:
     """exits_phase / early_until at fill (or at the original buy time for an adopt)."""
     prof = profile or ((s["strat_b.profile"] if s is not None else None) or "default")
-    if prof == "gta":
+    if prof in ("gta", "research"):
         return {"exits_phase": "normal", "early_until": None}
     mins = float(s["strat_b.early_stop_min"] or 0)
     if mins > 0:
@@ -273,8 +282,11 @@ def b_stop_pct(s, o, now) -> float:
     """Desk stop: -early_stop_pct in the first window, then -stop_pct. Pre-DECISION 85 rows (no phase) use -35%.
     GTA-profile orders use a flat -gta_stop_pct with no early window (DECISION 87)."""
     import strat_b_gta as G
+    import strat_b_research as R
     if G.is_gta_order(o, s):
         return float(s["strat_b.gta_stop_pct"])
+    if R.is_research_order(o):
+        return float(s["strat_b.rs_stop_pct"])
     if early_clock_open(s, o, now):
         return float(s["strat_b.early_stop_pct"])
     return float(s["strat_b.stop_pct"])
@@ -283,6 +295,9 @@ def b_stop_pct(s, o, now) -> float:
 def b_exits_text(s, o=None, now=None) -> str:
     """Buy-push / rules line for B's exits."""
     import strat_b_gta as G
+    import strat_b_research as R
+    if R.is_research_order(o) or (o is None and R.is_research_profile(s)):
+        return R.exits_text(s)
     if G.is_gta_order(o, s) or (o is None and G.is_gta_profile(s)):
         return (f"flat stop -{s['strat_b.gta_stop_pct']:g}% (desk + GMGN in LIVE) · "
                 f"sell all at +{s['strat_b.gta_tp_pct']:g}% net after fees · "
@@ -313,6 +328,9 @@ def exit_check(s, o, price, liq, hist, now, below_floor=False, quote_sol_out=Non
     import strat_b_gta as G
     if G.is_gta_order(o, s):
         return G.gta_exit_check(s, o, price, liq, now, quote_sol_out=quote_sol_out)
+    import strat_b_research as R
+    if R.is_research_order(o):
+        return R.exit_check(s, o, price, liq, now)
     from agents.gmgn_trader import trail_should_sell, trail_net_floor_price
     e = o["entry_price"]
     peak = max(o["peak"] or e, price)
@@ -340,6 +358,9 @@ def rules(s) -> list[dict]:
     """Plain-words rules with the live value and the reason (shown in the app and the scorecard)."""
     import strat_b_gta as G
     v = lambda k: s[k]
+    import strat_b_research as R
+    if R.is_research_profile(s):
+        return R.rules(s)
     if G.is_gta_profile(s):
         return [
             {"k": "Profile", "v": "GTA — only Grand Theft Auto / GTA / GTA VI / GTA 6 / Rockstar / Vice City coins, and only when they are in an active spike",
@@ -441,6 +462,8 @@ class StratB:
                 bad = "not a GTA-related coin"
             else:
                 bad = None
+        elif __import__("strat_b_research").is_research_profile(s):
+            bad = __import__("strat_b_research").static_check(s, audit, src)
         else:
             bad = static_check(s, audit)
         status = "skipped" if bad else "watching"
@@ -452,7 +475,9 @@ class StratB:
              "holders": audit.get("holders"), "bundle_pct": audit.get("bundle_pct"), "source": src}
         ck = checks(s, w, None, now)
         c.db.x("UPDATE strat_b_watch SET checks=?, eval_at=?, evals=1 WHERE mint=?", (json.dumps(ck), now, mint))
-        ok_msg = "GTA name match, waiting for a spike" if __import__("strat_b_gta").is_gta_profile(s) else "filters ok, waiting for a pullback"
+        ok_msg = ("GTA name match, waiting for a spike" if __import__("strat_b_gta").is_gta_profile(s)
+                  else "research filters ok, checking the entry" if __import__("strat_b_research").is_research_profile(s)
+                  else "filters ok, waiting for a pullback")
         self._eval(w, "offer", status, bad or ok_msg, ck, None, now)
         self.log.info(f"{iso(now)}\t{'skip' if bad else 'watch'}\t{mint}\t{name}\t{bad or ok_msg}"
                       f"\ttop10={audit_top10(audit)}\tholders={audit.get('holders')}\tbundle={audit.get('bundle_pct')}"
@@ -529,7 +554,17 @@ class StratB:
 
     def can_buy(self) -> str | None:
         import strat_b_gta as G
+        import strat_b_research as R
         s, mode = self.c.s, self.mode()
+        if R.is_research_profile(s):                     # DECISION 91: paper only, one at a time, $500 book must cover $20
+            if mode == "LIVE":
+                return "research profile runs in PAPER only (strat_b.mode is LIVE)"
+            n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE status='open' AND mode='PAPER'")["n"]
+            if n >= int(s["strat_b.rs_max_open"]):
+                return f"{n} open (max {int(s['strat_b.rs_max_open'])})"
+            if R.large_book_free(self.c) < float(s["strat_b.rs_trade_usd"]):
+                return f"${s['strat_b.rs_book_large_usd']:,.0f} paper book can't cover ${s['strat_b.rs_trade_usd']:g}"
+            return None
         if mode == "LIVE":                               # held or being bought/sold for real
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ('submitting','pending','open','exiting')")["n"]
         else:
@@ -586,7 +621,12 @@ class StratB:
         if self.enabled():
             exp = now - s["strat_b.watch_max_min"] * 60
             old_age = now - s["strat_b.max_age_min"] * 60
-            if not G.is_gta_profile(s):
+            if __import__("strat_b_research").is_research_profile(s):
+                win = now - float(s["strat_b.rs_entry_window_s"])
+                for w in c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' AND added_at<?", (win,)):
+                    self._expire_watch(w, f"no entry within {s['strat_b.rs_entry_window_s']:g}s of the auditor pass", now,
+                                       row_reason=self._last_reason.get(w["mint"]) or "no entry")
+            elif not G.is_gta_profile(s):
                 for w in c.db.rows("SELECT * FROM strat_b_watch WHERE status='watching' AND (added_at<? OR grad_at<?)", (exp, old_age)):
                     why = (f"older than {s['strat_b.max_age_min'] / 1440:g}d" if w["grad_at"] and w["grad_at"] < old_age
                            else f"no entry in {s['strat_b.watch_max_min']}m")
@@ -655,6 +695,14 @@ class StratB:
             block = self.can_buy() or (self.live.blocked_retry(w["mint"], now) if self.mode() == "LIVE" else None)
             if block:
                 ok, why = False, block
+        if ok and __import__("strat_b_research").is_research_profile(s):
+            ok, why, skip = await self._research_prebuy(w, m, why, pair)
+            if skip:
+                c.db.x("UPDATE strat_b_watch SET status='skipped', reason=?, updated=? WHERE mint=?", (why, now, w["mint"]))
+                self._eval(w, "wait", "skipped", why, ck, price, now)
+                self._last_reason.pop(w["mint"], None)
+                self.log.info(f"{iso(now)}	skip	{w['mint']}	{w['name']}	{why}	price={price}	mc={m.get('mc')}")
+                return
         if not ok:
             if self._last_reason.get(w["mint"]) != why.split(" (")[0]:
                 self._last_reason[w["mint"]] = why.split(" (")[0]
@@ -673,12 +721,40 @@ class StratB:
         self._eval(w, "buy", "bought", why, ck, price, now)
         await self._buy(w, pair, m, why, now)
 
+    async def _research_prebuy(self, w, m, why, pair=None):
+        """DECISION 91 pre-buy checks at the buy moment: 30% dex/pool gate, then the Jupiter can-it-sell round trip.
+        Returns (ok, reason, skip_permanently)."""
+        import fastprice as fp, strat_b_research as R
+        s = self.c.s
+        sol = None                                       # SOL/USD from the DexScreener pair (no GMGN call from B paper)
+        if pair and (fields.get(pair, "quoteToken.address") or "") == R.SOL:
+            pn, pu = num(fields.get(pair, "priceNative")), num(fields.get(pair, "priceUsd"))
+            sol = (pu / pn) if (pn and pu) else None
+        try:
+            res = await fp.check_buy_dex_pool(self.c, w["mint"], m["price"], sol_usd=sol, pair=pair or None)
+        except Exception as e:
+            res = {"blocked": False, "error": type(e).__name__}
+        if res.get("blocked"):
+            return False, f"dex vs pool: {res['reason']}", True
+        if res.get("error") and res["error"] != "off":
+            self.log.info(f"{iso(self.c.clock())}	dex vs pool: no pool price, not blocking	{w['mint']}	{res['error']}")
+        try:
+            sc = await R.sell_check(s, w["mint"])
+        except Exception as e:
+            sc = {"ok": False, "skip": False, "why": f"can't check sellability now ({type(e).__name__})"}
+        if not sc["ok"]:
+            return False, sc["why"], bool(sc.get("skip"))
+        m["sellCheck"] = sc["why"]
+        return True, f"{why} · {sc['why']}", False
+
     async def _buy(self, w, pair, m, why, now):
         """PAPER fill (simulated)."""
         c, s = self.c, self.c.s
-        size = float(s["strat_b.trade_usd"])
-        f = fill_buy(s, m["price"], size, m["liq"])
+        import strat_b_research as R
         prof = (s["strat_b.profile"] or "default")
+        research = prof == R.PROFILE
+        size = float(s["strat_b.rs_trade_usd"] if research else s["strat_b.trade_usd"])
+        f = (R.fill_buy if research else fill_buy)(s, m["price"], size, m["liq"])
         ef = early_fields(s, now, profile=prof)
         cur = c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,symbol,status,size_usd,signal_price,entry_price,tokens,buy_fees_usd,peak,"
                      "last_price,last_liq,entry_liq,mc_entry,trail_armed,opened_at,why,last_seen,mode,exits_phase,early_until,profile,profit_since,spike_high_at) "
@@ -691,7 +767,7 @@ class StratB:
         self.hist[w["mint"]] = collections.deque([(now, m["price"])])
         self.log.info(f"{iso(now)}\tBUY\t{w['mint']}\t{w['name']}\t#{cur.lastrowid}\t${size:.2f}\tsignal={m['price']:.6g}\tfill={f['price']:.6g}"
                       f"\tfees=${f['fees']:.2f}\tmc={m['mc']}\tliq={m['liq']}\t{why}")
-        text = (f"{LABEL} · Bought {w['name']} · ${size:,.2f} @ ${f['price']:.6g}\n"
+        text = (f"{LABEL}{' (research)' if research else ''} · Bought {w['name']} · ${size:,.2f} @ ${f['price']:.6g}\n"
                 f"mc ${m['mc']:,.0f} · {why}\n"
                 f"{b_exits_text(s)}")
         await self._push(text, w["mint"])
@@ -703,6 +779,11 @@ class StratB:
         liq = num(fields.get(pair, "liquidity.usd")) if pair else None
         import strat_b_gta as G
         live = (o.get("mode") or "PAPER") == "LIVE"
+        import strat_b_research as R
+        if not price and R.is_research_order(o) and not live and not o["trail_armed"] and o["last_price"] \
+                and now - o["opened_at"] >= float(s["strat_b.rs_hard_close_min"]) * 60:
+            await self._sell(o, o["last_price"], o["last_liq"], R.HARD_CLOSE + " (no price)", now)
+            return
         if not price:
             if (not G.is_gta_order(o, s)) and now - o["opened_at"] >= s["strat_b.time_stop_h"] * 3600 and o["last_price"]:
                 if live:
@@ -734,7 +815,9 @@ class StratB:
 
     async def _sell(self, o, price, liq, reason, now):
         c, s = self.c, self.c.s
-        f = fill_sell(s, price, o["tokens"], liq or o["last_liq"] or o["entry_liq"])
+        import strat_b_research as R
+        research = R.is_research_order(o)
+        f = (R.fill_sell if research else fill_sell)(s, price, o["tokens"], liq or o["last_liq"] or o["entry_liq"])
         pnl = f["proceeds"] - o["size_usd"]
         pct = pnl / o["size_usd"] * 100 if o["size_usd"] else 0.0
         cur = c.db.x("UPDATE strat_b_orders SET status='closed', closed_at=?, exit_reason=?, exit_signal_price=?, exit_price=?, sell_fees_usd=?,"
@@ -748,8 +831,13 @@ class StratB:
         self.log.info(f"{iso(now)}\tSELL\t{o['mint']}\t{o['name']}\t#{o['id']}\t{reason}\tsignal={price:.6g}\tfill={f['price']:.6g}"
                       f"\tpnl=${pnl:+.2f}\t{pct:+.1f}%\theld={held_txt}\tbankroll=${self.bankroll():,.2f}")
         sign = "+" if pnl >= 0 else "-"
-        text = (f"{LABEL} · Sold {o['name']} ({reason}) · {sign}${abs(pnl):,.2f} ({pct:+.1f}%) · held {held_txt}\n"
-                f"B paper bankroll ${self.bankroll():,.2f}")
+        if research:
+            bk = R.books(c)
+            foot = " · ".join(f"${b['startUsd']:,.0f} book ${b['balanceUsd']:,.2f}" for b in bk)
+        else:
+            foot = f"B paper bankroll ${self.bankroll():,.2f}"
+        text = (f"{LABEL}{' (research)' if research else ''} · Sold {o['name']} ({reason}) · {sign}${abs(pnl):,.2f} ({pct:+.1f}%) · held {held_txt}\n"
+                f"{foot}")
         await self._push(text, o["mint"])
         c.event("exit", o["mint"])
 
@@ -844,8 +932,12 @@ def _order_view(s, o):
          "profile": o.get("profile") or "default",
          "why": (json.loads(o["why"]).get("reason") if o["why"] else None), "link": links.coin_url(o["mint"], "solana")}
     if o["status"] == OPEN:
+        import strat_b_research as R
         if mode == "LIVE":                               # estimate from the real entry (fees + rent included)
             pnl = (last / e - 1) * o["size_usd"] if (e and last) else 0.0
+        elif R.is_research_order(o):
+            est = R.fill_sell(s, last, o["tokens"], o["last_liq"] or o["entry_liq"])
+            pnl = est["proceeds"] - o["size_usd"]
         else:
             est = fill_sell(s, last, o["tokens"], o["last_liq"] or o["entry_liq"])
             pnl = est["proceeds"] - o["size_usd"]
@@ -859,6 +951,9 @@ def _order_view(s, o):
                  tpLine=e * (1 + s["strat_b.take_profit_pct"] / 100.0) if e else None,
                  trailLine=trail_line,
                  timeStopAt=iso(o["opened_at"] + s["strat_b.time_stop_h"] * 3600))
+        if R.is_research_order(o):
+            v.update(tpLine=None, trailLine=R.trail_line(s, o), feeCheckAt=iso(o["opened_at"] + float(s["strat_b.rs_fee_check_min"]) * 60),
+                     timeStopAt=None if o["trail_armed"] else iso(o["opened_at"] + float(s["strat_b.rs_hard_close_min"]) * 60))
     else:
         v.update(pnlUsd=round(o["pnl_usd"] or 0, 2), pct=o["pct"], exitReason=o["exit_reason"], exitPrice=o["exit_price"],
                  closedAt=iso(o["closed_at"]) if o["closed_at"] else None)
@@ -889,7 +984,7 @@ def live_card(c, limit=40) -> dict:
     wallet, free_sol = strat_b_live.wallet_view(c)
     prof = (s["strat_b.profile"] or "default")
     return {"label": LIVE_LABEL, "mode": "LIVE", "active": s["strat_b.mode"] == "LIVE",
-            "profile": prof, "profileLabel": "GTA" if prof == "gta" else "Standard",
+            "profile": prof, "profileLabel": {"gta": "GTA", "research": "Research"}.get(prof, "Standard"),
             "pnlAllUsd": round(sum(o["pnl_usd"] or 0 for o in closed), 2), "pnlTonightUsd": round(sum(o["pnl_usd"] or 0 for o in tonight), 2),
             "closedTonight": len(tonight), "closedAll": len(closed), "wins": len(wins), "losses": len(losses),
             "winRatePct": round(100 * len(wins) / len(closed), 1) if closed else None,
@@ -924,7 +1019,7 @@ def scorecard(c, limit=40) -> dict:
     prof = (s["strat_b.profile"] or "default")
     return {"v": 2, "ts": iso(), "label": LIVE_LABEL if mode == "LIVE" else LABEL, "mode": mode, "paperLabel": "B PAPER",
             "live": live_card(c, limit), "enabled": bool(s["strat_b.enabled"]), "profile": prof,
-            "profileLabel": "GTA" if prof == "gta" else "Standard",
+            "profileLabel": {"gta": "GTA", "research": "Research"}.get(prof, "Standard"),
             "gtaKillPct": float(s["strat_b.gta_kill_pct"]),
             "gtaStopPct": float(s["strat_b.gta_stop_pct"]),
             "gtaTpPct": float(s["strat_b.gta_tp_pct"]),
@@ -939,7 +1034,19 @@ def scorecard(c, limit=40) -> dict:
             "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
             "rules": rules(s), "tradeUsd": float(s["strat_b.trade_usd"]),
             "fallbackTradeUsd": float(s["gmgn.fallback_trade_usd"]), "minTradeUsd": float(s["gmgn.min_trade_usd"]),
-            "sizeLabel": b_size_ladder_text(s)}
+            "sizeLabel": b_size_ladder_text(s), "research": research_card(c, limit)}
+
+
+def research_card(c, limit=40) -> dict:
+    """DECISION 91: research-profile PAPER results only, replayed on the $34 and $500 books. Never real money."""
+    import strat_b_research as R
+    s, db = c.s, c.db
+    opens = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='open' ORDER BY opened_at DESC", (R.PROFILE,))
+    closed = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='closed' ORDER BY closed_at DESC", (R.PROFILE,))
+    return {"label": "B PAPER · research", "mode": "PAPER", "active": R.is_research_profile(s) and bool(s["strat_b.enabled"]),
+            "tradeUsd": float(s["strat_b.rs_trade_usd"]), "books": R.books(c), "exits": R.exits_text(s),
+            "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
+            "closedAll": len(closed), "rules": R.rules(s)}
 
 
 def _src_chip(src):

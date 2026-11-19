@@ -650,11 +650,11 @@
     const name = r.name || r.symbol || short(r.mint);
     const p = r.pct ?? 0, up = p >= 0;
     const sub = r.status === "open"
-      ? `${money(r.sizeUsd)} in ${tm(r.openedAt)} · stop ${price(r.stopLine)}${r.mode === "LIVE" ? (r.stopOnGmgn ? " (on GMGN)" : " (desk)") : ""} · ${r.trailArmed ? "trail armed " + price(r.trailLine) : "2x " + price(r.tpLine)}`
+      ? `${money(r.sizeUsd)} in ${tm(r.openedAt)} · stop ${price(r.stopLine)}${r.mode === "LIVE" ? (r.stopOnGmgn ? " (on GMGN)" : " (desk)") : ""} · ${r.trailArmed ? "trail armed " + price(r.trailLine) : r.feeCheckAt ? "fee check " + tm(r.feeCheckAt) + " · close " + tm(r.timeStopAt) : "2x " + price(r.tpLine)}`
       : r.status === "closed" ? `${money(r.sizeUsd)} · ${esc(r.exitReason || "closed")} ${tm(r.closedAt)}`
       : `${money(r.sizeUsd)} · ${esc(r.status)} ${tm(r.openedAt)}${r.note ? " · " + esc(r.note) : ""}`;
     return `<a class="row" href="${esc(r.link)}" target="_blank" rel="noopener"><div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span style="margin-left:6px">${bBadge(r.mode)}</span></div><div class="s">${sub}</div>${r.why ? `<div class="s" style="white-space:normal">${esc(r.why)}</div>` : ""}</div>
+      <div class="grow"><div class="t">${esc(name)} <span style="margin-left:6px">${r.mode === "PAPER" ? `<span class="badge">B PAPER</span>` : bBadge(r.mode)}</span></div><div class="s">${sub}</div>${r.why ? `<div class="s" style="white-space:normal">${esc(r.why)}</div>` : ""}</div>
       <div class="r"><div class="${up ? "green" : "red"}">${money(r.pnlUsd)}</div><div class="s">${pct(r.pct)}</div></div></a>`;
   }
 
@@ -714,7 +714,23 @@
     const b = F("strat_b.json");
     let h = pushBanner() + stratBTabs();
     if (!b) return h + emptyBox("Strategy B hasn't published yet", "It shows up after the desk's next publish.");
-    return h + bLiveBody(b);
+    return h + bResearchBody(b) + bLiveBody(b);
+  }
+  // DECISION 91: research-profile paper trades, clearly marked PAPER, with the $34 and $500 book replays. Never real money.
+  function bResearchBody(b) {
+    const r = b.research;
+    if (!r || (!r.active && !(r.open || []).length && !(r.closed || []).length)) return "";
+    const bk = (r.books || []).map(x => `<div class="row" style="cursor:default"><div class="grow"><div class="t">${esc(money(x.startUsd))} book</div>
+        <div class="s">${x.trades} trade${x.trades === 1 ? "" : "s"} · ${x.wins}W/${x.losses}L${x.winRatePct != null ? " · " + x.winRatePct + "% wins" : ""}${x.skippedNoCash ? ` · skipped ${x.skippedNoCash} (out of cash)` : ""}${x.canTrade ? "" : " · can't cover the next $" + esc(String(r.tradeUsd))}</div></div>
+        <div class="r"><div class="${x.pnlUsd >= 0 ? "green" : "red"}">${money(x.balanceUsd)}</div><div class="s">${money(x.pnlUsd)} (${pct(x.pnlPct)})${x.unrealizedUsd ? " · open " + money(x.unrealizedUsd) : ""}</div></div></div>`).join("");
+    let h = `<h1>Strategy B · research · PAPER <span class="badge" style="margin-left:6px">PAPER</span></h1>
+      <div class="card" style="white-space:normal;margin:0 0 12px"><div class="t1">Paper test, no real money</div>
+      <div class="sub">Strategy A's coins with the research Page's rules: a Jupiter can-it-sell check before every buy, no bundled launches, a fixed ${esc(money(r.tradeUsd))}, one position at a time.</div>
+      <div class="sub" style="margin-top:6px">Exits: ${esc(r.exits || "")}. Fees counted.</div></div>`;
+    h += `<div class="card list">${bk}</div>`;
+    h += `<h1>B paper positions</h1>` + ((r.open || []).length ? `<div class="card list">${r.open.map(stratBRow).join("")}</div>` : emptyBox("No paper position open", r.active ? "Research B buys a coin right after the auditor passes it, if Jupiter can sell it." : "The research profile is off."));
+    h += `<h1>B paper trades</h1>` + ((r.closed || []).length ? `<div class="card list">${r.closed.map(stratBRow).join("")}</div>` : emptyBox("No paper trades closed yet", "Judge after 100+ trades, with fees."));
+    return h;
   }
   function bLiveBody(b) {
     const lv = b.live || {};

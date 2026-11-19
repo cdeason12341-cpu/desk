@@ -431,6 +431,10 @@ class Auditor:
         out["layers"] = [{k: l[k] for k in ("n", "name", "pass", "value", "source")} for l in layers]
         out["bundled"] = bundled
         out["bundle_pct"] = None if bundle_pct is None else round(bundle_pct, 4)
+        mi = cache.get("mi")                             # DECISION 91: Token-2022 extensions for B research (no extra call)
+        out["token_program"] = fields.get(mi, "value.owner") if mi else None
+        _ext = (fields.get(mi, "value.data.parsed.info.extensions") if mi else None) or []
+        out["token_ext"] = [e.get("extension") for e in _ext if isinstance(e, dict) and e.get("extension")]
         out["l8_skipped"] = bool(state.get("l8_skipped"))
         self.log.info(f"{out['ts']}\t{mint}\t" + "\t".join(f"L{l['n']}={l['value']}({l['ms']}ms)" for l in layers if l["ms"] is not None)
                       + f"\t{' | '.join(raw_log)}\tverdict={'pass' if passed else 'red'}")

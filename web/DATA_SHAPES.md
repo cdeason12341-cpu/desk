@@ -208,6 +208,8 @@ current Strategy B mode (`"LIVE"` → `"B LIVE"`). Real-money results sit under 
 ```
 Every order row also has `mode` ("PAPER"|"LIVE") and `label` ("B PAPER"|"B LIVE"). No order ids or tx signatures.
 
+`research` (DECISION 91): research-profile PAPER results only — `label` "B PAPER · research", `mode` "PAPER", `active`, `tradeUsd` (20), `exits` (plain words), `books` = two `{book: small|large, startUsd (34|500), balanceUsd, pnlUsd, pnlPct, unrealizedUsd, trades, closed, wins, losses, winRatePct, skippedNoCash, canTrade}`, `open` / `closed` order rows (`mode` PAPER, `profile` research, `feeCheckAt`, `timeStopAt` = 10-min close unless the trail armed, `tpLine` null), `closedAll`, `rules`. `profileLabel` is `Research` on this profile. The Strat B tab shows this block above the LIVE card, every row badged B PAPER.
+
 ## strat_b_live.json (Strat B → Live) — DECISION 60 (`mode`/`label` follow strat_b.mode; items may have status `refused` in LIVE)
 ```json
 {"v":1,"ts":"…Z","label":"STRATEGY B · PAPER","mode":"PAPER","night":"…","enabled":true,
