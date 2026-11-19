@@ -238,7 +238,9 @@ def exits_text(s) -> str:
 # ---------- books ($34 and $500 replays of the same trades)
 def books(c) -> list[dict]:
     s, db = c.s, c.db
-    rows = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? ORDER BY opened_at, id", (PROFILE,))
+    import strat_b
+    rows = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND (status='open' OR COALESCE(closed_at,0)>=?)"
+                   " ORDER BY opened_at, id", (PROFILE, strat_b.paper_since(db)))
     out = []
     for key, label in (("strat_b.rs_book_small_usd", "small"), ("strat_b.rs_book_large_usd", "large")):
         start = float(s[key])

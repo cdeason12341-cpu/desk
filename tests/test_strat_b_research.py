@@ -354,3 +354,22 @@ def test_live_research_order_uses_research_exits():
     o = {"profile": "research", "mode": "LIVE", "entry_price": 1.0, "peak": 1.0, "trail_armed": 0, "opened_at": 0,
          "entry_liq": 50000, "size_usd": 20.0, "tokens": None, "last_liq": 50000}
     assert strat_b.exit_check(c.s, o, 1.0, 50000, [], 11 * 60)[0] == R.HARD_CLOSE
+
+
+def test_b_profit_reset_keeps_history():
+    """Owner 2026-11-19 4:51 PM CT 'reset strat b profit count': strat_b.pnl_since (LIVE) + strat_b_paper_since (PAPER)."""
+    import pnl_since
+    c, clock, sb = _rsb()
+    for i, (mode, p) in enumerate((("PAPER", -12.5), ("LIVE", -7.0))):
+        c.db.x("INSERT INTO strat_b_orders(ts,night,mint,name,symbol,status,size_usd,entry_price,tokens,opened_at,closed_at,pnl_usd,mode,profile) "
+               "VALUES(?,?,?,?,?,'closed',20,1,20,?,?,?,?,'research')", (clock.t, c.night, f"old{i}", "x", "X", clock.t, clock.t + 1, p, mode))
+    assert sb.bankroll() == 1000 - 12.5 and strat_b.scorecard(c)["live"]["pnlAllUsd"] == -7.0
+    clock.t += 10
+    c.db.set_meta(strat_b.PAPER_SINCE_META, clock.t)
+    c.s.set("strat_b.pnl_since", pnl_since.iso(clock.t), source="test")
+    sc = strat_b.scorecard(c)
+    assert sb.bankroll() == 1000 and sc["pnlAllUsd"] == 0 and sc["closedAll"] == 0 and sc["paperSince"]
+    assert sc["live"]["pnlAllUsd"] == 0 and sc["live"]["pnlTonightUsd"] == 0 and sc["live"]["closedAll"] == 0
+    assert all(b["pnlUsd"] == 0 and b["trades"] == 0 for b in sc["research"]["books"])
+    assert pnl_since.b_live(c.db, c.s, c.night)["pnlUsd"] == 0
+    assert c.db.one("SELECT COUNT(*) n FROM strat_b_orders")["n"] == 2          # history kept

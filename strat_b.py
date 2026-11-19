@@ -22,7 +22,15 @@ LIVE_LABEL = "B LIVE"
 OPEN, CLOSED = "open", "closed"
 STOP, TP, SPIKE, TRAIL, TIME, PULLED = "stop", "take profit 2x", "spike", "trail", "time stop", "liquidity pulled"
 TEMP_KEY = "strat_b_tonight"   # meta: settings changed for tonight only, reverted at the next night rollover (DECISION 63)
+PAPER_SINCE_META = "strat_b_paper_since"   # owner 2026-11-19 4:51 PM CT reset: B paper P&L counts closes at/after this (history kept)
 NO_PRICE_HOLD_S = 1800  # with no price, keep holding (the time stop still applies)
+
+
+def paper_since(db) -> float:
+    try:
+        return float(db.meta(PAPER_SINCE_META) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def num(v, default=None):
@@ -524,7 +532,8 @@ class StratB:
     # ---- money
     def bankroll(self) -> float:
         """PAPER bankroll only: live P&L is real money and never mixed in."""
-        r = self.c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM strat_b_orders WHERE status='closed' AND mode='PAPER'")
+        r = self.c.db.one("SELECT COALESCE(SUM(pnl_usd),0) p FROM strat_b_orders WHERE status='closed' AND mode='PAPER' AND COALESCE(closed_at,0)>=?",
+                          (paper_since(self.c.db),))
         return round(float(self.c.s["strat_b.bankroll_usd"]) + (r["p"] or 0), 6)
 
     def in_positions(self) -> float:
@@ -1052,7 +1061,8 @@ def scorecard(c, limit=40) -> dict:
     """PAPER fields at the top level (unchanged shape, paper rows only) + 'live' (real money, B LIVE) section."""
     s, db = c.s, c.db
     opens = db.rows("SELECT * FROM strat_b_orders WHERE status='open' AND mode='PAPER' ORDER BY opened_at DESC")
-    closed = db.rows("SELECT * FROM strat_b_orders WHERE status='closed' AND mode='PAPER' ORDER BY closed_at DESC")
+    closed = db.rows("SELECT * FROM strat_b_orders WHERE status='closed' AND mode='PAPER' AND COALESCE(closed_at,0)>=? ORDER BY closed_at DESC",
+                     (paper_since(db),))
     pnl_all = sum(o["pnl_usd"] or 0 for o in closed)
     wins = [o for o in closed if (o["pnl_usd"] or 0) > 0]
     losses = [o for o in closed if (o["pnl_usd"] or 0) <= 0]
@@ -1071,6 +1081,7 @@ def scorecard(c, limit=40) -> dict:
             "gtaStopPct": float(s["strat_b.gta_stop_pct"]),
             "gtaTpPct": float(s["strat_b.gta_tp_pct"]),
             "gtaProfitHoldS": float(s["strat_b.gta_profit_hold_s"]), "night": c.night,
+            "paperSince": iso(paper_since(db)) if paper_since(db) else None,
             "bankrollStart": round(start, 2), "bankroll": round(start + pnl_all, 2), "free": round(start + pnl_all - in_pos, 2),
             "inPositions": round(in_pos, 2), "unrealizedUsd": round(unreal, 2),
             "pnlAllUsd": round(pnl_all, 2), "pnlTonightUsd": round(sum(o["pnl_usd"] or 0 for o in tonight), 2),
@@ -1089,7 +1100,8 @@ def research_card(c, limit=40) -> dict:
     import strat_b_research as R
     s, db = c.s, c.db
     opens = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='open' ORDER BY opened_at DESC", (R.PROFILE,))
-    closed = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='closed' ORDER BY closed_at DESC", (R.PROFILE,))
+    closed = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='closed' AND COALESCE(closed_at,0)>=? ORDER BY closed_at DESC",
+                     (R.PROFILE, paper_since(db)))
     return {"label": "B PAPER · research", "mode": "PAPER",
             "active": R.is_research_profile(s) and bool(s["strat_b.enabled"]) and s["strat_b.mode"] != "LIVE",
             "tradeUsd": float(s["strat_b.rs_trade_usd"]), "books": R.books(c), "exits": R.exits_text(s),
