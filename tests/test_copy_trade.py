@@ -198,7 +198,7 @@ def test_copy_max_open_and_no_mc_filter(monkeypatch):
     run(w.poll_once())
     rows = c.db.rows("SELECT * FROM gmgn_orders ORDER BY id")
     assert rows[0]["status"] == "open"                              # bought despite the $10M market-cap floor
-    assert rows[1]["status"] == "refused" and "1/1 copy positions" in rows[1]["reason"]
+    assert rows[1]["status"] == "refused" and "1/1 copy coins" in rows[1]["reason"]
 
 
 def test_unindexed_tx_retried_in_order(monkeypatch):
@@ -221,13 +221,135 @@ def test_sell_without_copy_is_ignored(monkeypatch):
     assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders")["n"] == 0
 
 
-def test_copy_paper_only_and_idle_when_scanner(monkeypatch):
+def test_copy_idle_when_scanner(monkeypatch):
     c, clock, t, w, ch, _ = hybrid(monkeypatch)
-    c.s.set("gmgn.mode", "LIVE", source="test", force=True)
-    assert "PAPER-only" in run(w.poll_once())
-    c.s.set("gmgn.mode", "PAPER", source="test", force=True)
     c.s.set("gmgn.profile", "scanner", source="test", force=True)
     assert run(w.poll_once()).startswith("idle")
+
+
+# ---------- DECISION 93: LIVE copies of 9s4ji, every other buy, $20 each, $60 per coin, 5 coins, borrow from B
+def live(monkeypatch, wallet_sol=4.0, **kw):
+    kw.setdefault("copy.sizing", "flat")
+    kw.setdefault("copy.every_n", 2)
+    kw.setdefault("copy.max_position_usd", 60.0)
+    kw.setdefault("copy.max_open", 5)
+    kw.setdefault("copy.name", "9s4ji")
+    kw.setdefault("gmgn.live_wallet_share_pct", 50.0)
+    kw.setdefault("strat_b.live_wallet_share_pct", 50.0)
+    c, clock, t, w, ch, calls = hybrid(monkeypatch, **kw)
+    c.s.set("gmgn.mode", "LIVE", source="test", force=True)
+    t.client.confirm = True
+    c.net.pairs[copytrade.SOL] = pair(copytrade.SOL, price=70.0, liq=5_000_000, name="Wrapped SOL", symbol="SOL")
+    bal = {"sol": int(wallet_sol * L), "tok": {}}
+    his_sigs = c.net.rpc_map["getSignaturesForAddress"]
+    c.net.rpc_map["getSignaturesForAddress"] = lambda p: his_sigs(p) if p[0] == W else []
+    c.net.rpc_map["getBalance"] = lambda p: {"value": bal["sol"]}
+    c.net.rpc_map["getTokenAccountsByOwner"] = lambda p: {"value": [{"account": {"data": {"parsed": {"info": {
+        "tokenAmount": {"amount": str(bal["tok"].get(p[1]["mint"], 0))}}}}}}]}
+    monkeypatch.setattr(copytrade, "CONFIRM_GAP_S", 0.0)
+    run(w.poll_once())                                               # baseline
+    return c, clock, t, w, ch, bal
+
+
+def swaps(t, side="buy"):
+    return [b for k, b in t.client.calls if k == "swap" and ((b["input_token"] == gmgn.SOL) == (side == "buy"))]
+
+
+def test_live_every_other_buy_20_each_60_cap(monkeypatch):
+    c, clock, t, w, ch, bal = live(monkeypatch)
+    for i in range(7):                                               # 7 buys of the same coin: #1, #3, #5 copied; #7 hits $60
+        clock.t += 5
+        ch.add(tx(f"b{i + 1}", 100 * L, 99 * L, i * 10, i * 10 + 10), clock.t)
+        run(w.poll_once())
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE a_kind='copy' AND mode='LIVE'")
+    b = swaps(t)
+    assert len(b) == 3 and o["size_usd"] == 60.0 and o["status"] == "open" and o["no_surge"] == 1
+    assert all(abs(int(x["input_amount"]) - int(20 / 70 * L)) <= 1 for x in b)
+    assert b[0]["condition_orders"] == [{"order_type": "loss_stop", "side": "sell", "price_scale": "50", "sell_ratio": "100"}]
+    assert "condition_orders" not in b[1] and "condition_orders" not in b[2]   # adds ride the first buy's backstop
+    assert json.loads(o["audit"])["buys"] and json.loads(o["audit"]).get("pending") == []
+    assert w.state()["buys"] == 7
+    assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders WHERE status='refused'")["n"] == 0
+    # he sells half -> 50% of our whole position; then the rest -> 100%, row exits, closes when the wallet is empty
+    clock.t += 5
+    ch.add(tx("s1", 10 * L, 12 * L, 1000, 500), clock.t)
+    run(w.poll_once())
+    s = swaps(t, "sell")
+    assert len(s) == 1 and s[0]["input_amount_bps"] == "5000" and s[0]["input_token"] == MT
+    clock.t += 5
+    ch.add(tx("s2", 12 * L, 14 * L, 500, 0), clock.t)
+    run(w.poll_once())
+    s = swaps(t, "sell")
+    assert s[-1]["input_amount_bps"] == "10000"
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE id=?", (o["id"],))
+    assert o["status"] == "exiting" and o["exit_reason"] == "copy sell"
+    clock.t += 60
+    bal["tok"][MT] = 0
+    run(w.live_tick(o, 0.01, 1000, clock.t))
+    assert c.db.one("SELECT status FROM gmgn_orders WHERE id=?", (o["id"],))["status"] == "closed"
+
+
+def test_live_max_5_coins_and_insufficient_balance_no_gmgn_call(monkeypatch):
+    c, clock, t, w, ch, bal = live(monkeypatch, wallet_sol=40.0, **{"copy.every_n": 1})
+    mints = [f"Cn{i:02d}" + "1" * 36 + "pump" for i in range(6)]
+    for i, m in enumerate(mints):
+        c.net.pairs[m] = pair(m, price=0.01, liq=200000, name=f"C{i}")
+        clock.t += 5
+        ch.add(tx(f"c{i}", 100 * L, 99 * L, 0, 10, mint=m), clock.t)
+        run(w.poll_once())
+    assert len(swaps(t)) == 5
+    r = c.db.one("SELECT * FROM gmgn_orders WHERE status='refused'")
+    assert r["mint"] == mints[5] and "5/5 copy coins" in r["reason"]
+    # broke wallet: refused before any GMGN request
+    c2, clock2, t2, w2, ch2, bal2 = live(monkeypatch, wallet_sol=0.1, **{"copy.every_n": 1})
+    n0 = len(t2.client.calls)
+    clock2.t += 5
+    ch2.add(tx("z1", 100 * L, 99 * L, 0, 10), clock2.t)
+    run(w2.poll_once())
+    r = c2.db.one("SELECT * FROM gmgn_orders WHERE status='refused'")
+    assert r and "insufficient balance" in r["reason"] and r["mode"] == "LIVE"
+    assert len(t2.client.calls) == n0                                # no gas_price / swap / quote to GMGN
+
+
+def test_live_borrows_b_unused_share_keeps_one_b_buy(monkeypatch):
+    # 1.0 SOL wallet, A share 20%: 0.196 SOL can't cover a $20 buy (~0.292 SOL with fees) -> borrow B's unused share
+    c, clock, t, w, ch, bal = live(monkeypatch, wallet_sol=1.0, **{"copy.every_n": 1, "gmgn.live_wallet_share_pct": 20.0})
+    clock.t += 5
+    ch.add(tx("b1", 100 * L, 99 * L, 0, 10), clock.t)
+    run(w.poll_once())
+    assert len(swaps(t)) == 1
+    src = json.loads(c.db.one("SELECT copy_src FROM gmgn_orders WHERE mint=?", (MT,))["copy_src"])
+    assert src[0]["borrow_lamports"] > 0
+    # wallet after that buy: free 0.57 SOL, B has nothing open -> one B $20 buy + fees stays: refused
+    bal["sol"] = int(0.59 * L)
+    clock.t += 5
+    ch.add(tx("b2", 100 * L, 99 * L, 0, 10, mint=M2), clock.t)
+    run(w.poll_once())
+    assert len(swaps(t)) == 1
+    r = c.db.one("SELECT reason FROM gmgn_orders WHERE mint=?", (M2,))
+    assert "insufficient balance" in r["reason"] and "for one B buy" in r["reason"]
+
+
+def test_live_small_scanner_stays_paper_and_watch_skips_copy_rows(monkeypatch):
+    c, clock, t, w, ch, bal = live(monkeypatch)
+    r = run(t.on_pass("Sm01" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE id=?", (r["id"],))
+    assert r["status"] == "paper" and o["mode"] == "PAPER" and o["a_kind"] == "small" and o["size_usd"] == 5.0
+    assert not swaps(t)
+    clock.t += 5
+    ch.add(tx("b1", 100 * L, 99 * L, 0, 10), clock.t)
+    run(w.poll_once())
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE a_kind='copy'")
+    assert o["mode"] == "LIVE" and t._trail_rows() == []
+    seen = []
+
+    async def hook(o, *a):
+        seen.append(o["id"])
+    t.copy_hook = hook
+    c.db.x("UPDATE gmgn_orders SET last_check=0")
+    run(t.watch_once(pairs=[c.net.pairs[MT]]))
+    assert seen == [o["id"]]                                         # LIVE copy rows never go through _live_tick
+    assert _a_label(c.s, o) == "LIVE · copying 9s4ji"
 
 
 # ---------- exits: only his sells + -50% backstop

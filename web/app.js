@@ -450,7 +450,7 @@
     const ex = p.exits || {};
     const exits = exitsLine(ex);
     const inner = `<div class="ico ${(p.pct ?? 0) >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode === "PAPER" ? (p.label || "PAPER") : p.mode)}</span></div>
+      <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.label || p.mode)}</span></div>
       <div class="s">${money(p.sizeUsd)} · ${exits}</div></div>
       <div class="r"><div class="${(p.pct ?? 0) >= 0 ? "green" : "red"}">${p.pnlUsd != null ? money(p.pnlUsd) : pct(p.pct)}</div><div class="s">${pct(p.pct)}</div></div>`;
     return p.mint ? `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
@@ -479,7 +479,7 @@
     }
     const right = r.pnlUsd != null ? money(r.pnlUsd) : pct(r.pct);
     const inner = `<div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span>${r.mode === "PAPER" ? ` <span class="badge">${esc(r.label || "PAPER")}</span>` : ""}</div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
+      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span>${r.mode === "PAPER" || r.label ? ` <span class="badge${r.mode === "LIVE" ? " live" : ""}">${esc(r.label || "PAPER")}</span>` : ""}</div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
       <div class="r"><div class="${up ? "green" : "red"}">${right}</div><div class="s">${pct(r.pct)}</div></div>`;
     return r.mint ? `<a class="row${r.bypass ? " byp" : ""}" href="#/coin/${encodeURIComponent(r.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
@@ -549,7 +549,10 @@
     const real = tr?.real, on = gm?.mode === "LIVE";
     const p = F("strat_feed.json")?.pnl?.A || (real ? { pnlUsd: real.pnlAllUsd, pnlTonightUsd: real.pnlTonightUsd, wins: real.wins, losses: real.losses, closed: (real.wins || 0) + (real.losses || 0) } : null);
     let h = profitCard("Strategy A · real money · GMGN", p, gm?.mode, aBadge(gm?.mode), gm?.budgets?.A, "A", sizeLadder(gm));
+    h += aCopyStatus(gm);                            // DECISION 93: LIVE copies + PAPER small trades
     const open = real ? real.open : (gm?.open || []).filter(q => q.mode === "LIVE");
+    const small = (gm?.open || []).filter(q => q.mode === "PAPER");
+    if (small.length) h += `<h1>A PAPER small trades</h1><div class="card list">${small.map(gmgnPosRow).join("")}</div>`;
     h += `<h1>A positions</h1>` + (open.length ? `<div class="card list">${open.map(real ? tradeRow : gmgnPosRow).join("")}</div>`
       : emptyBox("No A LIVE positions open", on ? "A buys on its own when a coin passes the desk. Its stop sits on GMGN." : "Strategy A isn't LIVE right now."));
     const since = p?.since || real?.since;
@@ -566,10 +569,10 @@
     const who = cp.name || short(cp.wallet || "");
     const state = cp.state === "full copy"
       ? `A mode: <b>full copy</b> · ${cp.openCopies}/${cp.maxOpen} copied positions open · copying ${esc(who)}`
-      : `A mode: <b>normal</b> · ${cp.profile === "hybrid" ? `small ${money(cp.smallUsd)} trades (max ${cp.smallMaxOpen} open) · ` : ""}watching ${esc(who)} for his next buy`;
+      : `A mode: <b>normal</b> · ${cp.profile === "hybrid" ? `small ${money(cp.smallUsd)} PAPER trades (max ${cp.smallMaxOpen} open) · ` : ""}watching ${esc(who)} for his next buy`;
     const extra = [cp.lastDelayS != null ? `last copy delay ${Number(cp.lastDelayS).toFixed(0)}s` : null,
       cp.lastPoll ? `checked ${tmCT(cp.lastPoll)}` : null, `copy book ${money(cp.bookUsd)}`].filter(Boolean).join(" · ");
-    return `<div class="card"><div class="t">${state}</div><div class="sub" style="white-space:normal;margin-top:6px">PAPER · not real money · ${esc(extra)}</div></div>`;
+    return `<div class="card"><div class="t">${state}</div><div class="sub" style="white-space:normal;margin-top:6px">${cp.mode === "LIVE" ? `copies LIVE · ${money(cp.flatUsd)} per buy, every ${cp.everyN === 2 ? "other" : cp.everyN + "th"} buy of his, max ${money(cp.maxPositionUsd)} per coin · small scanner trades stay PAPER` : "PAPER · not real money"} · ${esc(extra)}</div></div>`;
   }
   function aPaperBody(gm, tr, full) {
     const paper = tr?.paper;

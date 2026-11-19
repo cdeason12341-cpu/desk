@@ -277,6 +277,7 @@ SPECS: list[Spec] = [
     _s("copy.sizing", "flat", kind="choice", choices=("flat", "fraction"), aliases=("copy sizing",)),
     _s("copy.flat_usd", 20.0, 1, 10000, aliases=("copy size", "copy flat"), fmt="${v:,.2f}"),
     _s("copy.first_buy_only", True, aliases=("copy first buy only",)),
+    _s("copy.every_n", 1, 1, 10, aliases=("copy every",), fmt="every {v}"),   # DECISION 93: copy 1st, (1+n)th, ... of his buys
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.

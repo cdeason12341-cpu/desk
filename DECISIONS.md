@@ -971,3 +971,30 @@ Replaces the PAPER-ONLY lock of DECISION 54 deliberately, by the owner's command
 - App shell desk-shell-v38 (`?v=38`): A PAPER rows and feed events carry `label` ("PAPER · copying himOthy" / "PAPER · small"); Strategy A PAPER shows "A mode: normal … / full copy …" with last delay and poll time. `state.json gmgn.copy` = profile, state, name, wallet, openCopies, bookUsd, lastPoll, lastDelayS (no tx bodies).
 - Strategy B code and `strat_b.*` settings untouched. Tests: `tests/test_copy_trade.py` (settings/protected/no bare-name aliases, tx classification incl. WSOL and reward claims, size clamp, baseline then buy → partial sell → full sell, adds + position cap, no-route skip, copy cap with no market-cap filter, unindexed tx retried in order, old-bag sells ignored, LIVE idle, backstop only, $5 small trades max 2 next to copies, copy/scanner profiles, publisher labels/status, app).
 - Target switched (owner 5:17 PM CT): from himOthy to `9s4ji7MRh6xx9PVx7D4by8YjpHMfPVtHfYuMUy8VaTTp` (no public handle; `copy.name` "9s4ji", app label "PAPER · copying 9s4ji"). He has ~1,251 SOL, ~$99 average buys, a 23-min average hold, and scales in many times (3,768 buys / 755 sells in 30 days). New settings: `copy.sizing` `flat` (default) | `fraction` (the himOthy rule above), `copy.flat_usd` $20 per copied coin, `copy.first_buy_only` true: only his first buy of a coin is copied. Ignored: add-on buys into a coin we hold, a coin we already copied since the baseline, and a coin he already held before the buy. Sells are unchanged (same fraction of his token balance before the sell; 100% when he fully exits). Swapping `copy.wallet` re-baselines, so the new wallet's existing bags are never copied. The himOthy run (5:09–5:18 PM CT) saw 1 trade (his FIONA buy, detected 1.1 s after the block) and copied nothing: Jupiter returned TOKEN_NOT_TRADABLE, which led to the fallback above.
+
+## 93. Strategy A copies 9s4ji LIVE: every other buy at $20, $60 per coin, 5 coins, can borrow B's unused share
+
+Owner 2026-11-19 5:19 PM CT ("If we're only buying 20 have it copy every other of his buys", "And send it live when
+done") and 5:23 PM CT ("If it has to it can draw from b").
+
+- `copy.every_n 2`: every buy of his (add-ons included) is counted since the baseline; A copies his 1st, 3rd, 5th ...
+  buy at `copy.flat_usd` $20, so A adds to a coin as he scales in. `copy.first_buy_only` is off.
+- Limits: `copy.max_position_usd` $60 per coin, `copy.max_open` 5 coins, `gmgn.cap_trade_usd` per buy.
+- Sells: his sell fraction of his position is applied to A's whole position in that coin (GMGN swap with
+  `input_amount_bps`); >= 98% (or < $1 left) is a full exit.
+- LIVE copy rows (`a_kind='copy'`, `mode='LIVE'`) have their own lifecycle in copytrade.py (`CopyWatcher.live_tick`,
+  called from GmgnTrader.watch_once): no desk trail, no surge, no grace, no timeout, no `_live_tick` repair. The first
+  buy carries a server-side `loss_stop` at `copy.backstop_pct` (-50%, sell 100% of holdings, so adds are covered); the
+  desk also sells all at -50% from the average entry. Adds and his sells are confirmed with query_order; the row closes
+  when the wallet's on-chain balance of the coin is 0, with P&L from the chain (all buy legs in `audit.buys` + all
+  sells), and any leftover GMGN strategy is cancelled.
+- Balance guard before any GMGN request: wallet SOL from the public RPC (getBalance) and the SOL price from the cache
+  or DexScreener. A uses its `gmgn.live_wallet_share_pct` (50%) first; if that can't cover $20 + fees it borrows B's
+  unused share = wallet free SOL (after the reserve and every in-flight buy; B's open position is tokens, never free
+  SOL) minus one B $20 buy + fees when B has nothing open. Each borrow is logged (`COPY BORROW from B`) and stored in
+  the row's copy_src. Otherwise the buy is refused cleanly as "insufficient balance".
+- Wallet split 50/50: `gmgn.live_wallet_share_pct 50`, `strat_b.live_wallet_share_pct 50`.
+- The hybrid profile's $5 scanner trades stay PAPER even when `gmgn.mode` is LIVE: a $5 GMGN round trip costs ~1% x2
+  GMGN fee + 2 x 0.0012 SOL priority/tip + ~0.002 SOL token-account rent, about $0.40 or ~8-9% of $5 before slippage,
+  so they are not economic. App: copies show "LIVE · copying 9s4ji", the A page shows the copy status line and the
+  PAPER small trades.

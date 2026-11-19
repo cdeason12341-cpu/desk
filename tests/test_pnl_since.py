@@ -152,7 +152,7 @@ def test_app_shows_tonight_main_and_total_aside():
     css = (root / "web" / "app.css").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v38"' in sw
+    assert 'const V = "desk-shell-v39"' in sw
     assert "app.js?v=38" in html and "app.css?v=38" in html
     assert "desk-shell-v35" not in sw and "v=35" not in html
     assert "function profitCard" in js and "function stratCard" in js
@@ -172,7 +172,7 @@ def test_app_v36_header_and_size_ladder():
     js = (root / "web" / "app.js").read_text()
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
-    assert 'const V = "desk-shell-v38"' in sw
+    assert 'const V = "desk-shell-v39"' in sw
     assert "app.js?v=38" in html
     assert "function bIsLive" in js and "function sizeLadder" in js and "function aIsLive" in js
     assert "A+B LIVE (GTA)" in js and "bLiveLabel" in js
@@ -237,7 +237,7 @@ def test_app_v36_shows_paper_a_profit():
     html = (root / "web" / "index.html").read_text()
     sw = (root / "web" / "sw.js").read_text()
     css = (root / "web" / "app.css").read_text()
-    assert 'const V = "desk-shell-v38"' in sw
+    assert 'const V = "desk-shell-v39"' in sw
     assert "app.js?v=38" in html and "app.css?v=38" in html
     assert "function aIsPaper" in js and "function aPaperBody" in js
     assert "Strategy A · PAPER · not real money" in js

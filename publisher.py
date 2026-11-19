@@ -873,7 +873,7 @@ class Builder:
             v = self.gmgn_order(o) if o["status"] not in ACTIVE else dict(self.gmgn_order(o), **self.gmgn_position(o))
             ov = (o["reason"] or "").startswith("owner override")
             v.update(source="GMGN", open=o["status"] in ACTIVE, bypass=ov, score=None, tag="OVERRIDE" if ov else None)
-            if o["mode"] == "PAPER":                    # DECISION 92: copy / small labels
+            if o["mode"] == "PAPER" or o.get("a_kind") == "copy":   # DECISION 92/93: copy / small labels
                 v["label"] = _a_label(c.s, o)
             if ov:
                 a = c.db.one("SELECT score FROM analyses WHERE mint=? ORDER BY id DESC LIMIT 1", (o["mint"],))
@@ -922,12 +922,12 @@ class Builder:
 
 def _a_label(s, o):
     """DECISION 92: badge for an A order row: 'PAPER · copying <name>', 'PAPER · small', 'PAPER', or 'LIVE'."""
+    k = o.get("a_kind")
+    if k == "copy":                                  # DECISION 93: 'LIVE · copying 9s4ji' once A copies live
+        import copytrade
+        return copytrade.label(s, o.get("mode") or "PAPER")
     if (o.get("mode") or "") != "PAPER":
         return "LIVE"
-    k = o.get("a_kind")
-    if k == "copy":
-        import copytrade
-        return copytrade.label(s)
     return "PAPER · small" if k == "small" else "PAPER"
 
 

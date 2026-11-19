@@ -890,6 +890,7 @@ class GmgnTrader:
         self._trail_below_floor: set = set()  # armed ids last seen under the net floor (DECISION 81 bounce)
         self.fast = None                 # fastprice.FastPrice for LIVE exit watchers (DECISION 57), set by main.Desk
         self._settling: set = set()      # order ids with a settle/exit-attach in progress (watcher must not race it)
+        self.copy_hook = None             # DECISION 93: CopyWatcher.live_tick for LIVE copy rows
         self._grace_extended: set = set()  # order ids holding the grace stop past the window (DECISION 65)
         self._grace_recover: dict = {}     # order id -> consecutive recover ticks after an extension
         self._grace_tick_ts: dict = {}     # order id -> last recover-tick time (avoid double-counting two loops)
@@ -1193,7 +1194,9 @@ class GmgnTrader:
 
     async def _on_pass(self, mint, name, symbol, price, liq, score, reentry=None, mc=None, approved=False, from_dip=False):
         c, s = self.c, self.s
-        mode = self.mode()
+        # DECISION 93: with the hybrid / copy profile the scanner side is PAPER-only even when gmgn.mode is LIVE
+        # (only the copies trade real SOL; a $5 GMGN round trip costs ~8-9% in fees and rent)
+        mode = "PAPER" if s["gmgn.profile"] in ("hybrid", "copy") else self.mode()
         if c.db.one(f"SELECT id FROM gmgn_orders WHERE mint=? AND status IN ({','.join('?'*len(ACTIVE))})", (mint, *ACTIVE)):
             return None                                  # never a 2nd buy on an open one
         if mode == "LIVE" and _b_live(c.db, f"SELECT id FROM strat_b_orders WHERE mode='LIVE' AND mint=? AND status IN ({','.join('?'*len(ACTIVE))})", (mint, *ACTIVE)):
@@ -2065,6 +2068,10 @@ class GmgnTrader:
             if o["mode"] == "PAPER":
                 await self._paper_tick(o, price, liq, now)
             elif o in live_due:
+                if o.get("a_kind") == "copy":           # DECISION 93: LIVE copies have their own lifecycle (copytrade.py)
+                    if self.copy_hook is not None:
+                        await self.copy_hook(o, price, liq, now)
+                    continue
                 await self._live_tick(o, price, liq, now, holdings, strategies)
 
     async def _paper_tick(self, o, price, liq, now):
@@ -2106,7 +2113,7 @@ class GmgnTrader:
         self._upd(o["id"], status="closed", exit_reason=reason, exit_price=price, pnl_usd=pnl, pct=pct, closed_at=now)
         sign = "+" if pnl >= 0 else "-"
         kind = o.get("a_kind")
-        pre = (__import__("copytrade").label(self.s) + " · " if kind == "copy" else "PAPER · small · GMGN · " if kind == "small"
+        pre = (__import__("copytrade").label(self.s, "PAPER") + " · " if kind == "copy" else "PAPER · small · GMGN · " if kind == "small"
                else "PAPER · GMGN · ")
         await self.push(f"{pre}Sold {o['name']} · {EXIT_LABEL.get(reason, reason)} · {sign}${abs(pnl):,.2f} ({pct:+.1f}%)", mint=o["mint"])
         self.c.event("exit", o["mint"])
@@ -2407,7 +2414,7 @@ class GmgnTrader:
 
     def _trail_rows(self):
         rows = self.c.db.rows("SELECT * FROM gmgn_orders WHERE status='open' AND mode='LIVE'")
-        return [r for r in rows if r.get("entry_price") and not r.get("exit_reason")]
+        return [r for r in rows if r.get("entry_price") and not r.get("exit_reason") and r.get("a_kind") != "copy"]
 
     async def trail_once(self, pairs=None) -> int:
         """One price check on every open LIVE A position. Returns how many. The take-profit trail
