@@ -29,6 +29,10 @@ def tx(sig, sol_pre, sol_post, tok_pre=0, tok_post=0, mint=MT, ts=1_800_000_000,
             "transaction": {"signatures": [sig], "message": {"accountKeys": [{"pubkey": W}]}}}
 
 
+def mt_target(i, o):
+    return o if i == copytrade.USDC else None
+
+
 def ok_quote(monkeypatch, fail=None):
     calls = []
 
@@ -36,6 +40,8 @@ def ok_quote(monkeypatch, fail=None):
         calls.append((i, o, amt))
         if fail == "sell" and o == copytrade.SOL:
             return {"ok": False, "no_route": True, "error": "COULD_NOT_FIND_ANY_ROUTE"}
+        if fail == "nottradable" and o == mt_target(i, o):
+            return {"ok": False, "no_route": True, "error": "TOKEN_NOT_TRADABLE"}
         if fail == "error":
             return {"ok": False, "no_route": False, "error": "jupiter 500"}
         return {"ok": True, "out": 1000, "impact_pct": 0.5, "route": "Pump.fun Amm"}
@@ -293,3 +299,20 @@ def test_publisher_labels_and_status(monkeypatch):
 def test_app_shows_copy_labels_and_mode_line():
     js = open("web/app.js").read()
     assert "function aCopyStatus" in js and "full copy" in js and 'r.label || "PAPER"' in js
+
+
+def test_jupiter_not_listed_falls_back_to_dex_sells(monkeypatch):
+    """Live 2026-11-19 5:11 PM CT: his FIONA buy (pump AMM, 0.9% tax) got TOKEN_NOT_TRADABLE from Jupiter."""
+    c, clock, t, w, ch, _ = hybrid(monkeypatch, fail="nottradable")
+    run(w.poll_once())
+    ch.add(tx("b1", 100 * L, 90 * L, 0, 10), clock.t)
+    run(w.poll_once())
+    o = c.db.one("SELECT * FROM gmgn_orders")
+    assert o["status"] == "open" and "DexScreener shows real sells" in o["quote"]
+    # few real sells -> still skipped
+    c.net.pairs[M2] = pair(M2, price=0.002, liq=100000, name="Mx", symbol="MX")
+    c.net.pairs[M2]["txns"]["h1"]["sells"] = 3
+    ch.add(tx("b2", 90 * L, 80 * L, 0, 10, mint=M2), clock.t)
+    run(w.poll_once())
+    o2 = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (M2,))
+    assert o2["status"] == "refused" and "too few real sells" in o2["reason"]

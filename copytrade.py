@@ -35,12 +35,43 @@ def quote(*a, **k):
     return jupiter.quote(*a, **k)
 
 
-async def sell_check(s, mint, size_usd) -> dict:
+SELLS_H1_MIN = 20                # DexScreener fallback: real sells in the last hour ...
+LIQ_MIN_USD = 20000.0            # ... on a pool at least this deep
+
+
+async def _dex_sells_ok(net, mint):
+    """Fallback when Jupiter doesn't list the token at all (TOKEN_NOT_TRADABLE: e.g. pump AMM Token-2022 coins with a
+    transfer tax, which himOthy trades). Sellable if DexScreener shows >= 20 sells in the last hour on a pool with
+    >= $20K liquidity. Never used when Jupiter lists the token but finds no sell route (that still skips)."""
+    if net is None:
+        return None
+    try:
+        from agents.scanner import pick_pair
+        import fields
+        p = pick_pair(await net.dex_tokens([mint]), mint)
+    except Exception:
+        return None
+    if not p:
+        return None
+    sells = int(fields.get(p, "txns.h1.sells") or 0)
+    liq = float(fields.get(p, "liquidity.usd") or 0)
+    dex = fields.get(p, "dexId") or "?"
+    ok = sells >= SELLS_H1_MIN and liq >= LIQ_MIN_USD
+    return ok, f"{sells} sells/1h on {dex}, ${liq:,.0f} liquidity"
+
+
+async def sell_check(s, mint, size_usd, net=None) -> dict:
     """Jupiter round trip for the planned size. {'ok', 'skip', 'why'} like strat_b_research.sell_check, but keyed
     on copy.sell_check so A's check never depends on a Strategy B setting."""
     if not s["copy.sell_check"]:
         return {"ok": True, "skip": False, "why": "sell check off"}
     b = await quote(USDC, mint, int(round(float(size_usd) * 1e6)))
+    if not b.get("ok") and "NOT_TRADABLE" in str(b.get("error") or "").upper():
+        d = await _dex_sells_ok(net, mint)
+        if d is not None:
+            if d[0]:
+                return {"ok": True, "skip": False, "why": f"Jupiter doesn't list it; DexScreener shows real sells ({d[1]})"}
+            return {"ok": False, "skip": True, "why": f"Jupiter doesn't list it and too few real sells ({d[1]})"}
     if not b.get("ok"):
         if b.get("no_route"):
             return {"ok": False, "skip": True, "why": f"no Jupiter buy route ({b.get('error')})"}
@@ -287,10 +318,10 @@ class CopyWatcher:
         free = A.paper_free_usd(s, c.db)
         if free + 1e-9 < add:
             return refuse(f"paper free ${free:,.2f} can't cover ${add:,.2f}")
-        sc = await sell_check(s, mint, add)
+        sc = await sell_check(s, mint, add, net=c.net)
         if not sc["ok"] and not sc["skip"]:
             await asyncio.sleep(2)
-            sc = await sell_check(s, mint, add)
+            sc = await sell_check(s, mint, add, net=c.net)
         if not sc["ok"]:
             return refuse(sc["why"])
         lam = int(add / sol_usd * LAMPORTS)

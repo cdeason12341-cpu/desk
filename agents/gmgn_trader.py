@@ -1265,7 +1265,7 @@ class GmgnTrader:
             sc_note = None
             if small:                                    # DECISION 92: Jupiter can-it-sell check before every small buy
                 import copytrade
-                sc = await copytrade.sell_check(s, mint, size)
+                sc = await copytrade.sell_check(s, mint, size, net=c.net)
                 if not sc["ok"]:
                     self._refuse(mint, name, mode, size, sc["why"])
                     self._log("PAPER", mint, "small buy skipped", sc["why"])
