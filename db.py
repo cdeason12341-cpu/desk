@@ -77,6 +77,8 @@ class DB:
                   ("gmgn_orders", "confirm_push_at", "REAL"), ("gmgn_orders", "audit", "TEXT"),
                   ("gmgn_orders", "grace_until", "REAL"), ("gmgn_orders", "exits_phase", "TEXT"),
                   ("gmgn_orders", "no_surge", "INTEGER"),
+                  # DECISION 92: A profile kind ('small' | 'copy') and the copied trade's details (JSON)
+                  ("gmgn_orders", "a_kind", "TEXT"), ("gmgn_orders", "copy_src", "TEXT"),
                   ("strat_b_watch", "checks", "TEXT"), ("strat_b_watch", "eval_at", "REAL"), ("strat_b_watch", "evals", "INTEGER"),
                   ("strat_b_watch", "source", "TEXT"), ("strat_b_evals", "source", "TEXT"),
                   # Strategy B LIVE (DECISION 66): real GMGN orders share strat_b_orders, told apart by mode

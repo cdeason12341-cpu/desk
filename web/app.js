@@ -450,7 +450,7 @@
     const ex = p.exits || {};
     const exits = exitsLine(ex);
     const inner = `<div class="ico ${(p.pct ?? 0) >= 0 ? "green" : "red"}">${esc((p.symbol || p.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode)}</span></div>
+      <div class="grow"><div class="t">${esc(name)} <span class="badge ${p.mode === "LIVE" ? "live" : ""}" style="margin-left:6px">${esc(p.mode === "PAPER" ? (p.label || "PAPER") : p.mode)}</span></div>
       <div class="s">${money(p.sizeUsd)} · ${exits}</div></div>
       <div class="r"><div class="${(p.pct ?? 0) >= 0 ? "green" : "red"}">${p.pnlUsd != null ? money(p.pnlUsd) : pct(p.pct)}</div><div class="s">${pct(p.pct)}</div></div>`;
     return p.mint ? `<a class="row" href="#/coin/${encodeURIComponent(p.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
@@ -479,7 +479,7 @@
     }
     const right = r.pnlUsd != null ? money(r.pnlUsd) : pct(r.pct);
     const inner = `<div class="ico ${up ? "green" : "red"}">${esc((r.symbol || r.name || "?").slice(0, 2))}</div>
-      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span>${r.mode === "PAPER" ? ` <span class="badge">PAPER</span>` : ""}</div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
+      <div class="grow"><div class="t">${esc(name)} <span class="src">${src}</span>${r.mode === "PAPER" ? ` <span class="badge">${esc(r.label || "PAPER")}</span>` : ""}</div>${r.bypass ? `<div class="bpline">${bypassBadge(r)}</div>` : ""}<div class="s">${sub}</div></div>
       <div class="r"><div class="${up ? "green" : "red"}">${right}</div><div class="s">${pct(r.pct)}</div></div>`;
     return r.mint ? `<a class="row${r.bypass ? " byp" : ""}" href="#/coin/${encodeURIComponent(r.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
@@ -559,10 +559,23 @@
     if (full) h += earlierBlock(before, tradeRow);
     return h;
   }
+  // DECISION 92: hybrid / copy profile status line: normal (small trades) vs full copy, always PAPER.
+  function aCopyStatus(gm) {
+    const cp = (gm || gmgnState())?.copy;
+    if (!cp || !cp.on) return "";
+    const who = cp.name || short(cp.wallet || "");
+    const state = cp.state === "full copy"
+      ? `A mode: <b>full copy</b> · ${cp.openCopies}/${cp.maxOpen} copied positions open · copying ${esc(who)}`
+      : `A mode: <b>normal</b> · ${cp.profile === "hybrid" ? `small ${money(cp.smallUsd)} trades (max ${cp.smallMaxOpen} open) · ` : ""}watching ${esc(who)} for his next buy`;
+    const extra = [cp.lastDelayS != null ? `last copy delay ${Number(cp.lastDelayS).toFixed(0)}s` : null,
+      cp.lastPoll ? `checked ${tmCT(cp.lastPoll)}` : null, `copy book ${money(cp.bookUsd)}`].filter(Boolean).join(" · ");
+    return `<div class="card"><div class="t">${state}</div><div class="sub" style="white-space:normal;margin-top:6px">PAPER · not real money · ${esc(extra)}</div></div>`;
+  }
   function aPaperBody(gm, tr, full) {
     const paper = tr?.paper;
     const p = F("strat_feed.json")?.pnl?.A_paper;
     let h = profitCard("Strategy A · PAPER · not real money", p, "PAPER", aBadge("PAPER"), null, "A", null, { paper: true, pills: aPaperPills(gm) });
+    h += aCopyStatus(gm);
     const open = paper ? aGmgnPaperRows(paper.open) : (gm?.open || []).filter(q => q.mode === "PAPER");
     h += `<h1>A PAPER positions</h1>` + (open.length ? `<div class="card list">${open.map(paper ? tradeRow : gmgnPosRow).join("")}</div>`
       : emptyBox("No A PAPER positions open", "A is paper trading. Buys are simulated and do not touch the wallet."));
@@ -628,7 +641,7 @@
     const ic = { buy: "↗", sell: "↘", stop: "■", skip: "✕", fail: "!", approval: "?" }[e.kind] || "•";
     const right = e.pnlUsd != null ? `<div class="${e.pnlUsd >= 0 ? "green" : "red"}">${money(e.pnlUsd)}</div><div class="s">${pct(e.pct)}</div>`
       : e.sizeUsd != null ? `<div>${money(e.sizeUsd)}</div>` : "";
-    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}${e.mode === "PAPER" ? ` <span class="badge">PAPER</span>` : ""}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
+    const inner = `<div class="ico ${e.tone === "amber" ? "" : e.tone}">${ic}</div><div class="grow"><div class="t">${esc(e.title)}${e.mode === "PAPER" ? ` <span class="badge">${esc(e.label || "PAPER")}</span>` : ""}</div><div class="s wrap">${esc(e.sub || "")} · ${tmCT(e.t)}</div></div><div class="r">${right}</div>`;
     return e.mint ? `<a class="row" href="#/coin/${encodeURIComponent(e.mint)}">${inner}</a>` : `<div class="row">${inner}</div>`;
   }
   function evFeed(who, items, empty) {

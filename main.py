@@ -30,6 +30,7 @@ HB_JOBS = {
     "gmgn_surge": ("gmgn_surge",),
     "gmgn_trail": ("gmgn_trail",),
     "gmgn_dip": ("gmgn_dip",),
+    "gmgn_copy": ("gmgn_copy",),
     "strat_b": ("strat_b",),
     "strat_b_live": ("strat_b_live",),
     "strat_b_feed": ("strat_b_feed",),
@@ -54,6 +55,8 @@ class Desk:
         client = gmgn_api.Gmgn() if with_telegram else None        # tests build the Desk without network clients
         self.gmgn = GmgnTrader(self.ctx, client if (client and client.configured) else None)
         self.ctx.gmgn = self.gmgn if self.gmgn.client else None
+        from copytrade import CopyWatcher                           # DECISION 92: A copies one wallet (PAPER)
+        self.copy = CopyWatcher(self.ctx, self.gmgn)
         self.gmgn.record_gate_rule()
         if with_telegram:                                           # real run: pool-reserve exit prices (DECISION 57)
             from fastprice import FastPrice
@@ -420,6 +423,7 @@ class Desk:
             jobs["gmgn"] = self.gmgn.loop
             jobs["gmgn_surge"] = self.gmgn.surge_loop
             jobs["gmgn_trail"] = self.gmgn.trail_loop
+            jobs["gmgn_copy"] = self.copy.loop
         if self.tg:
             jobs["telegram"] = self.tg.loop
         if self.webpush:

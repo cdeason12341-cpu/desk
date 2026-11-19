@@ -125,26 +125,29 @@ class Builder:
         except Exception:
             pass
         A_paper = out["A_paper"] = []
+
+        def a_label(o):                                  # DECISION 92: which A PAPER book the row belongs to
+            return _a_label(c.s, o)
         for o in c.db.rows("SELECT * FROM gmgn_orders WHERE mode='PAPER' AND (ts>=? OR closed_at>=?) ORDER BY id DESC LIMIT 80",
                            (since_t, since_t)):
             nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
             if o["status"] == "refused":
                 A_paper.append(ev(o["ts"], "skip", f"Skipped {nm}", o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
-                A_paper[-1]["mode"] = "PAPER"
+                A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
                 continue
             if o["status"] == "failed":
                 A_paper.append(ev(o["ts"], "fail", f"Buy failed · {nm}", o["reason"] or "failed", o["mint"], o["name"], o["symbol"], tone="red"))
-                A_paper[-1]["mode"] = "PAPER"
+                A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
                 continue
             A_paper.append(ev(o["ts"], "buy", f"Bought {nm}", f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
                         o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
-            A_paper[-1]["mode"] = "PAPER"
+            A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
             if o["closed_at"]:
                 stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
                 A_paper.append(ev(o["closed_at"], "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}",
                             (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
                             pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
-                A_paper[-1]["mode"] = "PAPER"
+                A_paper[-1]["mode"] = "PAPER"; A_paper[-1]["label"] = a_label(o)
         try:
             for a in c.db.rows("SELECT * FROM gmgn_approvals WHERE ts>=? ORDER BY id DESC LIMIT 30", (since_t,)):
                 nm = a["name"] or a["symbol"] or (a["mint"] or "")[:6]
@@ -736,7 +739,9 @@ class Builder:
                           "graceStopPct": s["risk.grace_stop_pct"], "normalStopPct": s["risk.stop_pct"],
                           "graceUntil": iso(o["grace_until"]) if o.get("grace_until") else None,
                           "graceExtended": extended,
-                          "label": exits_label(s, phase, o=o, now=now)},
+                          "label": (f"his sells · -{s['copy.backstop_pct']:g}% backstop" if o.get("a_kind") == "copy"
+                                    else exits_label(s, phase, o=o, now=now))},
+                "label": _a_label(s, o),
                 "link": links.coin_url(o["mint"]) if o["mint"] else None}
 
     def gmgn_order(self, o):
@@ -748,6 +753,7 @@ class Builder:
                 "exitReason": o["exit_reason"], "pnlUsd": o["pnl_usd"], "pct": o["pct"],
                 "openedAt": iso(o["ts"]) if o["ts"] else None,
                 "closedAt": iso(o["closed_at"]) if o["closed_at"] else None,
+                "label": _a_label(self.c.s, o),
                 "link": links.coin_url(o["mint"]) if o["mint"] else None}
 
     def gmgn(self):
@@ -786,7 +792,7 @@ class Builder:
                 "ticketsUsed": n, "ticketsMax": tickets,
                 "nightSpendUsd": round(used, 2), "nightCapUsd": round(cap * tickets, 2),
                 "reserveSol": s["gmgn.sol_reserve"],
-                "paper": paper,
+                "paper": paper, "copy": __import__("copytrade").status(c),
                 "bMode": s["strat_b.mode"], "budgets": budgets,
                 "open": [self.gmgn_position(r) for r in open_rows],
                 "liveOrders": [self.gmgn_order(r) for r in live_recent],
@@ -867,6 +873,8 @@ class Builder:
             v = self.gmgn_order(o) if o["status"] not in ACTIVE else dict(self.gmgn_order(o), **self.gmgn_position(o))
             ov = (o["reason"] or "").startswith("owner override")
             v.update(source="GMGN", open=o["status"] in ACTIVE, bypass=ov, score=None, tag="OVERRIDE" if ov else None)
+            if o["mode"] == "PAPER":                    # DECISION 92: copy / small labels
+                v["label"] = _a_label(c.s, o)
             if ov:
                 a = c.db.one("SELECT score FROM analyses WHERE mint=? ORDER BY id DESC LIMIT 1", (o["mint"],))
                 v["score"] = a["score"] if a else None
@@ -911,6 +919,17 @@ class Builder:
         paper["overrideCount"] = sum(1 for r in paper["open"] + paper["closed"] if r["tag"] == "OVERRIDE")
         real["overrideCount"] = sum(1 for r in real["open"] + real["closed"] if r["tag"] == "OVERRIDE")
         return {"v": 1, "ts": iso(), "deskMode": c.mode(), "gmgnMode": c.s["gmgn.mode"], "real": real, "paper": paper}
+
+def _a_label(s, o):
+    """DECISION 92: badge for an A order row: 'PAPER · copying <name>', 'PAPER · small', 'PAPER', or 'LIVE'."""
+    if (o.get("mode") or "") != "PAPER":
+        return "LIVE"
+    k = o.get("a_kind")
+    if k == "copy":
+        import copytrade
+        return copytrade.label(s)
+    return "PAPER · small" if k == "small" else "PAPER"
+
 
 class Publisher:
     def __init__(self, desk):

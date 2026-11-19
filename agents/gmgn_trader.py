@@ -371,6 +371,45 @@ def pick_paper_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | No
                      f"(bankroll ${s['gmgn.paper_bankroll_usd']:,.2f})")
 
 
+def small_open_count(db) -> int:
+    """DECISION 92: A PAPER positions that are not copies (the hybrid profile's small scanner trades)."""
+    ph = ','.join('?' * len(ACTIVE))
+    return int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE mode='PAPER' AND COALESCE(a_kind,'')<>'copy' "
+                      f"AND status IN ({ph})", ACTIVE)["n"])
+
+
+def pick_small_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | None = None):
+    """DECISION 92: hybrid profile scanner buys are a fixed gmgn.small_trade_usd ($5). Never shrinks, never grows."""
+    size = float(s["gmgn.small_trade_usd"])
+    if not sol_usd:
+        return None, 0, "no SOL price"
+    if pool_cap_usd is not None and float(pool_cap_usd) < size:
+        return None, 0, f"pool too thin: max ${float(pool_cap_usd):,.2f} per trade is under ${size:,.2f}"
+    if free_usd is None or free_usd + 1e-9 < size:
+        return None, 0, f"paper free ${max(free_usd or 0, 0):,.2f} can't cover the ${size:,.2f} small trade"
+    return size, int(math.floor(size / sol_usd * LAMPORTS)), None
+
+
+def check_small_caps(s, db, night, size_usd) -> None:
+    """DECISION 92: like check_paper_caps but copies don't count: gmgn.small_max_open small positions at once and
+    A's normal night ticket cap counted over small (non-copy) PAPER rows only."""
+    if not (size_usd > 0):
+        raise CapError("bad size or SOL price")
+    if size_usd > float(s["gmgn.small_trade_usd"]) + 1e-9:
+        raise CapError(f"${size_usd:,.2f} is over the small trade size ${float(s['gmgn.small_trade_usd']):,.2f}")
+    mx, op = int(s["gmgn.small_max_open"]), small_open_count(db)
+    if op >= mx:
+        raise CapError(f"{op}/{mx} small positions already open (max {mx} at once)")
+    ph = ','.join('?' * len(COUNTED))
+    n = int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE night=? AND mode='PAPER' AND COALESCE(a_kind,'')<>'copy' "
+                   f"AND status IN ({ph})", (night, *COUNTED))["n"])
+    tickets = int(s["gmgn.max_tickets_night"])
+    if n >= tickets:
+        raise CapError(f"night ticket cap reached ({n}/{tickets})")
+    if paper_free_usd(s, db) + 1e-9 < size_usd:
+        raise CapError(f"paper free ${paper_free_usd(s, db):,.2f} can't cover ${size_usd:,.2f}")
+
+
 def night_usage(db, night: str, mode: str, strategy: str | None = None) -> tuple[int, float]:
     """Tickets / dollars used tonight. strategy=None: LIVE counts A + B (old global view); 'A' or 'B': that one only."""
     ph = ','.join('?' * len(COUNTED))
@@ -545,7 +584,8 @@ DUST_DIV = 1000                  # <= 0.1% of the tokens bought counts as empty
 
 EXIT_LABEL = {"loss_stop": "hard stop", "loss_stop_trace": "trailing stop", "profit_stop_trace": "trailing take-profit",
               "timeout": "timeout", "pulled": "liquidity pulled", "server": "server-side exit", "manual": "sold",
-              "surge top": "surge top", "surge floor": "surge profit floor", "desk trail": "trailing take-profit (desk)", "desk stop": "hard stop (desk)"}
+              "surge top": "surge top", "surge floor": "surge profit floor", "desk trail": "trailing take-profit (desk)", "desk stop": "hard stop (desk)",
+              "copy sell": "copied his sell", "copy stop": "copy backstop stop"}
 
 
 # ---- desk-side trailing take-profit for positions whose GMGN exit is a plain limit stop (DECISION 52)
@@ -1172,7 +1212,13 @@ class GmgnTrader:
             self._refuse(mint, name, mode, 0, "halted")
             return {"status": "refused", "reason": "halted"}
         import dip as _dip
+        prof = s["gmgn.profile"]
+        if mode == "PAPER" and prof == "copy":
+            return None                                  # DECISION 92: copy-only profile: no scanner buys
+        small = mode == "PAPER" and prof == "hybrid"     # DECISION 92: tiny fixed-size scanner trades next to the copies
         mx, op = int(s["gmgn.max_open"]), open_count(c.db, mode, "A") + (_dip.watching_count(c.db) if not from_dip else 0)
+        if small:
+            mx, op = int(s["gmgn.small_max_open"]), small_open_count(c.db) + (_dip.watching_count(c.db) if not from_dip else 0)
         if op >= mx:                                     # 5th buy: refused before anything else is spent
             why = f"{op}/{mx} GMGN positions already open (max {mx} at once)"
             self._refuse(mint, name, mode, 0, why)
@@ -1202,26 +1248,40 @@ class GmgnTrader:
             await self.push(f"{self.prefix()}Skipped {name}: no SOL price from GMGN", mint=mint)
             return {"status": "refused", "reason": "no SOL price"}
         if mode == "PAPER":                              # DECISION 68: paper bankroll, never the real wallet or the $50 live cap
-            size, lamports, why = pick_paper_size(s, paper_free_usd(s, c.db), sol_usd, self.pool_cap_usd(liq))
+            if small:
+                size, lamports, why = pick_small_size(s, paper_free_usd(s, c.db), sol_usd, self.pool_cap_usd(liq))
+            else:
+                size, lamports, why = pick_paper_size(s, paper_free_usd(s, c.db), sol_usd, self.pool_cap_usd(liq))
             if size is None:
                 self._refuse(mint, name, mode, 0, why)
                 await self.push(f"{self.prefix()}Skipped {name}: {why}", kind="gmgn_refused", mint=mint)
                 return {"status": "refused", "reason": why}
             try:
-                check_paper_caps(s, c.db, c.night, size)
+                (check_small_caps if small else check_paper_caps)(s, c.db, c.night, size)
             except CapError as e:
                 self._refuse(mint, name, mode, size, str(e))
                 await self.push(f"{self.prefix()}Refused {name}: {e}", kind="gmgn_refused", mint=mint)
                 return {"status": "refused", "reason": str(e)}
+            sc_note = None
+            if small:                                    # DECISION 92: Jupiter can-it-sell check before every small buy
+                import copytrade
+                sc = await copytrade.sell_check(s, mint, size)
+                if not sc["ok"]:
+                    self._refuse(mint, name, mode, size, sc["why"])
+                    self._log("PAPER", mint, "small buy skipped", sc["why"])
+                    return {"status": "refused", "reason": sc["why"]}
+                sc_note = sc["why"]
             body = buy_body(s, mint, lamports)
             exits = exits_text(s)
             q, qnote = await self.try_quote(mint, lamports)
+            extra = {"a_kind": "small"} if small else {}
             oid = self._row(ts=c.clock(), night=c.night, mode="PAPER", mint=mint, name=name, symbol=symbol, status="open",
                             size_usd=size, sol_usd=sol_usd, lamports=lamports, entry_price=price, peak=price, last_price=price,
                             last_liq=liq, quote=json.dumps(q) if q else qnote, body=json.dumps(body),
-                            conditions=json.dumps(body["condition_orders"]), **grace_fields(s, c.clock()))
-            self._log("PAPER", mint, "sim-fill", f"${size:.2f}", f"{lamports}", f"price={price}", qnote)
-            await self.push(f"{self.prefix()}Buy {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · {self.open_label('PAPER')} · simulated fill\n{exits}\nQuote: {qnote}", mint=mint)
+                            conditions=json.dumps(body["condition_orders"]), **grace_fields(s, c.clock()), **extra)
+            self._log("PAPER", mint, "sim-fill", f"${size:.2f}", f"{lamports}", f"price={price}", qnote,
+                      *(["small", sc_note] if small else []))
+            await self.push(f"{'PAPER · small · GMGN · ' if small else self.prefix()}Buy {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL) · {self.open_label('PAPER')} · simulated fill\n{exits}\nQuote: {qnote}", mint=mint)
             c.event("fill", mint)
             return {"status": "paper", "id": oid, "body": body}
         gated = gmgn.GATE.buy_blocked()                         # DECISION 88: skip LIVE buys while the GMGN gate is closed
@@ -2010,6 +2070,12 @@ class GmgnTrader:
     async def _paper_tick(self, o, price, liq, now):
         if price is None:
             return
+        if o.get("a_kind") == "copy":                    # DECISION 92: copies follow his sells; only a backstop stop here
+            peak = max(o["peak"] or price, price)
+            self._upd(o["id"], peak=peak, last_price=price, last_liq=liq)
+            if price <= o["entry_price"] * (1 - float(self.s["copy.backstop_pct"]) / 100.0):
+                await self._paper_close(o, "copy stop", price, now)
+            return
         if self._grace_due_tick(o, now, price, src="dex"):
             self._upd(o["id"], exits_phase="normal")
             self._clear_grace_extend(o["id"])
@@ -2039,7 +2105,10 @@ class GmgnTrader:
         pnl, pct = self._pnl(o, price)
         self._upd(o["id"], status="closed", exit_reason=reason, exit_price=price, pnl_usd=pnl, pct=pct, closed_at=now)
         sign = "+" if pnl >= 0 else "-"
-        await self.push(f"PAPER · GMGN · Sold {o['name']} · {EXIT_LABEL.get(reason, reason)} · {sign}${abs(pnl):,.2f} ({pct:+.1f}%)", mint=o["mint"])
+        kind = o.get("a_kind")
+        pre = (__import__("copytrade").label(self.s) + " · " if kind == "copy" else "PAPER · small · GMGN · " if kind == "small"
+               else "PAPER · GMGN · ")
+        await self.push(f"{pre}Sold {o['name']} · {EXIT_LABEL.get(reason, reason)} · {sign}${abs(pnl):,.2f} ({pct:+.1f}%)", mint=o["mint"])
         self.c.event("exit", o["mint"])
 
     async def _holdings(self):

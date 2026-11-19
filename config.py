@@ -257,19 +257,37 @@ SPECS: list[Spec] = [
     _s("strat_b.rs_sell_check", True, aliases=("research sell check", "can it sell check")),
     _s("strat_b.rs_book_small_usd", 34.0, 1, 1_000_000, aliases=("research small book",), fmt="${v:,.2f}"),
     _s("strat_b.rs_book_large_usd", 500.0, 1, 1_000_000, aliases=("research large book",), fmt="${v:,.2f}"),
+    # DECISION 92: Strategy A profile. scanner = the old A (default, restorable); copy = only copy a wallet's trades;
+    # hybrid = scanner buys at a tiny fixed PAPER size until the copied wallet buys, then copy it too. Owner command only.
+    _s("gmgn.profile", "scanner", kind="choice", choices=("scanner", "copy", "hybrid"), aliases=("a profile", "strategy a profile")),
+    _s("gmgn.small_trade_usd", 5.0, 1, 1000, aliases=("a small size", "small trade size"), fmt="${v:,.2f}"),
+    _s("gmgn.small_max_open", 2, 1, 20, aliases=("a small max open", "small max open"), fmt="{v}"),
+    _s("copy.wallet", "", kind="str", aliases=("copy wallet",)),
+    _s("copy.name", "", kind="str", aliases=("copy name",)),
+    _s("copy.book_usd", 500.0, 10, 1_000_000, aliases=("copy book",), fmt="${v:,.2f}"),
+    _s("copy.min_usd", 10.0, 1, 10000, aliases=("copy min",), fmt="${v:,.2f}"),
+    _s("copy.max_usd", 100.0, 1, 10000, aliases=("copy max",), fmt="${v:,.2f}"),
+    _s("copy.max_position_usd", 200.0, 1, 100000, aliases=("copy max position",), fmt="${v:,.2f}"),
+    _s("copy.max_open", 10, 1, 50, aliases=("copy max open",), fmt="{v}"),
+    _s("copy.backstop_pct", 50.0, 1, 99, aliases=("copy backstop", "copy stop"), fmt="-{v:g}%", neg=True),
+    _s("copy.poll_s", 3.0, 1, 60, aliases=("copy poll",), fmt="{v:g}s"),
+    _s("copy.min_sol", 0.01, 0, 100, aliases=("copy min sol",), fmt="{v:g} SOL"),
+    _s("copy.sell_check", True, aliases=("copy sell check",)),
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.
 CAP_KEYS = ("gmgn.cap_trade_usd", "gmgn.step_trade_usd", "gmgn.max_tickets_night", "gmgn.fallback_trade_usd", "gmgn.min_trade_usd", "gmgn.max_open")
 PROTECTED = {"desk.mode", "gmgn.mode", "gmgn.live_gate_h", "strat_b.mode", *CAP_KEYS,
              # DECISION 71: wallet split + B's own LIVE caps are money limits too (owner command, force=True)
-             "gmgn.live_wallet_share_pct", "strat_b.live_wallet_share_pct", "strat_b.live_max_open", "strat_b.live_max_tickets_night"}   # strat_b.mode: PAPER|LIVE, owner command only (DECISION 66)
+             "gmgn.live_wallet_share_pct", "strat_b.live_wallet_share_pct", "strat_b.live_max_open", "strat_b.live_max_tickets_night",
+             "gmgn.profile"}   # strat_b.mode: PAPER|LIVE, owner command only (DECISION 66)
 BY_KEY = {s.key: s for s in SPECS}
 ALIASES: dict[str, str] = {}
 for _sp in SPECS:
     ALIASES[_sp.key] = _sp.key
-    if _sp.key.startswith("strat_b."):          # Strategy B never takes a bare name ("stop pct" stays risk.stop_pct)
-        ALIASES.setdefault("strat b " + _sp.key.split(".", 1)[1].replace("_", " "), _sp.key)
+    if _sp.key.startswith(("strat_b.", "copy.")):   # Strategy B / copy (DECISION 92) never take a bare name ("stop pct" stays risk.stop_pct)
+        _pre = "strat b " if _sp.key.startswith("strat_b.") else "copy "
+        ALIASES.setdefault(_pre + _sp.key.split(".", 1)[1].replace("_", " "), _sp.key)
         for a in _sp.aliases:
             ALIASES.setdefault(a, _sp.key)
         continue
@@ -343,6 +361,10 @@ def parse_value(spec: Spec, raw) -> object:
         if spec.kind == "str":
             if not r:
                 raise SettingError(f"{spec.key} can't be empty")
+            if spec.key == "copy.wallet":
+                import solana
+                if not solana.is_pubkey(r):
+                    raise SettingError("copy.wallet must be a Solana wallet address")
             if spec.key == "desk.rpc_url" and not r.startswith("https://"):
                 raise SettingError("rpc_url must start with https://")
             if spec.key == "scanner.recheck_minutes":
