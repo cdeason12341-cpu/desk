@@ -10,8 +10,10 @@ Anything else (reward claims, transfers, account rent) is ignored. Only signatur
 the wallet was set are copied, so his existing bags are never bought.
 
 Copy rules (PAPER only):
-  buy:  size = clamp(fraction x book, copy.min_usd, copy.max_usd); book = copy.book_usd + realized copy P&L.
-        A second buy of a mint we already copy adds to it (weighted entry) up to copy.max_position_usd.
+  buy:  copy.sizing flat (default, owner 5:17 PM CT): copy.flat_usd $20 per copied coin, and with
+        copy.first_buy_only only his first buy of a coin is copied (add-ons, coins he already held, coins already
+        copied are ignored). copy.sizing fraction: clamp(fraction x book, copy.min_usd, copy.max_usd), book =
+        copy.book_usd + realized copy P&L, and a repeat buy adds to the copy up to copy.max_position_usd.
         Jupiter can-it-sell check first (no route = skip). Market-cap / score filters are NOT applied.
         At most copy.max_open copy positions; the paper bankroll must cover the size.
   sell: sell the same fraction of our copy (a closed child row for a partial; the whole row at >= 98%).
@@ -122,6 +124,9 @@ def classify(t: dict | None, wallet: str, min_sol: float = 0.01) -> dict | None:
 
 
 def copy_size(s, frac: float, book: float) -> tuple[float, float]:
+    if s["copy.sizing"] == "flat":
+        v = round(float(s["copy.flat_usd"]), 2)
+        return v, v
     raw = max(0.0, float(frac)) * float(book)
     return raw, round(min(max(raw, float(s["copy.min_usd"])), float(s["copy.max_usd"])), 2)
 
@@ -302,6 +307,17 @@ class CopyWatcher:
             return refuse("no price")
         held = c.db.one(f"SELECT * FROM gmgn_orders WHERE mint=? AND status IN ({','.join('?' * len(ACTIVE))}) ORDER BY id DESC LIMIT 1",
                         (mint, *ACTIVE))
+        if s["copy.first_buy_only"]:                    # owner 5:17 PM CT: only his first buy of each coin
+            why = None
+            if ev.get("pre_tok"):
+                why = "not his first buy (he already held it)"
+            elif held and held.get("a_kind") == "copy":
+                why = f"add-on buy: copy #{held['id']} already open"
+            elif c.db.one("SELECT id FROM gmgn_orders WHERE mint=? AND a_kind='copy' AND status<>'refused' AND ts>=?",
+                          (mint, st.get("since") or 0)):
+                why = "already copied this coin once"
+            if why:
+                return self._log("buy ignored", name, mint, why)
         if held and held.get("a_kind") != "copy":
             return refuse(f"A already holds it ({held.get('a_kind') or held['mode']} #{held['id']})")
         if held:                                         # he adds: add to our copy up to the position cap

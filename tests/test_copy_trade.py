@@ -67,6 +67,8 @@ def hybrid(monkeypatch, fail=None, **kw):
     kw.setdefault("gmgn.profile", "hybrid")
     kw.setdefault("copy.wallet", W)
     kw.setdefault("copy.name", "himOthy")
+    kw.setdefault("copy.sizing", "fraction")         # the himOthy rules; flat/first-buy tests opt in below
+    kw.setdefault("copy.first_buy_only", False)
     c, clock, t = trader(FakeClient(plan_blocked=False, wallet_sol=0.0), **kw)
     calls = ok_quote(monkeypatch, fail)
     w = copytrade.CopyWatcher(c, t)
@@ -83,6 +85,7 @@ def test_settings_defaults_protected_and_names():
     assert s["gmgn.profile"] == "scanner" and s["gmgn.small_trade_usd"] == 5.0 and s["gmgn.small_max_open"] == 2
     assert s["copy.book_usd"] == 500.0 and s["copy.min_usd"] == 10.0 and s["copy.max_usd"] == 100.0
     assert s["copy.max_open"] == 10 and s["copy.backstop_pct"] == 50.0 and s["copy.wallet"] == ""
+    assert s["copy.sizing"] == "flat" and s["copy.flat_usd"] == 20.0 and s["copy.first_buy_only"] is True
     assert "gmgn.profile" in config.PROTECTED
     with pytest.raises(config.SettingError):
         s.set("gmgn.profile", "hybrid", source="test")             # owner command only
@@ -115,7 +118,7 @@ def test_classify_buy_sell_and_ignored():
 
 
 def test_copy_size_clamped():
-    c, _, _ = trader()
+    c, _, _ = trader(**{"copy.sizing": "fraction"})
     assert copytrade.copy_size(c.s, 0.10, 500) == (50.0, 50.0)
     assert copytrade.copy_size(c.s, 0.001, 500)[1] == 10.0
     assert copytrade.copy_size(c.s, 0.9, 500)[1] == 100.0
@@ -316,3 +319,37 @@ def test_jupiter_not_listed_falls_back_to_dex_sells(monkeypatch):
     run(w.poll_once())
     o2 = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (M2,))
     assert o2["status"] == "refused" and "too few real sells" in o2["reason"]
+
+
+# ---------- 9s4ji rules (owner 5:17 PM CT): flat $20, first buy of each coin only, sells by fraction
+def test_flat_20_first_buy_only(monkeypatch):
+    c, clock, t, w, ch, _ = hybrid(monkeypatch, **{"copy.sizing": "flat", "copy.first_buy_only": True, "copy.name": "9s4ji"})
+    assert c.s["copy.flat_usd"] == 20.0
+    run(w.poll_once())
+    ch.add(tx("b1", 1251 * L, 1250 * L, 0, 10), clock.t)           # tiny fraction of 1,251 SOL -> still $20
+    run(w.poll_once())
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE a_kind='copy'")
+    assert o["size_usd"] == 20.0 and o["status"] == "open"
+    ch.add(tx("b2", 1250 * L, 1249 * L, 10, 20), clock.t)          # add-on buy: ignored
+    run(w.poll_once())
+    assert c.db.one("SELECT COUNT(*) n, SUM(size_usd) u FROM gmgn_orders WHERE a_kind='copy'")["u"] == 20.0
+    ch.add(tx("s1", 1249 * L, 1250 * L, 20, 5), clock.t)           # sells 75% of his 20 -> we sell 75%
+    run(w.poll_once())
+    assert c.db.one("SELECT size_usd FROM gmgn_orders WHERE id=?", (o["id"],))["size_usd"] == 5.0
+    ch.add(tx("s2", 1250 * L, 1251 * L, 5, 0), clock.t)            # full exit -> 100%
+    run(w.poll_once())
+    assert c.db.one("SELECT status FROM gmgn_orders WHERE id=?", (o["id"],))["status"] == "closed"
+    ch.add(tx("b3", 1251 * L, 1250 * L, 0, 10), clock.t)           # re-buy of a coin already copied: ignored
+    ch.add(tx("b4", 1250 * L, 1249 * L, 3, 10, mint=M2), clock.t)  # coin he already held: ignored
+    run(w.poll_once())
+    assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders WHERE a_kind='copy' AND status='open'")["n"] == 0
+    assert copytrade.label(c.s) == "PAPER · copying 9s4ji"
+
+
+def test_wallet_swap_rebaselines(monkeypatch):
+    c, clock, t, w, ch, _ = hybrid(monkeypatch)
+    run(w.poll_once())
+    ch.add(tx("b1", 100 * L, 90 * L, 0, 10), clock.t)
+    c.s.set("copy.wallet", "9s4ji7MRh6xx9PVx7D4by8YjpHMfPVtHfYuMUy8VaTTp", source="test")
+    assert run(w.poll_once()) == "baseline"
+    assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders")["n"] == 0

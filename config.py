@@ -273,6 +273,10 @@ SPECS: list[Spec] = [
     _s("copy.poll_s", 3.0, 1, 60, aliases=("copy poll",), fmt="{v:g}s"),
     _s("copy.min_sol", 0.01, 0, 100, aliases=("copy min sol",), fmt="{v:g} SOL"),
     _s("copy.sell_check", True, aliases=("copy sell check",)),
+    # owner 5:17 PM CT: flat $20 per copied coin, copy only his first buy of each coin (DECISION 92)
+    _s("copy.sizing", "flat", kind="choice", choices=("flat", "fraction"), aliases=("copy sizing",)),
+    _s("copy.flat_usd", 20.0, 1, 10000, aliases=("copy size", "copy flat"), fmt="${v:,.2f}"),
+    _s("copy.first_buy_only", True, aliases=("copy first buy only",)),
 ]
 # Only changeable with force=True: desk.mode/gmgn.mode via paper|live commands, caps via the owner's
 # Telegram 'cap ...' + 'CONFIRM CAP', gate only by a recorded owner rule change.
