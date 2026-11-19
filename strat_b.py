@@ -556,9 +556,15 @@ class StratB:
         import strat_b_gta as G
         import strat_b_research as R
         s, mode = self.c.s, self.mode()
-        if R.is_research_profile(s):                     # DECISION 91: paper only, one at a time, $500 book must cover $20
+        if R.is_research_profile(s):                     # DECISION 91: one at a time; PAPER: the $500 book must cover $20
             if mode == "LIVE":
-                return "research profile runs in PAPER only (strat_b.mode is LIVE)"
+                n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE' AND status IN ('submitting','pending','open','exiting')")["n"]
+                if n >= int(s["strat_b.rs_max_open"]):
+                    return f"{n} open (max {int(s['strat_b.rs_max_open'])})"
+                until = float(self.c.db.meta(R.META_BROKE_UNTIL, 0) or 0)
+                if self.c.clock() < until:               # insufficient balance seen: no wallet read or GMGN call until then
+                    return f"insufficient balance (re-check after {iso(until)})"
+                return None
             n = self.c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE status='open' AND mode='PAPER'")["n"]
             if n >= int(s["strat_b.rs_max_open"]):
                 return f"{n} open (max {int(s['strat_b.rs_max_open'])})"
@@ -695,6 +701,12 @@ class StratB:
             block = self.can_buy() or (self.live.blocked_retry(w["mint"], now) if self.mode() == "LIVE" else None)
             if block:
                 ok, why = False, block
+        if ok and self.mode() == "LIVE" and __import__("strat_b_research").is_research_profile(s):
+            broke = await self._research_live_balance(w, m, pair, now)    # before any Jupiter / pool / GMGN call
+            if broke:
+                self._last_reason[w["mint"]] = broke.split(":")[0]
+                self._eval(w, "buy", "refused", f"B LIVE refused: {broke}", ck, price, now)
+                return
         if ok and __import__("strat_b_research").is_research_profile(s):
             ok, why, skip = await self._research_prebuy(w, m, why, pair)
             if skip:
@@ -746,6 +758,41 @@ class StratB:
             return False, sc["why"], bool(sc.get("skip"))
         m["sellCheck"] = sc["why"]
         return True, f"{why} · {sc['why']}", False
+
+    async def _research_live_balance(self, w, m, pair, now):
+        """DECISION 91 (owner 4:42 PM CT 'send b live'): before any GMGN call, read the wallet over public RPC and refuse
+        locally when B's share can't cover the fixed $20 + fees. Logs 'insufficient balance', pauses LIVE buy attempts for
+        REFUSE_RETRY_S, pushes once a night. Returns the refusal text or None."""
+        import strat_b_research as R
+        from agents.gmgn_trader import MAIN_WALLET, LAMPORTS, strategy_free_lamports, buy_cost_lamports
+        c, s = self.c, self.c.s
+        size = float(s["strat_b.rs_trade_usd"])
+        sol = None
+        if pair and (fields.get(pair, "quoteToken.address") or "") == R.SOL:
+            pn, pu = num(fields.get(pair, "priceNative")), num(fields.get(pair, "priceUsd"))
+            sol = (pu / pn) if (pn and pu) else None
+        try:
+            lam = int(((await c.net.rpc("getBalance", [MAIN_WALLET])) or {}).get("value"))
+        except Exception:
+            lam = None
+        if lam is None or not sol:
+            return None                                  # unknown here: BLive.buy decides with its own (GMGN) read
+        free = strategy_free_lamports(s, c.db, "B", lam)
+        need = buy_cost_lamports(s, int(size / sol * LAMPORTS))
+        if free is not None and free >= need:
+            return None
+        import strat_b_live
+        why = (f"insufficient balance: B's share of the wallet is {(free or 0) / LAMPORTS:.4f} SOL (${(free or 0) / LAMPORTS * sol:,.2f}),"
+               f" a ${size:g} buy needs {need / LAMPORTS:.4f} SOL with fees")
+        until = now + strat_b_live.REFUSE_RETRY_S
+        c.db.set_meta(R.META_BROKE_UNTIL, until)
+        self.live._row(ts=now, night=c.night, mode="LIVE", mint=w["mint"], name=w["name"], symbol=w.get("symbol"), status="refused",
+                       size_usd=0, note=why, opened_at=now)
+        self.log.info(f"{iso(now)}	LIVE refused	{w['mint']}	{w['name']}	insufficient balance	{why}	no GMGN call; next try after {iso(until)}")
+        if c.db.meta(R.META_BROKE_PUSH_NIGHT) != c.night:
+            c.db.set_meta(R.META_BROKE_PUSH_NIGHT, c.night)
+            await self._push(f"{LIVE_LABEL} (research) · Can't buy {w['name']}: {why}. I'll keep checking quietly; no more pushes about this tonight.", w["mint"])
+        return why
 
     async def _buy(self, w, pair, m, why, now):
         """PAPER fill (simulated)."""
@@ -1043,7 +1090,8 @@ def research_card(c, limit=40) -> dict:
     s, db = c.s, c.db
     opens = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='open' ORDER BY opened_at DESC", (R.PROFILE,))
     closed = db.rows("SELECT * FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='closed' ORDER BY closed_at DESC", (R.PROFILE,))
-    return {"label": "B PAPER · research", "mode": "PAPER", "active": R.is_research_profile(s) and bool(s["strat_b.enabled"]),
+    return {"label": "B PAPER · research", "mode": "PAPER",
+            "active": R.is_research_profile(s) and bool(s["strat_b.enabled"]) and s["strat_b.mode"] != "LIVE",
             "tradeUsd": float(s["strat_b.rs_trade_usd"]), "books": R.books(c), "exits": R.exits_text(s),
             "open": [_order_view(s, o) for o in opens], "closed": [_order_view(s, o) for o in closed[:limit]],
             "closedAll": len(closed), "rules": R.rules(s)}

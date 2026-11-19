@@ -303,7 +303,7 @@
   }
   function bLiveLabel(b) {
     if (!bIsLive(b)) return "PAPER";
-    return bProfile(b) === "gta" ? "LIVE (GTA)" : "LIVE";
+    return bProfile(b) === "gta" ? "LIVE (GTA)" : bProfile(b) === "research" ? "LIVE (research)" : "LIVE";
   }
   function usdShort(v) {
     if (v == null || !Number.isFinite(Number(v))) return null;

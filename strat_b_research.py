@@ -22,13 +22,18 @@ Exits (whichever first):
 Fills: B's paper model (DexScreener price, 1% slippage + 2x size/liquidity impact, 1% GMGN fee + $0.25 network per side)
 plus rs_protocol_fee_pct (1.25%) per side for pump.fun protocol + creator fees (the Page's ~2.5% round trip).
 Books: the same trade list replayed on a $34 book and a $500 book; a book skips a trade it cannot afford.
-Never signs, never sends, never places a real order. Jupiter quotes are read-only (jupiter.py)."""
+LIVE (owner 2026-11-19 4:42 PM CT "Go ahead and send b live"): same entry and exits; buys and sells go through
+strat_b_live.BLive (A's signed GMGN client) at a fixed $20 (no fallback or shrink; less than $20 free = refuse with
+'insufficient balance'), server-side stop -rs_stop_pct. This module itself never signs, sends, or reads a key.
+Jupiter quotes are read-only (jupiter.py)."""
 from __future__ import annotations
 import json
 import fields
 
 PROFILE = "research"
 FEE_CHECK, HARD_CLOSE, RS_TRAIL, RS_STOP = "time stop 5m (not covering fees)", "time stop 10m (trail not armed)", "trail", "stop"
+META_BROKE_UNTIL = "strat_b_rs_broke_until"        # LIVE: insufficient balance seen, no buy attempt until then
+META_BROKE_PUSH_NIGHT = "strat_b_rs_broke_push_night"
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL = "So11111111111111111111111111111111111111112"
 BAD_EXT = {"transferHook": "transfer hook", "transferFeeConfig": "transfer fee", "permanentDelegate": "permanent delegate"}
@@ -163,7 +168,8 @@ def fill_sell(s, price, tokens, liq) -> dict:
 def net_pct(s, o, price, liq=None) -> float | None:
     if not price or not o.get("size_usd"):
         return None
-    f = fill_sell(s, price, o["tokens"], liq or o.get("last_liq") or o.get("entry_liq"))
+    tokens = o.get("tokens") or (o["size_usd"] / o["entry_price"] if o.get("entry_price") else 0)
+    f = fill_sell(s, price, tokens, liq or o.get("last_liq") or o.get("entry_liq"))
     return (f["proceeds"] / o["size_usd"] - 1) * 100.0
 
 
@@ -266,10 +272,26 @@ def large_book_free(c) -> float:
         "SELECT size_usd FROM strat_b_orders WHERE mode='PAPER' AND profile=? AND status='open'", (PROFILE,)))
 
 
+class _TrailView:
+    """A's trail_net_ok helpers read risk.trail_* keys; map them to the research trail for LIVE quote checks."""
+    MAP = {"risk.trail_start_pct": "strat_b.rs_trail_start_pct", "risk.trail_pct": "strat_b.rs_trail_pct",
+           "risk.trail_floor_pct": "strat_b.rs_trail_floor_pct"}
+
+    def __init__(self, s):
+        self._s = s
+
+    def __getitem__(self, k):
+        return self._s[self.MAP.get(k, k)]
+
+
+def trail_settings(s):
+    return _TrailView(s)
+
+
 def rules(s) -> list[dict]:
     v = lambda k: s[k]
     return [
-        {"k": "Profile", "v": "Research (PAPER only): Strategy A's coins with the Page's filters, short holds and a tight trail",
+        {"k": "Profile", "v": ("Research (LIVE, real money)" if v("strat_b.mode") == "LIVE" else "Research (PAPER)") + ": Strategy A's coins with the Page's filters, short holds and a tight trail",
          "why": "Page 'How profitable crypto bot users set up their bots', tests A1–A4. Copy trading (A5) is not built."},
         {"k": "Entry", "v": f"a coin the scanner + auditor pass, bought within {v('strat_b.rs_entry_window_s'):g}s of the pass; mc ≥ ${v('scanner.min_market_cap_usd'):,.0f}; the 30% DexScreener-vs-pool gate",
          "why": "Same coins and timing as A so the result isolates the exit and filter changes; the Page says keep the $15K floor and 30% gate"},
@@ -277,7 +299,8 @@ def rules(s) -> list[dict]:
          "why": "Page A3: quote a sell of the planned size and skip if there is no route (the #21 honeypot had none)"},
         {"k": "Launch filters", "v": f"bundled ≤ {v('strat_b.max_bundle_pct'):g}%, dev < {v('auditor.max_dev_pct'):g}%, mint + freeze revoked, no Token-2022 transfer hook / fee / permanent delegate",
          "why": "Page A3: skip bundled launches, live authorities and Token-2022 traps"},
-        {"k": "Size", "v": f"${v('strat_b.rs_trade_usd'):g} fixed, {v('strat_b.rs_max_open')} position at a time, never shrinks",
+        {"k": "Size", "v": f"${v('strat_b.rs_trade_usd'):g} fixed, {v('strat_b.rs_max_open')} position at a time, never shrinks"
+                           + (" · LIVE: real GMGN orders from B's share of the wallet; under $20 free = 'insufficient balance', no buy" if v("strat_b.mode") == "LIVE" else ""),
          "why": "Page A4: under $20 fees eat more of the trade; one open at a time"},
         {"k": "Stop", "v": f"-{v('strat_b.rs_stop_pct'):g}% from entry", "why": "Page A1 keeps the -50% stop for fast dumps"},
         {"k": "Time stops", "v": f"at {v('strat_b.rs_fee_check_min'):g} min sell unless it covers round-trip fees; at {v('strat_b.rs_hard_close_min'):g} min sell if the trail hasn't armed",

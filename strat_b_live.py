@@ -49,6 +49,10 @@ def b_conditions(s, phase=None, o=None) -> list[dict]:
     if G.is_gta_order(o, s) if o is not None else G.is_gta_profile(s):
         stop = s["strat_b.gta_stop_pct"]
         return [{"order_type": "loss_stop", "side": "sell", "price_scale": f"{stop:g}", "sell_ratio": "100"}]
+    import strat_b_research as R                       # DECISION 91: flat -rs_stop_pct, no early window
+    if R.is_research_order(o) if o is not None else R.is_research_profile(s):
+        stop = s["strat_b.rs_stop_pct"]
+        return [{"order_type": "loss_stop", "side": "sell", "price_scale": f"{stop:g}", "sell_ratio": "100"}]
     if phase is None:
         phase = "early" if float(s["strat_b.early_stop_min"] or 0) > 0 else "normal"
     stop = s["strat_b.early_stop_pct"] if phase == "early" else s["strat_b.stop_pct"]
@@ -200,8 +204,18 @@ class BLive:
         wallet = await t.wallet_lamports(fresh=True)
         free = A.strategy_free_lamports(s, c.db, "B", wallet)          # DECISION 71: B's share of the wallet only
         pool_cap = None if gta else ((m["liq"] * s["strat_b.max_pool_pct"] / 100.0) if m.get("liq") else None)
-        size, lamports, short = A.pick_size(s, free, sol_usd, pool_cap, top_usd=s["strat_b.trade_usd"])
+        import strat_b_research as R
+        research = R.is_research_profile(s)
+        top = float(s["strat_b.rs_trade_usd"] if research else s["strat_b.trade_usd"])
+        size, lamports, short = A.pick_size(s, free, sol_usd, pool_cap, top_usd=top)
+        if research and size is not None and size < top - 1e-9:          # DECISION 91: fixed $20, never shrink
+            size, short = None, (f"insufficient balance: B's share covers ${size:,.2f}, the research size is ${top:g}"
+                                 if (pool_cap is None or pool_cap >= top) else f"pool too thin for ${top:g}")
+        if research and size is None and "can't cover" in (short or ""):
+            short = "insufficient balance: " + short
         if size is None:
+            if research and "insufficient" in (short or ""):
+                c.db.set_meta(R.META_BROKE_UNTIL, now + REFUSE_RETRY_S)
             return await self._refuse(w, short, 0, now, wallet_kind=True)
         try:
             A.check_caps(s, c.db, c.night, "LIVE", size, lamports, sol_usd, wallet, strategy="B")
@@ -676,8 +690,10 @@ class BLive:
         if upd["trail_armed"] and not o["trail_armed"]:
             self._log("trail armed", o["mint"], o["name"], f"#{o['id']}", f"peak={upd['peak']:.6g}")
         if reason == TRAIL and self.t is not None:
+            import strat_b_research as R
             qsol = await self.t._trail_sell_quote_sol(o)
-            if qsol is not None and not A.trail_net_ok(b_trail_settings(s), o, price, quote_sol_out=qsol):
+            ts = R.trail_settings(s) if R.is_research_order(o) else b_trail_settings(s)
+            if qsol is not None and not A.trail_net_ok(ts, o, price, quote_sol_out=qsol):
                 self._trail_below_floor.add(o["id"])
                 self.sb._trail_below_floor.add(o["id"])
                 self._log("trail held under net floor (quote)", o["mint"], o["name"], f"#{o['id']}",

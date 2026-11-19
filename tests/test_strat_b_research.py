@@ -149,13 +149,6 @@ def test_one_position_at_a_time(jup):
     assert [o["mint"] for o in _orders(c)] == [M]
 
 
-def test_live_mode_never_buys(jup):
-    c, clock, sb = _rsb(**{"strat_b.mode": "LIVE"})
-    _offer(c, clock, sb)
-    _tick(sb, clock, 1.0)
-    assert not _orders(c)
-
-
 # ---------- exits
 def _open(c, clock, entry=1.0, size=20.0, liq=50000):
     s = c.s
@@ -284,3 +277,80 @@ def test_app_shows_research_paper_trades():
     assert "function bResearchBody" in js and "bResearchBody(b) + bLiveBody(b)" in js
     assert "Strategy B · research · PAPER" in js and 'r.mode === "PAPER" ? `<span class="badge">B PAPER</span>`' in js
     assert "book</div>" in js
+
+
+# ---------- LIVE (owner 2026-11-19 4:42 PM CT "Go ahead and send b live")
+class _Rpc:
+    def __init__(self, lamports):
+        self.lamports, self.calls = lamports, 0
+
+    async def __call__(self, method, params=None, **k):
+        if method != "getBalance":
+            raise RuntimeError("no pool in tests")
+        self.calls += 1
+        return {"value": self.lamports}
+
+
+def _live_rsb(lamports, monkeypatch):
+    c, clock, sb = _rsb(**{"strat_b.mode": "LIVE", "strat_b.live_wallet_share_pct": 100.0})
+    rpc = _Rpc(lamports)
+    monkeypatch.setattr(c.net, "rpc", rpc, raising=False)
+    calls = []
+
+    async def live_buy(w, m, why, now):
+        calls.append(w["mint"])
+        return {"status": "pending"}
+    sb.live.buy = live_buy
+    return c, clock, sb, rpc, calls
+
+
+def _sol_pair(mint, price=1.0):
+    p = _pair(mint, price=price)
+    p["quoteToken"] = {"address": R.SOL, "symbol": "SOL"}
+    p["priceNative"] = str(price / 140.0)                 # SOL = $140
+    return p
+
+
+def test_live_insufficient_balance_refuses_locally_once(jup, monkeypatch):
+    c, clock, sb, rpc, calls = _live_rsb(13_500_000, monkeypatch)      # 0.0135 SOL (~$1.89)
+    _offer(c, clock, sb)
+    clock.t += 30
+    run(sb.tick(pairs=[_sol_pair(M)]))
+    assert calls == [] and rpc.calls == 1 and jup.calls == []          # no Jupiter, pool or GMGN call when broke
+    r = c.db.one("SELECT * FROM strat_b_orders WHERE mode='LIVE'")
+    assert r["status"] == "refused" and r["note"].startswith("insufficient balance")
+    # a second coin inside the 10-min pause: no RPC read, no GMGN call, no new row
+    _offer(c, clock, sb, mint=M2)
+    clock.t += 30
+    run(sb.tick(pairs=[_sol_pair(M), _sol_pair(M2)]))
+    assert rpc.calls == 1 and calls == []
+    assert c.db.one("SELECT COUNT(*) n FROM strat_b_orders WHERE mode='LIVE'")["n"] == 1
+    assert c.db.meta(R.META_BROKE_UNTIL) > clock.t
+
+
+def test_live_enough_balance_goes_to_blive(jup, monkeypatch):
+    c, clock, sb, rpc, calls = _live_rsb(2_000_000_000, monkeypatch)   # 2 SOL
+    _offer(c, clock, sb)
+    clock.t += 30
+    run(sb.tick(pairs=[_sol_pair(M)]))
+    assert calls == [M]
+
+
+def test_live_research_server_stop_is_flat():
+    import strat_b_live
+    c, clock, sb = _rsb(**{"strat_b.mode": "LIVE"})
+    assert strat_b_live.b_conditions(c.s)[0]["price_scale"] == "50"
+    assert strat_b_live.b_conditions(c.s, o={"profile": "research"})[0]["price_scale"] == "50"
+
+
+def test_live_pick_fixed_20_never_shrinks():
+    import strat_b_live, inspect
+    src = inspect.getsource(strat_b_live.BLive.buy)
+    assert "never shrink" in src and "insufficient balance" in src
+
+
+def test_live_research_order_uses_research_exits():
+    c, clock, sb = _rsb(**{"strat_b.mode": "LIVE"})
+    o = {"profile": "research", "mode": "LIVE", "entry_price": 1.0, "peak": 1.0, "trail_armed": 0, "opened_at": 0,
+         "entry_liq": 50000, "size_usd": 20.0, "tokens": None, "last_liq": 50000}
+    assert strat_b.exit_check(c.s, o, 1.0, 50000, [], 11 * 60)[0] == R.HARD_CLOSE
