@@ -105,7 +105,7 @@ class Builder:
             nm = o["name"] or o["symbol"] or (o["mint"] or "")[:6]
             if o["status"] == "refused":
                 A.append(ev(o["ts"], "skip", _copy_title(o, "skip", f"Skipped {nm}"), o["reason"] or "refused", o["mint"], o["name"], o["symbol"], tone="red"))
-                if o.get("a_kind") == "copy":
+                if o.get("a_kind") in ("copy", "small"):
                     A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
                 continue
             if o["status"] in ("failed", "unknown"):
@@ -113,14 +113,14 @@ class Builder:
                 continue
             A.append(ev(o["ts"], "buy", _copy_title(o, "buy", f"Bought {nm}"), f"${(o['size_usd'] or 0):,.2f}" + (f" · {o['reason']}" if o["reason"] else "") + l8_note(o["mint"]),
                         o["mint"], o["name"], o["symbol"], size=o["size_usd"], tone="cyan"))
-            if o.get("a_kind") == "copy":
+            if o.get("a_kind") in ("copy", "small"):
                 A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
             if o["closed_at"]:
                 stop = "stop" in (o["exit_reason"] or "") and "time" not in (o["exit_reason"] or "")
                 A.append(ev(o["closed_at"], "stop" if stop else "sell", _copy_title(o, "stop" if stop else "sell", f"{'Stopped' if stop else 'Sold'} {nm}"),
                             (o["exit_reason"] or "closed").replace("_", " "), o["mint"], o["name"], o["symbol"],
                             pnl=o["pnl_usd"], pct=o["pct"], tone="green" if (o["pnl_usd"] or 0) > 0 else "red"))
-                if o.get("a_kind") == "copy":
+                if o.get("a_kind") in ("copy", "small"):
                     A[-1]["label"] = _a_label(c.s, o); A[-1]["mode"] = "LIVE"
         try:
             for a in c.db.rows("SELECT * FROM gmgn_approvals WHERE ts>=? ORDER BY id DESC LIMIT 30", (since_t,)):
@@ -879,7 +879,7 @@ class Builder:
             v = self.gmgn_order(o) if o["status"] not in ACTIVE else dict(self.gmgn_order(o), **self.gmgn_position(o))
             ov = (o["reason"] or "").startswith("owner override")
             v.update(source="GMGN", open=o["status"] in ACTIVE, bypass=ov, score=None, tag="OVERRIDE" if ov else None)
-            if o["mode"] == "PAPER" or o.get("a_kind") == "copy":   # DECISION 92/93: copy / small labels
+            if o["mode"] == "PAPER" or o.get("a_kind") in ("copy", "small"):   # DECISION 92/93/96: copy / small labels
                 v["label"] = _a_label(c.s, o)
             if ov:
                 a = c.db.one("SELECT score FROM analyses WHERE mint=? ORDER BY id DESC LIMIT 1", (o["mint"],))
@@ -942,7 +942,7 @@ def _a_label(s, o):
         import copytrade
         return copytrade.label(s, o.get("mode") or "PAPER")
     if (o.get("mode") or "") != "PAPER":
-        return "LIVE"
+        return "LIVE · small" if k == "small" else "LIVE"
     return "PAPER · small" if k == "small" else "PAPER"
 
 

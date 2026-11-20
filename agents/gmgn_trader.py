@@ -371,9 +371,13 @@ def pick_paper_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | No
                      f"(bankroll ${s['gmgn.paper_bankroll_usd']:,.2f})")
 
 
-def small_open_count(db) -> int:
-    """DECISION 92: A PAPER positions that are not copies (the hybrid profile's small scanner trades)."""
+def small_open_count(db, mode: str = "PAPER") -> int:
+    """DECISION 92: A PAPER positions that are not copies (the hybrid profile's small scanner trades).
+    DECISION 96: mode='LIVE' counts the LIVE small rows (a_kind='small')."""
     ph = ','.join('?' * len(ACTIVE))
+    if mode == "LIVE":
+        return int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE mode='LIVE' AND a_kind='small' AND status IN ({ph})",
+                          ACTIVE)["n"])
     return int(db.one(f"SELECT COUNT(*) n FROM gmgn_orders WHERE mode='PAPER' AND COALESCE(a_kind,'')<>'copy' "
                       f"AND status IN ({ph})", ACTIVE)["n"])
 
@@ -1017,7 +1021,8 @@ class GmgnTrader:
 
     @staticmethod
     def _tag(o):
-        return "RE-ENTRY · " if (o.get("reason") or "") == REENTRY_REASON else ""
+        return (("RE-ENTRY · " if (o.get("reason") or "") == REENTRY_REASON else "")
+                + ("SMALL · " if o.get("a_kind") == "small" else ""))
 
     def open_label(self, mode=None):
         mode = mode or self.mode()
@@ -1194,9 +1199,9 @@ class GmgnTrader:
 
     async def _on_pass(self, mint, name, symbol, price, liq, score, reentry=None, mc=None, approved=False, from_dip=False):
         c, s = self.c, self.s
-        # DECISION 93: with the hybrid / copy profile the scanner side is PAPER-only even when gmgn.mode is LIVE
-        # (only the copies trade real SOL; a $5 GMGN round trip costs ~8-9% in fees and rent)
-        mode = "PAPER" if s["gmgn.profile"] in ("hybrid", "copy") else self.mode()
+        # DECISION 96 (owner 6:33 PM CT "i didn't want the small trades to be paper"): hybrid small trades follow
+        # gmgn.mode, so they are LIVE when A is LIVE (DECISION 93 had forced them to PAPER)
+        mode = self.mode()
         if c.db.one(f"SELECT id FROM gmgn_orders WHERE mint=? AND status IN ({','.join('?'*len(ACTIVE))})", (mint, *ACTIVE)):
             return None                                  # never a 2nd buy on an open one
         if mode == "LIVE" and _b_live(c.db, f"SELECT id FROM strat_b_orders WHERE mode='LIVE' AND mint=? AND status IN ({','.join('?'*len(ACTIVE))})", (mint, *ACTIVE)):
@@ -1216,17 +1221,29 @@ class GmgnTrader:
             return {"status": "refused", "reason": "halted"}
         import dip as _dip
         prof = s["gmgn.profile"]
-        if mode == "PAPER" and prof == "copy":
+        if prof == "copy":
             return None                                  # DECISION 92: copy-only profile: no scanner buys
-        small = mode == "PAPER" and prof == "hybrid"     # DECISION 92: tiny fixed-size scanner trades next to the copies
+        small = prof == "hybrid"                         # DECISION 92/96: tiny fixed-size scanner trades next to the copies
+        if small:
+            import copytrade
+            n_cp = len(copytrade.open_copies(c.db))
+            if n_cp:                                     # DECISION 96: full copy mode: no NEW small buys (open ones exit normally)
+                self._log(mode, mint, "small buy paused", f"full copy mode: {n_cp} copy position(s) open", name)
+                return {"status": "refused", "reason": f"full copy mode ({n_cp} copy open): small trades paused"}
         mx, op = int(s["gmgn.max_open"]), open_count(c.db, mode, "A") + (_dip.watching_count(c.db) if not from_dip else 0)
         if small:
-            mx, op = int(s["gmgn.small_max_open"]), small_open_count(c.db) + (_dip.watching_count(c.db) if not from_dip else 0)
+            mx, op = int(s["gmgn.small_max_open"]), small_open_count(c.db, mode) + (_dip.watching_count(c.db) if not from_dip else 0)
         if op >= mx:                                     # 5th buy: refused before anything else is spent
             why = f"{op}/{mx} GMGN positions already open (max {mx} at once)"
             self._refuse(mint, name, mode, 0, why)
             await self.push(f"{self.prefix()}Refused {name}: {why}", kind="gmgn_refused", mint=mint)
             return {"status": "refused", "reason": why}
+        if small and mode == "LIVE":                    # DECISION 96: A's own share only, checked with no GMGN call
+            why = await self._small_live_guard()
+            if why:
+                self._refuse(mint, name, mode, float(s["gmgn.small_trade_usd"]), why)
+                self._log("LIVE", mint, "small buy skipped", why)
+                return {"status": "refused", "reason": why}
         thr = float(s["gmgn.approve_above_mc_usd"] or 0)           # DECISION 53: big caps wait for the owner
         if mode == "LIVE" and thr > 0 and not approved and not from_dip:
             if mc is None:
@@ -1291,6 +1308,33 @@ class GmgnTrader:
         if gated:
             self._gate_log(mint, "buy skipped", name, gated)
             return {"status": "refused", "reason": gated}
+        if small:                                        # DECISION 96: LIVE small trade: fixed $5 from A's own share, sell check
+            why = await self._small_live_guard(sol_usd)
+            size, lamports, why2 = pick_small_size(s, float("inf"), sol_usd, self.pool_cap_usd(liq))
+            why = why or why2
+            if why is None and size + 1e-9 < float(s["gmgn.min_trade_usd"]):
+                why = f"small trade ${size:,.2f} is under gmgn.min_trade_usd ${float(s['gmgn.min_trade_usd']):,.2f}"
+            if why is None:
+                import copytrade
+                sc = await copytrade.sell_check(s, mint, size, net=c.net)
+                if not sc["ok"]:
+                    why = sc["why"]
+            if why:
+                self._refuse(mint, name, mode, size or 0, why)
+                self._log("LIVE", mint, "small buy skipped", why)
+                return {"status": "refused", "reason": why}
+            wallet = await self.wallet_lamports(fresh=True)
+            try:
+                check_caps(s, c.db, c.night, mode, size, lamports, sol_usd, wallet, strategy="A")
+                if small_open_count(c.db, "LIVE") >= int(s["gmgn.small_max_open"]):
+                    raise CapError(f"{small_open_count(c.db, 'LIVE')}/{int(s['gmgn.small_max_open'])} small positions already open")
+            except CapError as e:
+                self._refuse(mint, name, mode, size, str(e))
+                await self.push(f"GMGN · SMALL · Refused {name}: {e}", kind="gmgn_refused", mint=mint)
+                return {"status": "refused", "reason": str(e)}
+            body = buy_body(s, mint, lamports)
+            return await self.live_buy(mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits_text(s),
+                                       reentry=reentry, extra={"a_kind": "small", "quote": sc["why"]})
         wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every LIVE sizing
         # DECISION 71: size against A's share of the wallet (never more than the free SOL on chain)
         size, lamports, why = pick_size(s, strategy_free_lamports(s, c.db, "A", wallet), sol_usd, self.pool_cap_usd(liq))
@@ -1308,6 +1352,24 @@ class GmgnTrader:
         exits = exits_text(s)
         return await self.live_buy(mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits, reentry=reentry)
 
+    async def _small_live_guard(self, sol_usd=None) -> str | None:
+        """DECISION 96: a LIVE small buy needs A's OWN free share (never B's) to cover $5 + 1% fee + priority/tip + rent.
+        Wallet from the public RPC and SOL price from the cache / DexScreener, so a refusal makes no GMGN call."""
+        import copytrade
+        s = self.s
+        if sol_usd is None:
+            sol_usd = await copytrade.sol_px(self, self.c.net, gmgn_ok=False)
+        wallet = await copytrade.wallet_rpc(self.c.net)
+        if not sol_usd or wallet is None:
+            return "can't read the wallet balance or SOL price (public RPC / DexScreener)"
+        size = float(s["gmgn.small_trade_usd"])
+        need = buy_cost_lamports(s, int(math.floor(size / sol_usd * LAMPORTS)))
+        own = strategy_free_lamports(s, self.c.db, "A", wallet) or 0
+        if own < need:
+            return (f"insufficient balance: A's own share has {max(own, 0) / LAMPORTS:.4f} SOL free, a ${size:,.2f} small "
+                    f"trade needs {need / LAMPORTS:.4f} SOL with fees (small trades never borrow from B)")
+        return None
+
     async def try_quote(self, mint, lamports):
         if time.time() - self.plan_blocked_at < 600:
             return None, "not available on your GMGN plan (free); simulated at the DexScreener price"
@@ -1320,7 +1382,7 @@ class GmgnTrader:
                 return None, "not available on your GMGN plan (free); simulated at the DexScreener price"
             return None, f"quote failed ({e.error or e.status}); simulated at the DexScreener price"
 
-    async def live_buy(self, mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits, reentry=None):
+    async def live_buy(self, mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits, reentry=None, extra=None):
         c, s = self.c, self.s
         # last line of defence, right before the signed swap
         if self.halted() or self.mode() != "LIVE" or not s["gmgn.enabled"]:
@@ -1345,7 +1407,7 @@ class GmgnTrader:
         oid = self._row(ts=c.clock(), night=c.night, mode="LIVE", mint=mint, name=name, symbol=symbol, status="submitting",
                         reason=REENTRY_REASON if reentry is not None else None,
                         size_usd=size, sol_usd=sol_usd, lamports=lamports, entry_price=price, peak=price, last_price=price, last_liq=liq,
-                        body=json.dumps(body), conditions=json.dumps(body["condition_orders"]))
+                        body=json.dumps(body), conditions=json.dumps(body["condition_orders"]), **(extra or {}))
         try:
             r = await self.client.swap(body)
         except Exception as e:
@@ -1357,7 +1419,7 @@ class GmgnTrader:
             return {"status": st}
         self._upd(oid, status="pending", order_id=r.get("order_id"), tx=r.get("hash"), strategy_order_id=r.get("strategy_order_id"))
         self._log("LIVE", mint, "swap sent", r.get("order_id"), r.get("status"))
-        tag = "RE-ENTRY · " if reentry is not None else ""
+        tag = ("RE-ENTRY · " if reentry is not None else "") + ("SMALL · " if (extra or {}).get("a_kind") == "small" else "")
         why = f" · bounced +{reentry['bouncePct']:.0f}% off post-sell low" if reentry is not None and reentry.get("bouncePct") is not None else ""
         await self.push(f"GMGN · {tag}Buying {name} · ${size:,.2f} ({lamports / LAMPORTS:.4f} SOL){why} · {self.open_label('LIVE')}\n{exits}", mint=mint)
         return await self.settle(oid, r, polls=8, gap=5)

@@ -170,7 +170,41 @@ def status(c) -> dict:
             "lastDelayS": st.get("last_delay_s"), "seenTrades": int(st.get("trades") or 0),
             "mode": s["gmgn.mode"], "paperOnly": s["gmgn.mode"] != "LIVE", "everyN": int(s["copy.every_n"]),
             "maxPositionUsd": float(s["copy.max_position_usd"]), "flatUsd": float(s["copy.flat_usd"]),
-            "hisBuys": int(st.get("buys") or 0), "everyNPer": "coin", "smallLive": False}
+            "hisBuys": int(st.get("buys") or 0), "everyNPer": "coin",
+            "smallLive": s["gmgn.mode"] == "LIVE" and s["gmgn.profile"] == "hybrid",
+            "smallPaused": bool(n)}
+
+
+async def sol_px(trader, net, gmgn_ok=True):
+    """SOL/USD without a GMGN call when possible: the trader's cached price (< 10 min), else DexScreener's SOL pair,
+    else (gmgn_ok) GMGN gas_price."""
+    ts, v = trader._sol
+    if v and time.time() - ts < 600:
+        return float(v)
+    try:
+        from agents.scanner import pick_pair
+        import fields
+        px = pick_pair(await net.dex_tokens([SOL]), SOL)
+        px = float(fields.get(px, "priceUsd") or 0) if px else 0
+        if 20 < px < 5000:
+            return px
+    except Exception:
+        pass
+    if not gmgn_ok:
+        return float(v) if v else None
+    return await trader.sol_usd() or v
+
+
+async def wallet_rpc(net):
+    """Main wallet SOL balance from the public RPC (no GMGN call). None = unknown."""
+    import agents.gmgn_trader as A
+    try:
+        r = await net.rpc("getBalance", [A.MAIN_WALLET, {"commitment": "confirmed"}])
+    except Exception:
+        return None
+    if isinstance(r, dict):
+        r = r.get("value")
+    return int(r) if r is not None else None
 
 
 class CopyWatcher:
@@ -315,32 +349,10 @@ class CopyWatcher:
                 "his_pre_sol": round(ev["pre_sol"] / LAMPORTS, 6), "his_frac": round(ev["frac"], 6), **kw}
 
     async def _sol_px(self):
-        """SOL/USD without a GMGN call when possible: the trader's cached price (< 10 min), else DexScreener's SOL
-        pair, else GMGN gas_price."""
-        ts, v = self.t._sol
-        if v and time.time() - ts < 600:
-            return float(v)
-        try:
-            from agents.scanner import pick_pair
-            import fields
-            px = pick_pair(await self.c.net.dex_tokens([SOL]), SOL)
-            px = float(fields.get(px, "priceUsd") or 0) if px else 0
-            if 20 < px < 5000:
-                return px
-        except Exception:
-            pass
-        return await self.t.sol_usd() or v
+        return await sol_px(self.t, self.c.net)
 
     async def _wallet_rpc(self):
-        """Main wallet SOL balance from the public RPC (no GMGN call). None = unknown."""
-        import agents.gmgn_trader as A
-        try:
-            r = await self.c.net.rpc("getBalance", [A.MAIN_WALLET, {"commitment": "confirmed"}])
-        except Exception:
-            return None
-        if isinstance(r, dict):
-            r = r.get("value")
-        return int(r) if r is not None else None
+        return await wallet_rpc(self.c.net)
 
     def live_budget(self, wallet, need, sol_usd) -> dict:
         """DECISION 93 (owner 5:23 PM CT 'if it has to it can draw from b'): A's own 50% share first; if that can't

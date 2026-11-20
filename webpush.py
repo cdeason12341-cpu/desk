@@ -285,6 +285,10 @@ def render(kind: str, text: str, mint: str | None = None, ctx=None) -> dict | No
         t = first.replace("PAPER · ", "").replace("GMGN · ", "")
         re_entry = t.startswith("RE-ENTRY · ")
         t = t.replace("RE-ENTRY · ", "")
+        small = "SMALL · " in t                          # DECISION 96: LIVE small scanner trade
+        t = t.replace("SMALL · ", "")
+        if small:
+            label = "LIVE small"
         label = "PAPER" if paper else "LIVE"
         tag = f"trade-{mint}" if mint else None
         if paper:                                        # GMGN paper fills: "Sold X · reason · +$1 (+2%)"

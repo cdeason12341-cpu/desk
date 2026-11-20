@@ -23,7 +23,7 @@ def who(kind: str, text: str) -> str:
 
 
 _TAGS = ("STRATEGY B · PAPER · ", "B LIVE · ", "B PAPER · ", "PAPER · GMGN · ", "GMGN · ", "PAPER · ", "RE-ENTRY · ",
-         "🔁 RE-ENTRY · ", "OVERRIDE · ", "BYPASS · ")
+         "🔁 RE-ENTRY · ", "OVERRIDE · ", "BYPASS · ", "SMALL · ")
 
 
 def strip_tags(first: str) -> tuple[str, list[str]]:
@@ -39,6 +39,8 @@ def strip_tags(first: str) -> tuple[str, list[str]]:
                     flags.append("paper")
                 if "RE-ENTRY" in tg:
                     flags.append("re-entry")
+                if tg == "SMALL · ":
+                    flags.append("small")
     return t.strip(), flags
 
 
@@ -115,6 +117,8 @@ def headline(kind: str, text: str) -> tuple[str, str]:
         title = f"{w} {act}"
     if "paper" in flags:
         title += " · paper"
+    if "small" in flags:                                 # DECISION 96: A's LIVE $5 hybrid scanner trades
+        title += " · small"
     if "re-entry" in flags and "re-entry" not in title:
         title += " · re-entry"
     if "L8 skipped" in (text or "") and "L8 skipped" not in title:

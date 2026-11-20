@@ -1029,3 +1029,29 @@ Owner 2026-11-19 5:46 PM CT: "make sure the app gives a different notification l
 - App feed / activity: copy rows read `🔁 Copied buy · X`, `🔁 Copied sell · X`, `🔁 Copy stop · X`,
   `🔁 Copy skipped · X`, with the `LIVE · copying 9s4ji` / `PAPER · copying 9s4ji` badge. App shell desk-shell-v41.
 - Telegram `copy test` (owner chat only) sends a sample `🔁 Copied buy · TEST` push; nothing is bought.
+
+## 96. Hybrid small scanner trades run LIVE when A is LIVE
+
+Owner 2026-11-19 6:33 PM CT: "Also on a i didn't want the small trades to be paper". Replaces the DECISION 93 rule
+that forced hybrid scanner trades to PAPER.
+
+- `gmgn.profile hybrid` scanner buys now follow `gmgn.mode`: LIVE when A is LIVE. They are still a fixed
+  `gmgn.small_trade_usd` ($5), at most `gmgn.small_max_open` (2) LIVE small positions (`a_kind='small'`), under A's
+  normal scanner / auditor / analyst / approval / dip rules plus the Jupiter can-it-sell check, A's per-trade cap,
+  night tickets and `gmgn.max_open`. They go through `live_buy` with A's normal exits: GMGN server-side stop
+  (−50%, grace −50% for 5 min), desk take-profit trail armed at +20%, 20% trail, never below +5% net after fees, surge
+  and timeout as for any A LIVE row.
+- Full copy priority ("until this guy buys then it goes into full copy"): while any copy position is open, NEW small
+  buys are paused (logged `small buy paused`, no row, no push); open small trades keep their own exits.
+- Money: small buys use only A's own free share (`gmgn.live_wallet_share_pct` 50%), never B's. Before approval, dip
+  watch or any GMGN request the desk reads the wallet from the public RPC and the SOL price from the cache or
+  DexScreener; if A's own share can't cover $5 + 1% fee + priority/tip + token-account rent the buy is refused cleanly
+  with no GMGN call. Only copy buys may borrow B's unused share (DECISION 93).
+- Minimums: `gmgn.min_trade_usd` is $1; GMGN has already filled A LIVE buys of $3.44, $3.50 and $5.07 (#10, #14, #92),
+  so $5 (~0.068 SOL) clears it. Fees: the chain entry price includes the buy's 1% fee, priority/tip and rent, and
+  the trail / surge net floor subtracts the 1% sell fee and the sell priority/tip, so a $5 trail exit needs about
+  +7.6% over the fee-inclusive entry and lands at >= +5% net (tested). The −50% stop can still sell at a loss.
+- App / pushes: LIVE small rows show `LIVE · small`, count in A's real P&L (since the 5:44 PM CT reset), and their
+  Telegram / phone pushes read "Strat A bought X $5.00 · small" (tag `trade-<mint>`), separate from the
+  `🔁 Copied buy · A` copy pushes. The copy status line says whether small trades are LIVE and paused. App shell
+  desk-shell-v42. B, FOMO and the 50/50 split are unchanged.

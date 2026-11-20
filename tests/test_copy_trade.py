@@ -239,6 +239,7 @@ def live(monkeypatch, wallet_sol=4.0, **kw):
     c, clock, t, w, ch, calls = hybrid(monkeypatch, **kw)
     c.s.set("gmgn.mode", "LIVE", source="test", force=True)
     t.client.confirm = True
+    t.client.wallet_sol = wallet_sol                 # GMGN user_info agrees with the RPC balance
     c.net.pairs[copytrade.SOL] = pair(copytrade.SOL, price=70.0, liq=5_000_000, name="Wrapped SOL", symbol="SOL")
     bal = {"sol": int(wallet_sol * L), "tok": {}}
     his_sigs = c.net.rpc_map["getSignaturesForAddress"]
@@ -344,17 +345,47 @@ def test_live_borrows_b_unused_share_keeps_one_b_buy(monkeypatch):
     assert "insufficient balance" in r["reason"] and "for one B buy" in r["reason"]
 
 
-def test_live_small_scanner_stays_paper_and_watch_skips_copy_rows(monkeypatch):
+def test_live_small_scanner_trades_are_live_own_share_only(monkeypatch):
+    # DECISION 96: hybrid small trades are LIVE when A is LIVE: $5, A's normal exits, A's own share only
+    import asyncio
+    from tests.test_gmgn import _nosleep
     c, clock, t, w, ch, bal = live(monkeypatch)
-    r = run(t.on_pass("Sm01" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))
-    o = c.db.one("SELECT * FROM gmgn_orders WHERE id=?", (r["id"],))
-    assert r["status"] == "paper" and o["mode"] == "PAPER" and o["a_kind"] == "small" and o["size_usd"] == 5.0
-    assert not swaps(t)
+    monkeypatch.setattr(asyncio, "sleep", _nosleep)
+    m = "Sm01" + "1" * 36 + "pump"
+    r = run(t.on_pass(m, "S", "S", 1.0, 50000, 80))
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (m,))
+    assert o["mode"] == "LIVE" and o["a_kind"] == "small" and o["size_usd"] == 5.0 and o["status"] == "open"
+    b = swaps(t)
+    assert len(b) == 1 and abs(int(b[0]["input_amount"]) - int(5 / 70 * L)) <= 1
+    assert b[0]["condition_orders"][0]["order_type"] == "loss_stop"          # A's normal GMGN stop
+    assert o["no_surge"] in (0, None) and t._trail_rows() and t._trail_rows()[0]["id"] == o["id"]   # A's desk trail
+    assert _a_label(c.s, o) == "LIVE · small"
+    # max 2 small open
+    m2, m3 = "Sm02" + "1" * 36 + "pump", "Sm03" + "1" * 36 + "pump"
+    assert run(t.on_pass(m2, "S2", "S", 1.0, 50000, 80))["status"] == "open"
+    r3 = run(t.on_pass(m3, "S3", "S", 1.0, 50000, 80))
+    assert r3["status"] == "refused" and "2/2" in r3["reason"]
+
+
+def test_live_small_refused_without_gmgn_call_and_never_borrows_b(monkeypatch):
+    # 0.17 SOL wallet, 50/50: A's own share ~0.075 SOL can't cover $5 (~0.074 + 1% + 0.0012 + 0.0021 SOL); the wallet
+    # as a whole could, but small trades never borrow from B
+    c, clock, t, w, ch, bal = live(monkeypatch, wallet_sol=0.17)
+    n0 = len(t.client.calls)
+    r = run(t.on_pass("Sm09" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))
+    assert r["status"] == "refused" and "never borrow from B" in r["reason"]
+    assert len(t.client.calls) == n0
+
+
+def test_live_watch_skips_copy_rows_and_small_paused_in_full_copy(monkeypatch):
+    c, clock, t, w, ch, bal = live(monkeypatch)
     clock.t += 5
     ch.add(tx("b1", 100 * L, 99 * L, 0, 10), clock.t)
     run(w.poll_once())
     o = c.db.one("SELECT * FROM gmgn_orders WHERE a_kind='copy'")
     assert o["mode"] == "LIVE" and t._trail_rows() == []
+    r = run(t.on_pass("Sm01" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))
+    assert r["status"] == "refused" and "full copy mode" in r["reason"] and not [x for x in swaps(t) if x["output_token"] != MT]
     seen = []
 
     async def hook(o, *a):
@@ -387,16 +418,20 @@ def test_copy_rows_skip_scanner_exits_keep_backstop(monkeypatch):
 def test_hybrid_small_scanner_trades(monkeypatch):
     c, clock, t, w, ch, calls = hybrid(monkeypatch)
     run(w.poll_once())
-    ch.add(tx("b1", 100 * L, 90 * L, 0, 10), clock.t)
-    run(w.poll_once())                                              # one copy open: does not take a small slot
-    mints = [f"Sm{i:02d}" + "1" * 36 + "pump" for i in range(3)]
-    res = [run(t.on_pass(m, f"S{i}", "S", 1.0, 50000, 80)) for i, m in enumerate(mints)]
+    mints = [f"Sm{i:02d}" + "1" * 36 + "pump" for i in range(4)]
+    res = [run(t.on_pass(m, f"S{i}", "S", 1.0, 50000, 80)) for i, m in enumerate(mints[:3])]
     assert [r["status"] for r in res] == ["paper", "paper", "refused"]
     assert "2/2" in res[2]["reason"]
     small = c.db.rows("SELECT * FROM gmgn_orders WHERE a_kind='small' AND status='open'")
     assert len(small) == 2 and all(o["size_usd"] == 5.0 for o in small)
     assert small_open_count(c.db) == 2
-    assert sum(1 for x in calls if x[0] == copytrade.USDC) >= 3     # Jupiter check on the copy and each small buy
+    assert sum(1 for x in calls if x[0] == copytrade.USDC) >= 2     # Jupiter check on each small buy
+    # DECISION 96: once he buys and a copy is open, NEW small buys pause; the open small ones keep their exits
+    c.db.x("UPDATE gmgn_orders SET status='closed' WHERE a_kind='small'")
+    ch.add(tx("b1", 100 * L, 90 * L, 0, 10), clock.t)
+    run(w.poll_once())
+    r = run(t.on_pass(mints[3], "S3", "S", 1.0, 50000, 80))
+    assert r["status"] == "refused" and "full copy mode" in r["reason"]
 
 
 def test_hybrid_small_unsellable_skipped(monkeypatch):
@@ -418,9 +453,9 @@ def test_copy_profile_no_scanner_and_scanner_profile_unchanged(monkeypatch):
 def test_publisher_labels_and_status(monkeypatch):
     c, clock, t, w, ch, _ = hybrid(monkeypatch)
     run(w.poll_once())
+    run(t.on_pass("Sm01" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))     # small first: paused once a copy is open
     ch.add(tx("b1", 100 * L, 90 * L, 0, 10), clock.t)
     run(w.poll_once())
-    run(t.on_pass("Sm01" + "1" * 36 + "pump", "S", "S", 1.0, 50000, 80))
     b = Builder(DeskStub(c, t))
     g = b.gmgn()
     assert g["copy"]["state"] == "full copy" and g["copy"]["name"] == "himOthy" and g["copy"]["paperOnly"]
@@ -431,6 +466,7 @@ def test_publisher_labels_and_status(monkeypatch):
     tr = b.trades()
     assert {r.get("label") for r in tr["paper"]["open"]} >= {"PAPER · copying himOthy", "PAPER · small"}
     assert _a_label(c.s, {"mode": "LIVE"}) == "LIVE"
+    assert _a_label(c.s, {"mode": "LIVE", "a_kind": "small"}) == "LIVE · small"
     blob = json.dumps(g)
     assert "copy_src" not in blob and "sell_check" not in blob
 
@@ -489,3 +525,27 @@ def test_wallet_swap_rebaselines(monkeypatch):
     c.s.set("copy.wallet", "9s4ji7MRh6xx9PVx7D4by8YjpHMfPVtHfYuMUy8VaTTp", source="test")
     assert run(w.poll_once()) == "baseline"
     assert c.db.one("SELECT COUNT(*) n FROM gmgn_orders")["n"] == 0
+
+
+def test_small_5_usd_net_floor_covers_round_trip_fees():
+    # DECISION 96: on a $5 LIVE buy the chain entry already includes the 1% buy fee, priority/tip and rent; the trail's
+    # net floor adds the 1% sell fee and the sell priority/tip, so a trail exit is >= +5% net after the round trip
+    import agents.gmgn_trader as A
+    c, _, _ = trader(**{"risk.trail_floor_pct": 5})
+    s = c.s
+    lam = int(5 / 70 * L)
+    sol_in = A.buy_cost_lamports(s, lam) / L                         # ~0.0764 SOL incl. 1% fee + 0.0012 + 0.0021 rent
+    tok = 1000.0
+    o = {"entry_price": sol_in / tok * 70, "entry_src": "chain", "lamports": lam, "sol_usd": 70.0, "size_usd": 5.0,
+         "audit": None, "tx": None}
+    floor_px = A.trail_net_floor_price(s, o)
+    assert floor_px > o["entry_price"] * 1.07                         # ~+7.6% over the fee-inclusive entry
+    assert A.trail_net_ok(s, o, floor_px * 1.0001) and not A.trail_net_ok(s, o, floor_px * 0.99)
+    out = A.trail_expected_sol_out(s, o, floor_px)
+    assert out >= A.trail_sol_in(s, o) * 1.05 - 1e-9
+    assert "small" in notif_label_title("GMGN · SMALL · Buying Fiona · $5.00 (0.0714 SOL) · 1/4 open")
+
+
+def notif_label_title(text):
+    import notif_label
+    return notif_label.headline("gmgn", text)[1]
