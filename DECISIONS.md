@@ -1055,3 +1055,13 @@ that forced hybrid scanner trades to PAPER.
   Telegram / phone pushes read "Strat A bought X $5.00 · small" (tag `trade-<mint>`), separate from the
   `🔁 Copied buy · A` copy pushes. The copy status line says whether small trades are LIVE and paused. App shell
   desk-shell-v42. B, FOMO and the 50/50 split are unchanged.
+
+## DECISION 97 — LP-lock check off 30 min for A's $5 trades; B research keeps its own LP guard (6:42 PM CT, 2026-11-19)
+Owner: "Its 5 dollar trades so turn that liquidity check off for 30 mins and let's see."
+- The auditor now records the numeric `lpLockedPct` on every audit result (still fails "no data: liquidity" if
+  RugCheck has no lock figure, so a missing value never passes).
+- B research enforces its own `strat_b.rs_min_lp_locked_pct` (default 99) in `static_check`: a missing or <99% lock is
+  skipped with `lp unlocked (<99%): …`. So `auditor.min_lp_locked_pct` 0 only loosens A; B is unaffected (tested).
+- A's LIVE $5 small trades still run every other auditor layer and the Jupiter can-it-sell check. Each logs
+  `small LP …` and its quote carries `LP X% locked (UNLOCKED)` when the lock is below 99%.
+- `auditor.min_lp_locked_pct` set 99 → 0 on the droplet (hot-loaded, no restart); revert to 99 after 30 minutes.

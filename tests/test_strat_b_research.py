@@ -42,6 +42,7 @@ def _offer(c, clock, sb, mint=M, src=None, **audit):
         scan["b_source"] = src
     a = _audit(**{k: v for k, v in audit.items() if k in ("top10", "holders", "bundle_pct")})
     a.update({k: v for k, v in audit.items() if k not in ("top10", "holders", "bundle_pct")})
+    a.setdefault("lpLockedPct", 100.0)               # DECISION 97: the auditor now records the LP lock
     sb.offer(scan, a)
     return c.db.one("SELECT * FROM strat_b_watch WHERE mint=?", (mint,))
 
@@ -373,3 +374,17 @@ def test_b_profit_reset_keeps_history():
     assert all(b["pnlUsd"] == 0 and b["trades"] == 0 for b in sc["research"]["books"])
     assert pnl_since.b_live(c.db, c.s, c.night)["pnlUsd"] == 0
     assert c.db.one("SELECT COUNT(*) n FROM strat_b_orders")["n"] == 2          # history kept
+
+
+def test_research_rejects_unlocked_lp_even_with_auditor_lp_check_off(jup):
+    # DECISION 97 (owner 6:42 PM CT: LP check off 30 min for A's $5 trades): B keeps its own >= 99% LP-lock guard
+    c, clock, sb = _rsb(**{"auditor.min_lp_locked_pct": 0})
+    assert c.s["strat_b.rs_min_lp_locked_pct"] == 99.0
+    w = _offer(c, clock, sb, mint=M, lpLockedPct=0.0)
+    assert w["status"] == "skipped" and "lp unlocked (<99%)" in w["reason"]
+    w = _offer(c, clock, sb, mint=M2, lpLockedPct=None)
+    assert w["status"] == "skipped" and "lock unknown" in w["reason"]
+    assert _offer(c, clock, sb, mint="Ok333333333333333333333333333333333333pump", lpLockedPct=100.0)["status"] == "watching"
+    assert R.static_check(c.s, {"lpLockedPct": 50.0}) == "lp unlocked (<99%): 50% locked"
+    assert R.static_check(c.s, {"lpLockedPct": None}) == "lp unlocked (<99%): lock unknown"
+    assert R.static_check(c.s, {"lpLockedPct": 100.0}) is None

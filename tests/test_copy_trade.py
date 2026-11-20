@@ -549,3 +549,18 @@ def test_small_5_usd_net_floor_covers_round_trip_fees():
 def notif_label_title(text):
     import notif_label
     return notif_label.headline("gmgn", text)[1]
+
+
+def test_a_small_live_accepts_unlocked_lp_when_auditor_lp_check_off(monkeypatch):
+    # DECISION 97: with auditor.min_lp_locked_pct 0, A's $5 LIVE small trade still buys an unlocked-LP coin and tags it
+    import asyncio
+    from tests.test_gmgn import _nosleep
+    c, clock, t, w, ch, bal = live(monkeypatch, **{"auditor.min_lp_locked_pct": 0})
+    monkeypatch.setattr(asyncio, "sleep", _nosleep)
+    m = "Sm05" + "1" * 36 + "pump"
+    c.db.x("INSERT INTO audits(ts,mint,passed,reason,layer,json,night) VALUES(?,?,?,?,?,?,?)",
+           (clock.t, m, 1, None, 9, json.dumps({"passed": True, "lpLockedPct": 0.0}), c.night))
+    r = run(t.on_pass(m, "S", "S", 1.0, 50000, 80))
+    o = c.db.one("SELECT * FROM gmgn_orders WHERE mint=?", (m,))
+    assert o["mode"] == "LIVE" and o["a_kind"] == "small" and o["status"] == "open"
+    assert "LP 0% locked (UNLOCKED)" in o["quote"] and "Jupiter sell route ok" in o["quote"]

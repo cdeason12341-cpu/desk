@@ -247,6 +247,7 @@ class Auditor:
         self._acct_cache = cache          # test hook: clear after layer 4 to exercise L8's own no-data path
         bundled = None
         bundle_pct = None
+        lp_locked = None                                 # DECISION 97: numeric lpLockedPct for B's own LP guard / A's trial tag
         raw_log = []
 
         async def report():
@@ -360,6 +361,7 @@ class Auditor:
                     if locked is None:
                         raise Red("no data: liquidity", "rugcheck")
                     raw_log.append(f"lpLockedPct={locked}")
+                    lp_locked = float(locked)
                     if float(locked) < s["auditor.min_lp_locked_pct"]:
                         raise Red("liquidity unlocked", "rugcheck")
                     base_liq = (scan or {}).get("liquidityUsd") or coin.get("liq_at_scan")
@@ -431,6 +433,7 @@ class Auditor:
         out["layers"] = [{k: l[k] for k in ("n", "name", "pass", "value", "source")} for l in layers]
         out["bundled"] = bundled
         out["bundle_pct"] = None if bundle_pct is None else round(bundle_pct, 4)
+        out["lpLockedPct"] = lp_locked
         mi = cache.get("mi")                             # DECISION 91: Token-2022 extensions for B research (no extra call)
         out["token_program"] = fields.get(mi, "value.owner") if mi else None
         _ext = (fields.get(mi, "value.data.parsed.info.extensions") if mi else None) or []

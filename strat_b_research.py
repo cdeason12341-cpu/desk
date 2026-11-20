@@ -71,6 +71,13 @@ def static_check(s, audit, src=None) -> str | None:
         return "research profile buys only fresh scanner + auditor passes (no older-coin feed)"
     if audit.get("b_block"):
         return audit["b_block"]
+    need = float(s["strat_b.rs_min_lp_locked_pct"] or 0)    # DECISION 97: B's own LP-lock guard, independent of the auditor's
+    if need > 0:
+        lp = num(audit.get("lpLockedPct"))
+        if lp is None:
+            return f"lp unlocked (<{need:g}%): lock unknown"
+        if lp < need:
+            return f"lp unlocked (<{need:g}%): {lp:g}% locked"
     bp = num(audit.get("bundle_pct"), 0.0) or 0.0
     if bp > s["strat_b.max_bundle_pct"]:
         return f"bundled wallets hold {bp:g}% > {s['strat_b.max_bundle_pct']:g}% (bundled launch)"

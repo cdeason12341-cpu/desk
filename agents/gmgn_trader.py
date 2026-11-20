@@ -371,6 +371,16 @@ def pick_paper_size(s, free_usd: float, sol_usd: float, pool_cap_usd: float | No
                      f"(bankroll ${s['gmgn.paper_bankroll_usd']:,.2f})")
 
 
+def audit_lp_locked(db, mint):
+    """lpLockedPct from the latest audit of this mint (DECISION 97), or None."""
+    try:
+        r = db.one("SELECT json FROM audits WHERE mint=? ORDER BY id DESC LIMIT 1", (mint,))
+        v = json.loads(r["json"]).get("lpLockedPct") if r else None
+        return None if v is None else float(v)
+    except Exception:
+        return None
+
+
 def small_open_count(db, mode: str = "PAPER") -> int:
     """DECISION 92: A PAPER positions that are not copies (the hybrid profile's small scanner trades).
     DECISION 96: mode='LIVE' counts the LIVE small rows (a_kind='small')."""
@@ -1332,9 +1342,12 @@ class GmgnTrader:
                 self._refuse(mint, name, mode, size, str(e))
                 await self.push(f"GMGN · SMALL · Refused {name}: {e}", kind="gmgn_refused", mint=mint)
                 return {"status": "refused", "reason": str(e)}
+            lp = audit_lp_locked(c.db, mint)              # DECISION 97: tag the LP lock for the owner's 30-min trial
+            lp_txt = ("LP lock unknown" if lp is None else f"LP {lp:g}% locked" + (" (UNLOCKED)" if lp < 99 else ""))
+            self._log("LIVE", mint, "small LP", lp_txt, f"auditor.min_lp_locked_pct={s['auditor.min_lp_locked_pct']:g}", name)
             body = buy_body(s, mint, lamports)
             return await self.live_buy(mint, name, symbol, price, liq, size, sol_usd, lamports, body, exits_text(s),
-                                       reentry=reentry, extra={"a_kind": "small", "quote": sc["why"]})
+                                       reentry=reentry, extra={"a_kind": "small", "quote": f"{sc['why']} · {lp_txt}"})
         wallet = await self.wallet_lamports(fresh=True)          # /v1/user/info before every LIVE sizing
         # DECISION 71: size against A's share of the wallet (never more than the free SOL on chain)
         size, lamports, why = pick_size(s, strategy_free_lamports(s, c.db, "A", wallet), sol_usd, self.pool_cap_usd(liq))

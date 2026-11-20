@@ -255,6 +255,7 @@ SPECS: list[Spec] = [
     _s("strat_b.rs_trail_floor_pct", 8.0, 0, 100, aliases=("research trail floor", "research profit floor"), fmt="+{v:g}%"),
     _s("strat_b.rs_protocol_fee_pct", 1.25, 0, 10, aliases=("research protocol fee",), fmt="{v:g}%"),
     _s("strat_b.rs_sell_check", True, aliases=("research sell check", "can it sell check")),
+    _s("strat_b.rs_min_lp_locked_pct", 99.0, 0, 100, aliases=("research lp locked",), fmt="{v:g}%"),   # DECISION 97: B's own LP guard
     _s("strat_b.rs_book_small_usd", 34.0, 1, 1_000_000, aliases=("research small book",), fmt="${v:,.2f}"),
     _s("strat_b.rs_book_large_usd", 500.0, 1, 1_000_000, aliases=("research large book",), fmt="${v:,.2f}"),
     # DECISION 92: Strategy A profile. scanner = the old A (default, restorable); copy = only copy a wallet's trades;
